@@ -1,0 +1,11 @@
+psycopg[binary]>=3.2
+PyMySQL>=1.1
+pyodbc>=5.1
+insightface==2.1
+onnxruntime==1.29.0
+faiss-cpu==1.15.1
+numpy>=2.0,<3
+opencv-python>=4.10
+Pillow>=10.0
+psutil>=6.0
+certifi>=2024.2.2
