@@ -13,7 +13,7 @@
 # torch и CUDA для старых GPU:          uv pip install --system "onnxruntime-gpu==1.22.0"
 
 # torch и CUDA для новых GPU:           uv pip install "torch==2.14.0+cu132" --torch-backend=cu132
-# torch и CUDA для старых GPU:          uv pip install --system "onnxruntime-gpu==1.29.0"
+# torch и CUDA для новых GPU:           uv pip install --system "onnxruntime-gpu==1.29.0"
 
 # ВАЖНО для Windows + CUDA:
 # PyTorch загружается раньше ONNX Runtime. Это позволяет ONNX Runtime

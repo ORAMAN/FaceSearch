@@ -420,7 +420,7 @@ def generate_html_gallery(
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Face Search Results</title>
-
+<link rel="icon" href="https://raw.githubusercontent.com/ORAMAN/FaceSearch/refs/heads/main/icons/SearchFace.ico" type="image/x-icon">
 <style>
 * {{ box-sizing: border-box; }}
 
