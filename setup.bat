@@ -295,16 +295,54 @@ goto :syntax
 :verify_cpu
 echo.
 echo [STEP] Проверка CPU-стека и InsightFace ...
+
+REM === Автоматическая установка VC Redistributable ===
+echo [INFO] Проверяем наличие Microsoft Visual C++ Redistributable...
+"%SystemRoot%\System32\reg.exe" query "HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" /v "Installed" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [INFO] VC Redistributable не найден. Устанавливаю x64...
+    call :install_vc_redist
+)
+if errorlevel 1 (
+    echo [ERROR] Не удалось установить VC Redistributable.
+    pause
+    exit /b 1
+)
+
+echo [STEP] Запуск проверки...
+
 python -c "import sys, torch, onnxruntime as ort, faiss; print('[CHECK] Torch', torch.__version__); print('[CHECK] ORT', ort.__version__); print('[CHECK] ORT providers', ort.get_available_providers()); assert 'CPUExecutionProvider' in ort.get_available_providers()"
+
 if errorlevel 1 (
     echo [ERROR] CPU-проверка не пройдена.
     pause
     exit /b 1
 )
+
 python -c "from insightface.app import FaceAnalysis; app=FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider']); app.prepare(ctx_id=-1, det_size=(640,640), det_thresh=0.5); print('[CHECK] InsightFace CPU OK')"
+
 if errorlevel 1 (
     echo [ERROR] InsightFace CPU verification failed.
     pause
+    exit /b 1
+)
+goto :syntax
+
+:install_vc_redist
+echo [INFO] Скачиваем VC Redistributable x64...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "irm https://aka.ms/vs/17/release/vc_redist.x64.exe -OutFile vc_redist.x64.exe"
+
+echo [INFO] Запускаем установку (может потребоваться перезагрузка)...
+start /wait "" vc_redist.x64.exe /install /quiet /norestart
+
+if %errorlevel% equ 0 (
+    echo [OK] VC Redistributable успешно установлен.
+    del vc_redist.x64.exe
+    exit /b 0
+) else (
+    echo [WARN] Установка VC Redistributable завершилась с кодом %errorlevel%.
+    del vc_redist.x64.exe
     exit /b 1
 )
 
