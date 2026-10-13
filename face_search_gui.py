@@ -19,7 +19,6 @@
 # PyTorch загружается раньше ONNX Runtime. Это позволяет ONNX Runtime
 # использовать совместимые CUDA/cuDNN DLL из установленного PyTorch не ставим импорт ниже.
 
-
 from __future__ import annotations
 
 import argparse
@@ -4997,6 +4996,10 @@ class FaceSearchGUI:
         self.use_json_metadata_check.config(state=state)
         self.create_crop_files_check.config(state=state)
         self.use_local_crops_check.config(state=state)
+        # Новая настройка перезаписи должна блокироваться вместе с остальными
+        # параметрами сканирования и индексации, чтобы флажок не менялся
+        # посреди операции после того, как worker уже прочитал его значение.
+        self.overwrite_existing_crops_check.config(state=state)
         # Не меняем параметры автоподстройки посреди активной операции:
         # выбранный режим потоков фиксируется при запуске задачи.
         self.auto_workers_check.config(state=state)
