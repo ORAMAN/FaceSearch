@@ -295,4 +295,32 @@ def initialize_schema(
             except Exception as exc:
                 print(f"Предупреждение создания уникального индекса: {exc}")
 
+    # Важно для массовой перезаписи CROP: до обработки каждого исходника
+    # программа ищет все его существующие faces в images. Без этих индексов
+    # SQLite просматривал сотни тысяч строк для каждого файла (N×M поиск).
+    # Частичные индексы компактны и подходят под точные WHERE-запросы проекта.
+    if backend == DB_TYPE_SQLITE:
+        source_lookup_indexes = (
+            """
+            CREATE INDEX IF NOT EXISTS idx_images_local_source_url
+            ON images(source_url)
+            WHERE source_type = 'local'
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_images_import_profile_url
+            ON images(profile_id, url_image)
+            WHERE source_type = 'import'
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_images_import_profile_source
+            ON images(profile_id, source_url)
+            WHERE source_type = 'import'
+            """,
+        )
+        for sql in source_lookup_indexes:
+            try:
+                conn.execute(sql)
+            except Exception as exc:
+                print(f"Предупреждение создания индекса поиска CROP: {exc}")
+
     conn.commit()
