@@ -1458,8 +1458,9 @@ def import_image_bundle(
     обязательно остаются на месте, чтобы их можно было восстановить кнопкой
     «Проверить CROP».
     """
-    # Без CROP исходники нельзя удалять: они нужны для последующего восстановления.
-    delete_source = bool(delete_source and create_crop_files)
+   
+    # delete_source = bool(delete_source and create_crop_files) # Без CROP исходники нельзя удалять: они нужны для последующего восстановления.
+    delete_source = bool(delete_source) # Удаление исходников определяется только настройкой пользователя.
 
     try:
         metadata = json.loads(json_path.read_text(encoding="utf-8"))
