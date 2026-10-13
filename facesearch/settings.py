@@ -41,6 +41,7 @@ def _load_gui_settings() -> dict[str, Any]:
         "delete_processed": False,
         "use_json_metadata": True,
         "create_crop_files": True,
+        "overwrite_existing_crops": False,
         "use_local_crops": True,
         "top_k": DEFAULT_TOP_K,
         "min_similarity": 43.0,
@@ -96,6 +97,10 @@ def _load_gui_settings() -> dict[str, Any]:
             settings["create_crop_files"] = _xml_bool(
                 node.findtext("create_crop_files"),
                 settings["create_crop_files"],
+            )
+            settings["overwrite_existing_crops"] = _xml_bool(
+                node.findtext("overwrite_existing_crops"),
+                settings["overwrite_existing_crops"],
             )
 
         node = root.find("search")
@@ -166,6 +171,9 @@ def _save_gui_settings_data(settings: dict[str, Any]) -> None:
     )
     ET.SubElement(node, "create_crop_files").text = (
         "true" if bool(settings.get("create_crop_files", True)) else "false"
+    )
+    ET.SubElement(node, "overwrite_existing_crops").text = (
+        "true" if bool(settings.get("overwrite_existing_crops", False)) else "false"
     )
 
     node = ET.SubElement(root, "search")
