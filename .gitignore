@@ -49,3 +49,7 @@ Desktop.ini
 
 # Служебные файлы macOS
 .DS_Store
+
+# HTML файлы
+*.html
+*.htm
