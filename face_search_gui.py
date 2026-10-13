@@ -1441,6 +1441,152 @@ def _face_crop_encoded(crop: np.ndarray) -> tuple[bytes, str]:
     return data, hashlib.sha256(data).hexdigest()
 
 
+def _find_existing_source_crop_rows(
+    conn: DatabaseConnection,
+    *,
+    source_type: str,
+    source_url: str | None = None,
+    profile_id: int | None = None,
+    url_image: str | None = None,
+    fallback_image_url: str | None = None,
+) -> list[tuple[int, str]]:
+    """Находит CROP-записи, относящиеся к тому же исходному изображению."""
+    if source_type == "local":
+        if not source_url:
+            return []
+        rows = conn.execute(
+            """
+            SELECT id, path
+            FROM images
+            WHERE source_type = 'local' AND source_url = ?
+            ORDER BY id
+            """,
+            (source_url,),
+        ).fetchall()
+    else:
+        if profile_id is None:
+            return []
+        if url_image:
+            rows = conn.execute(
+                """
+                SELECT id, path
+                FROM images
+                WHERE source_type = 'import'
+                  AND profile_id = ? AND url_image = ?
+                ORDER BY id
+                """,
+                (int(profile_id), url_image),
+            ).fetchall()
+        else:
+            # Если JSON не содержит url_image, старые записи могли хранить
+            # либо NULL/пустое значение, либо file://-ссылку в url_image.
+            # Разбиваем OR на два запроса, чтобы SQLite использовал оба новых
+            # составных индекса, а не сканировал все строки source_type='import'.
+            rows = conn.execute(
+                """
+                SELECT id, path
+                FROM images
+                WHERE source_type = 'import'
+                  AND profile_id = ?
+                  AND source_url = ?
+                  AND (url_image IS NULL OR url_image = '')
+                ORDER BY id
+                """,
+                (int(profile_id), source_url),
+            ).fetchall()
+            if fallback_image_url:
+                fallback_rows = conn.execute(
+                    """
+                    SELECT id, path
+                    FROM images
+                    WHERE source_type = 'import'
+                      AND profile_id = ? AND url_image = ?
+                    ORDER BY id
+                    """,
+                    (int(profile_id), fallback_image_url),
+                ).fetchall()
+                found = {int(row[0]): row for row in rows}
+                found.update({int(row[0]): row for row in fallback_rows})
+                rows = [found[key] for key in sorted(found)]
+
+    return [(int(row[0]), str(row[1] or "")) for row in rows]
+
+
+def _delete_source_crop_rows(
+    conn: DatabaseConnection, rows: list[tuple[int, str]]
+) -> None:
+    """Пакетно удаляет CROP-записи и embeddings в текущей транзакции."""
+    if not rows:
+        return
+    ids = [(int(image_id),) for image_id, _stored_path in rows]
+    # executemany переиспользует один cursor вместо создания cursor на каждую
+    # строку. Это особенно заметно при повторной обработке больших альбомов.
+    conn.executemany("DELETE FROM faces WHERE image_id = ?", ids)
+    conn.executemany("DELETE FROM images WHERE id = ?", ids)
+
+
+def _prepare_source_crop_overwrite(
+    conn: DatabaseConnection, rows: list[tuple[int, str]]
+) -> None:
+    """Освобождает SHA-256 старых строк, сохраняя их ID и записи images.
+
+    Частичный UNIQUE-индекс SQLite запрещает временные дубликаты SHA-256.
+    NULL выводит заменяемые строки из индекса до вычисления новых хэшей;
+    транзакция восстановит старые значения автоматически при rollback.
+    """
+    if rows:
+        conn.executemany(
+            "UPDATE images SET sha256 = NULL WHERE id = ?",
+            [(int(image_id),) for image_id, _stored_path in rows],
+        )
+
+
+def _cleanup_replaced_crop_files(
+    rows: list[tuple[int, str]], preserve_paths: list[Path] | None = None
+) -> None:
+    """Удаляет старые файлы CROP после успешной замены, не трогая исходники."""
+    crop_root = Path(CROP_DIR).resolve()
+    preserve = set()
+    for value in preserve_paths or []:
+        try:
+            preserve.add(Path(value).resolve())
+        except Exception:
+            pass
+
+    for _image_id, stored_path in rows:
+        if not stored_path:
+            continue
+        try:
+            path = _resolve_db_storage_path(stored_path).resolve()
+            # Удаляем только файлы внутри активного каталога CROP. Это не даст
+            # затронуть исходные фото при встрече с legacy-путём в БД.
+            path.relative_to(crop_root)
+            if path in preserve or not path.is_file():
+                continue
+            path.unlink()
+        except (OSError, ValueError, RuntimeError):
+            continue
+
+
+def _rollback_crop_file_writes(
+    created_files: list[Path], backups: dict[Path, bytes]
+) -> None:
+    """Откатывает изменения JPEG, в том числе если новый ID занял старый путь."""
+    backup_paths = {Path(path).resolve() for path in backups}
+    for path in created_files:
+        try:
+            if Path(path).resolve() not in backup_paths:
+                Path(path).unlink(missing_ok=True)
+        except OSError:
+            pass
+    for path, old_bytes in backups.items():
+        try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(old_bytes)
+        except OSError:
+            pass
+
+
 def import_image_bundle(
     conn: DatabaseConnection,
     app: FaceAnalysis,
@@ -1449,9 +1595,11 @@ def import_image_bundle(
     *,
     delete_source: bool = True,
     create_crop_files: bool = True,
+    overwrite_existing_crops: bool = False,
 ) -> dict[str, int | bool | str]:
 
     delete_source = bool(delete_source)
+    overwrite_existing_crops = bool(overwrite_existing_crops)
 
     try:
         metadata = json.loads(json_path.read_text(encoding="utf-8"))
@@ -1472,7 +1620,12 @@ def import_image_bundle(
 
     profile_id = _upsert_import_profile(conn, metadata)
     source_url = str(metadata.get("url_source") or "").strip() or None
-    image_url = str(metadata.get("url_image") or "").strip() or None
+    metadata_image_url = str(metadata.get("url_image") or "").strip() or None
+    image_url = metadata_image_url
+    try:
+        fallback_image_url = image_path.resolve().as_uri()
+    except (OSError, ValueError):
+        fallback_image_url = str(image_path.resolve())
     if not image_url and not create_crop_files:
         # Для последующего восстановления сохраняем локальный исходник как
         # file:// URL, не затирая source_url (ссылка на профиль/страницу).
@@ -1483,8 +1636,31 @@ def import_image_bundle(
 
     created = 0
     created_files: list[Path] = []
+    crop_file_backups: dict[Path, bytes] = {}
+    old_crop_rows = (
+        _find_existing_source_crop_rows(
+            conn,
+            source_type="import",
+            source_url=source_url,
+            profile_id=profile_id,
+            url_image=metadata_image_url,
+            fallback_image_url=fallback_image_url,
+        )
+        if overwrite_existing_crops
+        else []
+    )
+
+    old_crop_row_index = 0
+    updated_count = 0
+    added_count = 0
+    removed_count = 0
 
     try:
+        if old_crop_rows:
+            # Не удаляем старые images/faces. Сохраняем существующие ID и
+            # обновим строки на месте после успешного распознавания.
+            _prepare_source_crop_overwrite(conn, old_crop_rows)
+
         for face in valid_faces:
             bbox = face.bbox.astype(np.float32)
             crop_result = _safe_crop(image, bbox)
@@ -1504,55 +1680,75 @@ def import_image_bundle(
                 (sha256,),
             ).fetchone()
             if duplicate:
+                # Дубликат принадлежит другой записи. Старую строку источника
+                # оставляем незанятой; она будет удалена лишь если после полного
+                # сканирования для неё действительно не осталось лица.
                 continue
 
-            # Сначала резервируем ID. Фактический crop получает имя этого ID.
-            temp_name = f"pending_{threading.get_ident()}_{time.time_ns()}.jpg"
-            cur = conn.execute(
-                """
-                INSERT INTO images (
-                    path, filename, sha256, width, height, processed,
-                    source_type, source_url, url_image, profile_id, source_updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, 0, 'import', ?, ?, ?, ?)
-                """,
-                (
-                    temp_name,
-                    temp_name,
-                    sha256,
-                    int(crop.shape[1]),
-                    int(crop.shape[0]),
-                    source_url,
-                    image_url,
-                    profile_id,
-                    time.strftime("%Y-%m-%d %H:%M:%S"),
-                ),
-            )
-            image_id = int(cur.lastrowid)
+            embedding = np.asarray(face.normed_embedding, dtype=np.float32)
+            embedding_norm = float(np.linalg.norm(embedding))
+            if embedding_norm <= 0.0:
+                continue
+            embedding /= embedding_norm
 
-            bucket = ((image_id - 1) // 1000 + 1) * 1000
-            crop_dir = CROP_DIR / str(bucket)
-            crop_path = crop_dir / f"{image_id}.jpg"
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            if old_crop_row_index < len(old_crop_rows):
+                # Переиспользуем ID существующего CROP вместо DELETE + INSERT.
+                image_id = int(old_crop_rows[old_crop_row_index][0])
+                old_crop_row_index += 1
+                updated_count += 1
+                bucket = ((image_id - 1) // 1000 + 1) * 1000
+                crop_dir = CROP_DIR / str(bucket)
+                crop_path = crop_dir / f"{image_id}.jpg"
+                conn.execute(
+                    """
+                    UPDATE images
+                    SET path = ?, filename = ?, sha256 = ?, width = ?, height = ?,
+                        processed = 1, source_type = 'import', source_url = ?,
+                        url_image = ?, profile_id = ?, source_updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        _relative_crop_db_path(crop_path), crop_path.name, sha256,
+                        int(crop.shape[1]), int(crop.shape[0]), source_url,
+                        image_url, profile_id, timestamp, image_id,
+                    ),
+                )
+            else:
+                # Новое лицо: резервируем ID; фактический CROP получает имя ID.
+                added_count += 1
+                temp_name = f"pending_{threading.get_ident()}_{time.time_ns()}.jpg"
+                cur = conn.execute(
+                    """
+                    INSERT INTO images (
+                        path, filename, sha256, width, height, processed,
+                        source_type, source_url, url_image, profile_id, source_updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, 0, 'import', ?, ?, ?, ?)
+                    """,
+                    (
+                        temp_name, temp_name, sha256, int(crop.shape[1]),
+                        int(crop.shape[0]), source_url, image_url, profile_id, timestamp,
+                    ),
+                )
+                image_id = int(cur.lastrowid)
+                bucket = ((image_id - 1) // 1000 + 1) * 1000
+                crop_dir = CROP_DIR / str(bucket)
+                crop_path = crop_dir / f"{image_id}.jpg"
+                conn.execute(
+                    "UPDATE images SET path = ?, filename = ?, processed = 1 WHERE id = ?",
+                    (_relative_crop_db_path(crop_path), crop_path.name, image_id),
+                )
 
             if create_crop_files:
                 crop_dir.mkdir(parents=True, exist_ok=True)
-                crop_path.write_bytes(encoded)
+                if overwrite_existing_crops and crop_path.is_file():
+                    crop_file_backups.setdefault(crop_path, crop_path.read_bytes())
                 created_files.append(crop_path)
+                crop_path.write_bytes(encoded)
 
-            # Даже если файл пока не создан, в БД сразу записываем его
-            # ожидаемый путь — кнопка «Проверить CROP» увидит пропуск и создаст его.
-            relative_path = _relative_crop_db_path(crop_path)
-            conn.execute(
-                """
-                UPDATE images
-                SET path = ?, filename = ?, processed = 1
-                WHERE id = ?
-                """,
-                (relative_path, crop_path.name, image_id),
-            )
-
-            embedding = np.asarray(face.normed_embedding, dtype=np.float32)
-            embedding /= np.linalg.norm(embedding)
+            # При повторном сканировании embedding обновляется для того же ID.
+            conn.execute("DELETE FROM faces WHERE image_id = ?", (image_id,))
 
             # После crop координаты лица относятся уже к crop.
             crop_x1 = max(0.0, float(bbox[0]) - crop_left) * crop_scale
@@ -1584,14 +1780,14 @@ def import_image_bundle(
             )
             created += 1
 
+        if created > 0 and old_crop_row_index < len(old_crop_rows):
+            removed_count = len(old_crop_rows) - old_crop_row_index
+            _delete_source_crop_rows(conn, old_crop_rows[old_crop_row_index:])
+
         if created == 0:
             conn.rollback()
-            for path in created_files:
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-            if delete_source:
+            _rollback_crop_file_writes(created_files, crop_file_backups)
+            if delete_source and not overwrite_existing_crops:
                 try:
                     image_path.unlink()
                     json_path.unlink()
@@ -1600,18 +1796,20 @@ def import_image_bundle(
                     deleted = False
             else:
                 deleted = False
-            return {"faces": 0, "deleted": deleted, "message": "crop уже есть в БД"}
+            return {
+                "faces": 0, "deleted": deleted, "message": "crop уже есть в БД",
+                "updated": 0, "added": 0, "removed": 0,
+            }
 
         conn.commit()
 
     except Exception:
         conn.rollback()
-        for path in created_files:
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        _rollback_crop_file_writes(created_files, crop_file_backups)
         raise
+
+    if old_crop_rows:
+        _cleanup_replaced_crop_files(old_crop_rows, created_files)
 
     if delete_source:
         try:
@@ -1623,7 +1821,14 @@ def import_image_bundle(
     else:
         deleted = False
 
-    return {"faces": created, "deleted": deleted, "message": "ok"}
+    return {
+        "faces": created,
+        "deleted": deleted,
+        "message": "ok",
+        "updated": updated_count,
+        "added": added_count,
+        "removed": removed_count,
+    }
 
 
 
@@ -1634,6 +1839,7 @@ def process_local_image(
     *,
     delete_source: bool = False,
     create_crop_files: bool = True,
+    overwrite_existing_crops: bool = False,
 ) -> dict[str, int | bool | str]:
     """Сканирует локальную фотографию без JSON-метаданных.
 
@@ -1644,6 +1850,7 @@ def process_local_image(
     В images.source_url хранится file://-ссылка на исходник.
     """
     delete_source = bool(delete_source and create_crop_files)
+    overwrite_existing_crops = bool(overwrite_existing_crops)
     image_path = image_path.resolve()
 
     if not image_path.is_file():
@@ -1660,17 +1867,13 @@ def process_local_image(
 
     # Если этот исходник уже был обработан в режиме "без JSON",
     # не создаём новые дубли при повторном сканировании.
-    existing = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM images
-        WHERE source_type = 'local'
-          AND source_url = ?
-        """,
-        (source_url,),
-    ).fetchone()
+    existing_rows = _find_existing_source_crop_rows(
+        conn,
+        source_type="local",
+        source_url=source_url,
+    )
 
-    if existing and int(existing[0]) > 0:
+    if existing_rows and not overwrite_existing_crops:
         deleted = False
         if delete_source:
             try:
@@ -1707,8 +1910,17 @@ def process_local_image(
 
     created = 0
     created_files: list[Path] = []
+    crop_file_backups: dict[Path, bytes] = {}
+
+    existing_row_index = 0
+    updated_count = 0
+    added_count = 0
+    removed_count = 0
 
     try:
+        if overwrite_existing_crops and existing_rows:
+            _prepare_source_crop_overwrite(conn, existing_rows)
+
         for face in valid_faces:
             bbox = face.bbox.astype(np.float32)
             crop_result = _safe_crop(image, bbox)
@@ -1719,7 +1931,8 @@ def process_local_image(
             crop, crop_scale = _resize_crop_for_storage(crop)
             encoded, sha256 = _face_crop_encoded(crop)
 
-            # Не создаём одинаковый crop повторно.
+            # Не создаём одинаковый crop повторно; старые строки источника
+            # уже имеют sha256=NULL и исключены из частичного UNIQUE-индекса.
             duplicate = conn.execute(
                 "SELECT id FROM images WHERE sha256 = ? LIMIT 1",
                 (sha256,),
@@ -1727,70 +1940,69 @@ def process_local_image(
             if duplicate:
                 continue
 
-            temp_name = (
-                f"pending_{threading.get_ident()}_{time.time_ns()}.jpg"
-            )
-            cur = conn.execute(
-                """
-                INSERT INTO images (
-                    path, filename, sha256, width, height, processed,
-                    source_type, source_url, profile_id, source_updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, 0, 'local', ?, NULL, ?)
-                """,
-                (
-                    temp_name,
-                    temp_name,
-                    sha256,
-                    int(crop.shape[1]),
-                    int(crop.shape[0]),
-                    source_url,
-                    time.strftime("%Y-%m-%d %H:%M:%S"),
-                ),
-            )
-            image_id = int(cur.lastrowid)
-
-            bucket = ((image_id - 1) // 1000 + 1) * 1000
-            crop_dir = CROP_DIR / str(bucket)
-            crop_path = crop_dir / f"{image_id}.jpg"
-            if create_crop_files:
-                crop_dir.mkdir(parents=True, exist_ok=True)
-                crop_path.write_bytes(encoded)
-                created_files.append(crop_path)
-
-            # Путь регистрируется даже при отложенном создании файла.
-            relative_path = _relative_crop_db_path(crop_path)
-            conn.execute(
-                """
-                UPDATE images
-                SET path = ?, filename = ?, processed = 1
-                WHERE id = ?
-                """,
-                (
-                    relative_path,
-                    crop_path.name,
-                    image_id,
-                ),
-            )
-
-            embedding = np.asarray(
-                face.normed_embedding,
-                dtype=np.float32,
-            )
-            norm = np.linalg.norm(embedding)
-            if norm == 0:
-                conn.execute(
-                    "DELETE FROM images WHERE id = ?",
-                    (image_id,),
-                )
-                try:
-                    crop_path.unlink()
-                except OSError:
-                    pass
-                if created_files and created_files[-1] == crop_path:
-                    created_files.pop()
+            embedding = np.asarray(face.normed_embedding, dtype=np.float32)
+            norm = float(np.linalg.norm(embedding))
+            if norm <= 0.0:
                 continue
             embedding /= norm
+
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            if existing_row_index < len(existing_rows):
+                # Сохраняем ID CROP и обновляем строку images на месте.
+                image_id = int(existing_rows[existing_row_index][0])
+                existing_row_index += 1
+                updated_count += 1
+                bucket = ((image_id - 1) // 1000 + 1) * 1000
+                crop_dir = CROP_DIR / str(bucket)
+                crop_path = crop_dir / f"{image_id}.jpg"
+                conn.execute(
+                    """
+                    UPDATE images
+                    SET path = ?, filename = ?, sha256 = ?, width = ?, height = ?,
+                        processed = 1, source_type = 'local', source_url = ?,
+                        url_image = NULL, profile_id = NULL, source_updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        _relative_crop_db_path(crop_path), crop_path.name, sha256,
+                        int(crop.shape[1]), int(crop.shape[0]), source_url,
+                        timestamp, image_id,
+                    ),
+                )
+            else:
+                added_count += 1
+                temp_name = f"pending_{threading.get_ident()}_{time.time_ns()}.jpg"
+                cur = conn.execute(
+                    """
+                    INSERT INTO images (
+                        path, filename, sha256, width, height, processed,
+                        source_type, source_url, profile_id, source_updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, 0, 'local', ?, NULL, ?)
+                    """,
+                    (
+                        temp_name, temp_name, sha256, int(crop.shape[1]),
+                        int(crop.shape[0]), source_url, timestamp,
+                    ),
+                )
+                image_id = int(cur.lastrowid)
+                bucket = ((image_id - 1) // 1000 + 1) * 1000
+                crop_dir = CROP_DIR / str(bucket)
+                crop_path = crop_dir / f"{image_id}.jpg"
+                conn.execute(
+                    "UPDATE images SET path = ?, filename = ?, processed = 1 WHERE id = ?",
+                    (_relative_crop_db_path(crop_path), crop_path.name, image_id),
+                )
+
+            if create_crop_files:
+                crop_dir.mkdir(parents=True, exist_ok=True)
+                if overwrite_existing_crops and crop_path.is_file():
+                    crop_file_backups.setdefault(crop_path, crop_path.read_bytes())
+                created_files.append(crop_path)
+                crop_path.write_bytes(encoded)
+
+            # Полностью заменяем embedding/координаты, оставляя image_id прежним.
+            conn.execute("DELETE FROM faces WHERE image_id = ?", (image_id,))
 
             crop_x1 = max(0.0, float(bbox[0]) - crop_left) * crop_scale
             crop_y1 = max(0.0, float(bbox[1]) - crop_top) * crop_scale
@@ -1824,18 +2036,18 @@ def process_local_image(
             )
             created += 1
 
+        if overwrite_existing_crops and created > 0 and existing_row_index < len(existing_rows):
+            removed_count = len(existing_rows) - existing_row_index
+            _delete_source_crop_rows(conn, existing_rows[existing_row_index:])
+
         if created == 0:
             conn.rollback()
-            for crop_path in created_files:
-                try:
-                    crop_path.unlink()
-                except OSError:
-                    pass
+            _rollback_crop_file_writes(created_files, crop_file_backups)
 
             # Здесь лица были найдены, но все соответствующие crop уже есть
             # в БД. Такой файл всё равно считается обработанным.
             deleted = False
-            if delete_source:
+            if delete_source and not overwrite_existing_crops:
                 try:
                     image_path.unlink()
                     deleted = True
@@ -1846,18 +2058,20 @@ def process_local_image(
                 "faces": 0,
                 "deleted": deleted,
                 "message": "crop уже есть в БД",
+                "updated": 0,
+                "added": 0,
+                "removed": 0,
             }
 
         conn.commit()
 
     except Exception:
         conn.rollback()
-        for crop_path in created_files:
-            try:
-                crop_path.unlink()
-            except OSError:
-                pass
+        _rollback_crop_file_writes(created_files, crop_file_backups)
         raise
+
+    if overwrite_existing_crops and existing_rows:
+        _cleanup_replaced_crop_files(existing_rows, created_files)
 
     deleted = False
     if delete_source:
@@ -1871,6 +2085,9 @@ def process_local_image(
         "faces": created,
         "deleted": deleted,
         "message": "ok",
+        "updated": updated_count,
+        "added": added_count,
+        "removed": removed_count,
     }
 
 
@@ -3393,6 +3610,7 @@ class FaceSearchGUI:
             self.delete_processed_var,
             self.use_json_metadata_var,
             self.create_crop_files_var,
+            self.overwrite_existing_crops_var,
             self.use_local_crops_var,
             self.query_var,
             self.topk_var,
@@ -3470,6 +3688,7 @@ class FaceSearchGUI:
                 "delete_processed": bool(self.delete_processed_var.get()),
                 "use_json_metadata": bool(self.use_json_metadata_var.get()),
                 "create_crop_files": bool(self.create_crop_files_var.get()),
+                "overwrite_existing_crops": bool(self.overwrite_existing_crops_var.get()),
                 "use_local_crops": bool(self.use_local_crops_var.get()),
                 "top_k": int(self.topk_var.get()),
                 "min_similarity": float(self.min_similarity_var.get()),
@@ -4313,6 +4532,19 @@ class FaceSearchGUI:
         )
         self.use_local_crops_check.pack(side="left")
 
+        # Размещаем настройку обновления в том же ряду, что и остальные
+        # параметры сканирования: дополнительный ряд занимал вертикальное
+        # место и мог скрывать нижнюю строку состояния на невысоких экранах.
+        self.overwrite_existing_crops_var = tk.BooleanVar(
+            value=bool(self.gui_settings.get("overwrite_existing_crops", False))
+        )
+        self.overwrite_existing_crops_check = ttk.Checkbutton(
+            scan_options,
+            text="Обновлять CROP/метаданные",
+            variable=self.overwrite_existing_crops_var,
+        )
+        self.overwrite_existing_crops_check.pack(side="left")
+
         scan_control_frame = ttk.Frame(self.root, padding=(10, 0, 10, 5))
         scan_control_frame.pack(fill="x")
 
@@ -4957,6 +5189,7 @@ class FaceSearchGUI:
         requested_delete_processed = bool(self.delete_processed_var.get())
         use_json_metadata = bool(self.use_json_metadata_var.get())
         create_crop_files = bool(self.create_crop_files_var.get())
+        overwrite_existing_crops = bool(self.overwrite_existing_crops_var.get())
         delete_processed = requested_delete_processed
 
         mode_text = (
@@ -4974,12 +5207,13 @@ class FaceSearchGUI:
             if create_crop_files
             else ", создание CROP ВЫКЛ (исходники сохраняются)"
         )
+        overwrite_text = ", перезапись CROP ВКЛ" if overwrite_existing_crops else ""
         backend = self.backend_mode_var.get()
         backend_text = "GPU (CUDA, fallback CPU)" if backend == BACKEND_GPU else "CPU"
         worker_text = "AUTO" if auto_workers else str(workers)
         self.status_var.set(
             f"Сканирование HDD... {backend_text}; потоков: {worker_text}; "
-            f"{mode_text}{delete_text}{crop_text}"
+            f"{mode_text}{delete_text}{crop_text}{overwrite_text}"
         )
         if auto_workers:
             self.auto_workers_status_var.set("Авто: запуск адаптивного контроллера...")
@@ -4994,6 +5228,7 @@ class FaceSearchGUI:
                 backend,
                 auto_workers,
                 create_crop_files,
+                overwrite_existing_crops,
             ),
             daemon=True,
         ).start()
@@ -5007,6 +5242,7 @@ class FaceSearchGUI:
         backend=BACKEND_GPU,
         auto_workers=False,
         create_crop_files=True,
+        overwrite_existing_crops=False,
     ):
         """Высокопроизводительное HDD -> CPU -> единственная GPU model -> DB pipeline.
 
@@ -5061,6 +5297,11 @@ class FaceSearchGUI:
                 return
 
             total_faces = 0
+            total_updated_crops = 0
+            total_added_crops = 0
+            total_removed_crops = 0
+            overwrite_updated_label = "CROP заменено" if create_crop_files else "записей обновлено"
+            overwrite_added_label = "новых" if create_crop_files else "новых записей"
             completed = 0
             db_local = threading.local()
             self._scan_worker_connections = []
@@ -5118,6 +5359,7 @@ class FaceSearchGUI:
                                 json_path,
                                 delete_source=delete_processed,
                                 create_crop_files=create_crop_files,
+                                overwrite_existing_crops=overwrite_existing_crops,
                             )
                             count = int(result["faces"])
                             return path, count, None, result
@@ -5128,6 +5370,7 @@ class FaceSearchGUI:
                             path,
                             delete_source=delete_processed,
                             create_crop_files=create_crop_files,
+                            overwrite_existing_crops=overwrite_existing_crops,
                         )
                         return path, int(result["faces"]), None, result
 
@@ -5251,7 +5494,23 @@ class FaceSearchGUI:
                             ))
                         else:
                             total_faces += count
-                            if import_result.get("stopped"):
+                            updated_crops = int(import_result.get("updated", 0) or 0)
+                            added_crops = int(import_result.get("added", count if not overwrite_existing_crops else 0) or 0)
+                            removed_crops = int(import_result.get("removed", 0) or 0)
+                            if overwrite_existing_crops:
+                                total_updated_crops += updated_crops
+                                total_added_crops += added_crops
+                                total_removed_crops += removed_crops
+                                details = (
+                                    f"{overwrite_updated_label}: {updated_crops}; "
+                                    f"{overwrite_added_label}: {added_crops}; "
+                                    f"удалено лишних: {removed_crops}; лиц={count}"
+                                )
+                                result_note = str(import_result.get("message") or "").strip()
+                                if count == 0 and result_note and result_note != "ok":
+                                    details += f" ({result_note})"
+                                message = f"{result_path.name}: {details}"
+                            elif import_result.get("stopped"):
                                 message = f"{result_path.name}: пропущено из-за остановки"
                             elif import_result.get("deleted"):
                                 message = (
@@ -5306,7 +5565,10 @@ class FaceSearchGUI:
                     "auto_workers_status",
                     f"Авто: завершено, итоговая настройка {controller.current_workers} потоков"
                 ))
-            self.events.put(("scan_done", total_faces, completed, total, stopped))
+            self.events.put((
+                "scan_done", total_faces, completed, total, stopped,
+                total_updated_crops, total_added_crops, total_removed_crops,
+            ))
 
             # Закрываем переиспользованные connections worker-ов.
             connections = getattr(self, "_scan_worker_connections", [])
@@ -6477,24 +6739,55 @@ class FaceSearchGUI:
                     completed = event[2] if len(event) > 2 else 0
                     total = event[3] if len(event) > 3 else completed
                     stopped = bool(event[4]) if len(event) > 4 else False
+                    total_updated = int(event[5]) if len(event) > 5 else 0
+                    total_added = int(event[6]) if len(event) > 6 else 0
+                    total_removed = int(event[7]) if len(event) > 7 else 0
 
                     self.progress.config(
                         value=min(completed, int(self.progress["maximum"] or completed))
                     )
 
                     if stopped:
-                        self.status_var.set(
-                            "Сканирование остановлено. "
-                            f"Обработано: {completed}/{total}; добавлено лиц: {total_faces}"
-                        )
+                        if bool(self.overwrite_existing_crops_var.get()):
+                            if bool(self.create_crop_files_var.get()):
+                                summary = (
+                                    f"CROP перезаписано: {total_updated}; новых CROP: {total_added}; "
+                                    f"удалено лишних: {total_removed}; лиц: {total_faces}"
+                                )
+                            else:
+                                summary = (
+                                    f"записей БД обновлено: {total_updated}; новых: {total_added}; "
+                                    f"удалено лишних: {total_removed}; лиц: {total_faces}"
+                                )
+                            self.status_var.set(
+                                f"Сканирование остановлено ({completed}/{total}). {summary}"
+                            )
+                        else:
+                            self.status_var.set(
+                                "Сканирование остановлено. "
+                                f"Обработано: {completed}/{total}; добавлено лиц: {total_faces}"
+                            )
                         self.scan_control_status_var.set(
                             f"Остановлено: {completed}/{total}"
                         )
                     else:
-                        self.status_var.set(
-                            "Сканирование завершено. "
-                            f"Добавлено лиц: {total_faces}"
-                        )
+                        if bool(self.overwrite_existing_crops_var.get()):
+                            if bool(self.create_crop_files_var.get()):
+                                summary = (
+                                    f"CROP перезаписано: {total_updated}; новых CROP: {total_added}; "
+                                    f"удалено лишних: {total_removed}; лиц: {total_faces}"
+                                )
+                            else:
+                                summary = (
+                                    f"записей БД обновлено: {total_updated}; новых: {total_added}; "
+                                    f"удалено лишних: {total_removed}; лиц: {total_faces}"
+                                )
+                            self.status_var.set(f"Сканирование завершено. {summary}")
+                        else:
+                            self.status_var.set(
+                                "Сканирование завершено. "
+                                f"Добавлено лиц: {total_faces}"
+                            )
                         self.scan_control_status_var.set("Сканирование завершено")
 
                     self.scan_running = False
