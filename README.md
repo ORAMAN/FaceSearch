@@ -194,7 +194,7 @@ photos/
 ```json
 {
   "url_source": "https://example.com/profile/123",
-  "name": "Пример профиля",
+  "name": "Отображаемое имя",
   "url_image": "https://example.com/images/photo_001.jpg",
   "info": {
     "Город": "Пример города",
