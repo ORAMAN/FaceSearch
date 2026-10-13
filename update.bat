@@ -20,9 +20,9 @@ REM ------------------------------------------------------------
 REM КРИТИЧНО: Git использует переменные GIT_DIR / GIT_WORK_TREE /
 REM GIT_INDEX_FILE / GIT_COMMON_DIR как переопределение путей к
 REM репозиторию. Если они случайно окажутся заданы (например,
-REM унаследованы от родительского процесса или выставлены ранее
-REM этим же скриптом), git начнёт искать .git не там и упадёт с
-REM "fatal: not a git repository". Принудительно очищаем.
+REM унаследованы от родительского процесса), git начнёт искать
+REM .git не там и упадёт с "fatal: not a git repository".
+REM Принудительно очищаем.
 REM ------------------------------------------------------------
 set "GIT_DIR="
 set "GIT_WORK_TREE="
@@ -55,25 +55,25 @@ goto :clone_repo
 echo [STEP] Найден Git-репозиторий.
 
 git rev-parse --is-inside-work-tree >nul 2>&1
-if errorlevel 1 (
-    echo [WARN] Git не распознаёт репозиторий. Пробую починить safe.directory...
-    git config --global --add safe.directory "%PROJECT_ROOT%" >nul 2>&1
-    git config --global --add safe.directory "%PROJECT_ROOT:\=/%" >nul 2>&1
-    git rev-parse --is-inside-work-tree >nul 2>&1
-)
-if errorlevel 1 (
-    echo [ERROR] Каталог .git найден, но репозиторий Git не распознаётся.
-    echo -------- вывод git rev-parse --------
-    git rev-parse --is-inside-work-tree
-    echo -------------------------------------
-    echo Если выше "dubious ownership" - выполните вручную:
-    echo     git config --global --add safe.directory "%PROJECT_ROOT%"
-    echo Если выше "not a git repository" - .git повреждён.
-    echo Удалите или переименуйте папку .git и запустите update.bat снова
-    echo (тогда файлы обновятся из ZIP-архива без Git).
-    goto :error
-)
+if not errorlevel 1 goto :git_ok
 
+echo [WARN] Git не распознаёт репозиторий. Пробую починить safe.directory...
+git config --global --add safe.directory "%PROJECT_ROOT%" >nul 2>&1
+git rev-parse --is-inside-work-tree >nul 2>&1
+if not errorlevel 1 goto :git_ok
+
+echo [ERROR] Каталог .git найден, но репозиторий Git не распознаётся.
+echo -------- вывод git rev-parse --------
+git rev-parse --is-inside-work-tree
+echo -------------------------------------
+echo Если выше "dubious ownership" - выполните вручную:
+echo     git config --global --add safe.directory "%PROJECT_ROOT%"
+echo Если выше "not a git repository" - .git повреждён.
+echo Удалите или переименуйте папку .git и запустите update.bat снова,
+echo тогда файлы обновятся из ZIP-архива без Git.
+goto :error
+
+:git_ok
 set "CURRENT_BRANCH="
 for /f "delims=" %%B in ('git branch --show-current 2^>nul') do set "CURRENT_BRANCH=%%B"
 if /I not "!CURRENT_BRANCH!"=="%BRANCH%" (
