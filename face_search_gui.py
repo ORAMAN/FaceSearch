@@ -5,7 +5,7 @@
 
 # Общие зависимости
 # PowerShell:                           uv pip install "psycopg[binary]>=3.2" "PyMySQL>=1.1" "pyodbc>=5.1" insightface==2.1 faiss-cpu==1.15.1 "numpy>=2.0,<3" "opencv-python>=4.10" "Pillow>=10.0" "psutil>=6.0" --system
-# CMD:                                  uv pip install "psycopg[binary]>=3.2" "PyMySQL>=1.1" "pyodbc>=5.1" insightface==2.1  faiss-cpu==1.15.1 "numpy>=2.0,<3" "opencv-python>=4.10" "Pillow>=10.0" "psutil>=6.0" --system
+# CMD:                                  uv pip install "psycopg[binary]>=3.2" "PyMySQL>=1.1" "pyodbc>=5.1" insightface==2.1 faiss-cpu==1.15.1 "numpy>=2.0,<3" "opencv-python>=4.10" "Pillow>=10.0" "psutil>=6.0" --system
 
 # Удаление старых пакетов:              uv pip uninstall --system torch torchvision torchaudio onnxruntime onnxruntime-gpu
 
@@ -1450,17 +1450,8 @@ def import_image_bundle(
     delete_source: bool = True,
     create_crop_files: bool = True,
 ) -> dict[str, int | bool | str]:
-    """Импортирует image + одноимённый JSON.
 
-    Для каждого распознанного лица создаётся отдельная запись images/faces.
-    При create_crop_files=False путь будущего CROP и все данные лица
-    сохраняются в БД, но JPEG-файл не записывается. Исходники в этом режиме
-    обязательно остаются на месте, чтобы их можно было восстановить кнопкой
-    «Проверить CROP».
-    """
-   
-    # delete_source = bool(delete_source and create_crop_files) # Без CROP исходники нельзя удалять: они нужны для последующего восстановления.
-    delete_source = bool(delete_source) # Удаление исходников определяется только настройкой пользователя.
+    delete_source = bool(delete_source)
 
     try:
         metadata = json.loads(json_path.read_text(encoding="utf-8"))
@@ -4966,8 +4957,7 @@ class FaceSearchGUI:
         requested_delete_processed = bool(self.delete_processed_var.get())
         use_json_metadata = bool(self.use_json_metadata_var.get())
         create_crop_files = bool(self.create_crop_files_var.get())
-        # Без физических CROP исходники нужны для кнопки восстановления.
-        delete_processed = requested_delete_processed and create_crop_files
+        delete_processed = requested_delete_processed
 
         mode_text = (
             "JSON-описание"
