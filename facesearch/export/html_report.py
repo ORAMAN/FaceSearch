@@ -88,6 +88,67 @@ def _site_display_data(source_url: str | None) -> tuple[str, str, str]:
         return value, value, ""
 
 
+def _filename_candidate(value: Any) -> str:
+    """Возвращает короткое имя файла или пустую строку для технического CROP-ID."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    try:
+        parsed = urlparse(raw)
+        if parsed.scheme.lower() in {"http", "https", "file"}:
+            value_path = unquote(parsed.path or "")
+        else:
+            value_path = unquote(raw)
+        basename = value_path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].strip()
+    except Exception:
+        basename = raw.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].strip()
+
+    if not basename or basename in {".", ".."}:
+        return ""
+
+    suffix = Path(basename).suffix.lower()
+    stem = Path(basename).stem
+    image_suffixes = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+    # Числовые имена вида 12345.jpg — технические имена сохранённого CROP.
+    if suffix in image_suffixes and stem.isdigit():
+        return ""
+    return basename
+
+
+def _display_filename(result: dict[str, Any], rank: Any, resolved_path: Path, is_import: bool) -> str:
+    """Готовит непустую и единообразную подпись под каждым результатом."""
+    candidates: list[Any] = [result.get("filename")]
+
+    # У импортированных записей реальное имя изображения часто есть только в URL.
+    raw_json = result.get("raw_json") or ""
+    remote_image_url = str(result.get("url_image") or "").strip()
+    if is_import and not remote_image_url:
+        try:
+            metadata = json.loads(raw_json)
+            if isinstance(metadata, dict):
+                remote_image_url = str(metadata.get("url_image") or "").strip()
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    if remote_image_url:
+        candidates.append(remote_image_url)
+
+    # Для локальных исходников используем исходный путь, но не ссылку на страницу профиля.
+    if not is_import:
+        candidates.extend((result.get("source_url"), resolved_path.name))
+
+    for candidate in candidates:
+        label = _filename_candidate(candidate)
+        if label:
+            return label
+
+    try:
+        rank_label = int(rank)
+    except (TypeError, ValueError):
+        rank_label = 0
+    return f"Изображение №{rank_label}" if rank_label > 0 else "Изображение без имени"
+
+
 def generate_html_gallery(
     results,
     query_image: Path,
@@ -146,18 +207,17 @@ def generate_html_gallery(
         is_import = source_type == "import"
 
         filename_raw = str(result.get("filename") or "").strip()
-        filename = html.escape(filename_raw)
-        filename_path = Path(filename_raw.replace("\\", "/")).name
-        numeric_crop_filename = (
-            Path(filename_path).suffix.lower() in {".jpg", ".jpeg"}
-            and Path(filename_path).stem.isdigit()
+        filename = html.escape(filename_raw, quote=True)
+        display_filename_raw = _display_filename(
+            result, result.get("rank"), path, is_import,
         )
-        # Имена вида 141414.jpg — технические имена CROP по ID записи,
-        # а не информативная подпись для пользователя.
+        display_filename = html.escape(display_filename_raw, quote=True)
+        # Подпись используется и как alt-текст изображения.
+        filename = display_filename
+        # Строка подписи присутствует у каждой карточки: если исходное имя
+        # неизвестно или в БД хранится только числовое имя CROP, используем номер результата.
         filename_html = (
-            f'<div class="filename">{filename}</div>'
-            if filename_raw and not numeric_crop_filename
-            else ""
+            f'<div class="filename" title="{display_filename}">{display_filename}</div>'
         )
 
         # URL строится из относительного images.path. Абсолютные старые пути
@@ -499,8 +559,8 @@ def generate_html_gallery(
 body {{
     margin: 0;
     padding: 30px;
-    background: #151515;
-    color: #eeeeee;
+    background: #191919;
+    color: #f0f0f0;
     font-family: Arial, Helvetica, sans-serif;
 }}
 
@@ -537,7 +597,8 @@ h1 {{
 
 .card {{
     position: relative;
-    background: #222222;
+    background: #242424;
+    border: 1px solid #383838;
     border-radius: 12px;
     overflow: hidden;
     padding-bottom: 15px;
@@ -554,7 +615,7 @@ h1 {{
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #111111;
+    background: #171717;
     overflow: hidden;
 }}
 
@@ -586,17 +647,23 @@ h1 {{
     right: 10px;
     z-index: 2;
     padding: 6px 10px;
+    color: #ffffff;
     background: rgba(0,120,215,.90);
     border-radius: 6px;
     font-weight: bold;
 }}
 
 .filename {{
-    padding: 12px 15px 4px;
+    display: block;
+    min-height: 40px;
+    line-height: 20px;
+    padding: 9px 15px;
+    color: #f0f0f0;
     font-weight: bold;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    border-bottom: 1px solid #353535;
 }}
 
 .path {{
@@ -639,7 +706,8 @@ h1 {{
 .vk-info {{
     margin: 5px 15px 12px;
     padding: 10px;
-    background: #1b1b1b;
+    background: #1e1e1e;
+    border: 1px solid #353535;
     border-radius: 8px;
     line-height: 1.55;
     font-size: 13px;
@@ -662,9 +730,10 @@ h1 {{
 .button {{
     display: inline-block;
     padding: 8px 12px;
-    background: #333333;
-    color: #eeeeee;
+    background: #343434;
+    color: #f0f0f0;
     text-decoration: none;
+    border: 1px solid #484848;
     border-radius: 6px;
     font-size: 13px;
 }}
@@ -674,24 +743,26 @@ h1 {{
 }}
 
 body[data-theme="light"] {{
-    background: #f3f5f8;
-    color: #20252b;
+    background: #f1f3f5;
+    color: #171a1f;
 }}
-body[data-theme="light"] .info {{ color: #606a75; }}
-body[data-theme="light"] .query {{ background: #ffffff; box-shadow: 0 2px 8px rgba(20, 35, 50, .08); }}
-body[data-theme="light"] .query a {{ color: #075fb2; }}
+body[data-theme="light"] .info {{ color: #414b57; }}
+body[data-theme="light"] .query {{ background: #ffffff; border: 1px solid #c1c8d0; box-shadow: 0 2px 8px rgba(20, 25, 30, .08); }}
+body[data-theme="light"] .query a {{ color: #064f9e; }}
 body[data-theme="light"] .card {{
     background: #ffffff;
-    box-shadow: 0 4px 15px rgba(20, 35, 50, .12);
+    border: 1px solid #c8cfd8;
+    box-shadow: 0 4px 15px rgba(20, 25, 30, .13);
 }}
-body[data-theme="light"] .face {{ background: #e9edf2; }}
-body[data-theme="light"] .no-image {{ color: #69737e; }}
-body[data-theme="light"] .path {{ color: #69737e; }}
-body[data-theme="light"] .source-site a {{ color: #075fb2; }}
-body[data-theme="light"] .vk-info {{ background: #f0f3f7; }}
-body[data-theme="light"] .vk-name {{ color: #075fb2; }}
-body[data-theme="light"] .button {{ background: #e7edf4; color: #20252b; }}
-body[data-theme="light"] .button:hover {{ background: #d6e0eb; }}
+body[data-theme="light"] .face {{ background: #e1e5ea; }}
+body[data-theme="light"] .no-image {{ color: #4b5563; }}
+body[data-theme="light"] .filename {{ color: #171a1f; border-bottom-color: #c8cfd8; }}
+body[data-theme="light"] .path {{ color: #4b5563; }}
+body[data-theme="light"] .source-site a {{ color: #064f9e; }}
+body[data-theme="light"] .vk-info {{ background: #e9edf2; border-color: #c4ccd5; }}
+body[data-theme="light"] .vk-name {{ color: #064f9e; }}
+body[data-theme="light"] .button {{ background: #e2e7ed; color: #171a1f; border-color: #b7c0cb; }}
+body[data-theme="light"] .button:hover {{ background: #d0d9e3; }}
 </style>
 </head>
 
