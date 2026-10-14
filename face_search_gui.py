@@ -3439,6 +3439,7 @@ def generate_html_gallery(
     query_image: Path,
     output_file: str = "face_search_results.html",
     use_local_crops: bool = True,
+    theme: str = "dark",
 ):
     """Совместимая точка входа; реализация находится в facesearch.export.html_report."""
     return _generate_html_gallery_impl(
@@ -3451,6 +3452,7 @@ def generate_html_gallery(
         app_dir=APP_DIR,
         load_image_fn=load_image,
         cv2_module=cv2,
+        theme=theme,
     )
 
 
@@ -3465,6 +3467,8 @@ class FaceSearchGUI:
         self._set_window_icon()
 
         self.gui_settings = _load_gui_settings()
+        saved_theme = str(self.gui_settings.get("theme") or "light").strip().lower()
+        self.theme_mode = "dark" if saved_theme == "dark" else "light"
         self._settings_ready = False
         self._settings_save_after = None
 
@@ -3562,6 +3566,7 @@ class FaceSearchGUI:
         self.gpu_index_loading = False
 
         self._build_ui()
+        self._apply_theme()
         # Применяем сохранённое состояние элементов сразу после создания формы.
         # В частности, Spinbox потоков должен быть заблокирован уже при запуске,
         # если в settings.xml включена автоподстройка.
@@ -3570,6 +3575,9 @@ class FaceSearchGUI:
         self._settings_ready = True
         self._update_backend_ui()  # не проверяет CUDA, использует пока неизвестный cached state
         self.root.bind("<Configure>", self._on_window_configure, add="+")
+        # Sash можно восстановить только после расчёта реальной ширины окна.
+        self.paned.bind("<ButtonRelease-1>", self._on_paned_sash_release, add="+")
+        self.root.after(100, self._restore_paned_sash_position)
 
         self.status_var.set("Запуск: подготовка базы данных и проверка CUDA...")
         self.stats_var.set("    Подключение к БД и подсчёт статистики.\n    Дождитесь завершения...")
@@ -3826,6 +3834,48 @@ class FaceSearchGUI:
         if self._settings_ready:
             self._schedule_settings_save()
 
+    def _on_paned_sash_release(self, _event=None):
+        """Сохраняет горизонтальный размер панелей после перемещения разделителя."""
+        if self._settings_ready:
+            self._schedule_settings_save()
+
+    def _restore_paned_sash_position(self, attempt: int = 0):
+        """Восстанавливает разделитель после того, как Tk рассчитает геометрию."""
+        try:
+            if not self.paned.winfo_exists():
+                return
+            position = max(0, int(self.gui_settings.get("paned_sash_position") or 0))
+            if position <= 0:
+                return
+
+            width = int(self.paned.winfo_width())
+            if width <= 1:
+                if attempt < 10:
+                    self.root.after(
+                        100,
+                        lambda: self._restore_paned_sash_position(attempt + 1),
+                    )
+                return
+
+            # Не допускаем, чтобы одна из двух панелей полностью исчезла,
+            # например если сохранённая позиция пришла от окна другого размера.
+            target = max(100, min(position, width - 100))
+            self.paned.sashpos(0, target)
+        except (tk.TclError, TypeError, ValueError):
+            pass
+
+    def _current_paned_sash_position(self) -> int:
+        """Возвращает координату разделителя или прежнее значение до layout."""
+        fallback = max(0, int(self.gui_settings.get("paned_sash_position") or 0))
+        try:
+            if not hasattr(self, "paned") or not self.paned.winfo_exists():
+                return fallback
+            if int(self.paned.winfo_width()) <= 1:
+                return fallback
+            return max(0, int(self.paned.sashpos(0)))
+        except (tk.TclError, TypeError, ValueError):
+            return fallback
+
     def _schedule_settings_save(self):
         if not self._settings_ready:
             return
@@ -3859,6 +3909,8 @@ class FaceSearchGUI:
             settings = {
                 "window_geometry": self.root.geometry(),
                 "window_maximized": maximized,
+                "theme": self.theme_mode,
+                "paned_sash_position": self._current_paned_sash_position(),
                 "selected_db_profile": str(
                     self.db_profile_var.get() or ""
                 ).strip(),
@@ -4086,6 +4138,7 @@ class FaceSearchGUI:
             profile["name"] = ""
 
         win = tk.Toplevel(self.root)
+        win.configure(background=getattr(self, "theme_colors", {}).get("window", "#f0f0f0"))
         win.title("Новая база данных" if is_new else "Настройка базы данных")
         win.geometry("800x550")
         win.transient(self.root)
@@ -4469,10 +4522,109 @@ class FaceSearchGUI:
             except Exception:
                 pass
 
-    def _build_ui(self):
-        style = ttk.Style()
+    def toggle_theme(self):
+        """Переключает светлую/тёмную тему и сразу сохраняет выбор."""
+        self.theme_mode = "dark" if self.theme_mode == "light" else "light"
+        self._apply_theme()
+        self._settings_ready = True
+        self._save_gui_settings()
+
+    def _apply_theme(self):
+        """Применяет тему к ttk-виджетам и обычным tkinter Listbox/Canvas."""
+        dark = self.theme_mode == "dark"
+        colors = {
+            "window": "#17191c" if dark else "#f0f0f0",
+            "surface": "#202328" if dark else "#f0f0f0",
+            "panel": "#262a30" if dark else "#e9e9e9",
+            "field": "#181b1f" if dark else "#ffffff",
+            "foreground": "#e6e9ed" if dark else "#202020",
+            "muted": "#aeb6c0" if dark else "#555555",
+            "border": "#414750" if dark else "#b8b8b8",
+            "button": "#30353d" if dark else "#e6e6e6",
+            "button_active": "#414852" if dark else "#d7d7d7",
+            "selection": "#245b91" if dark else "#c8ddf3",
+            "accent": "#3986d7" if dark else "#1769aa",
+            "canvas": "#202328" if dark else "#ffffff",
+        }
+        self.theme_colors = colors
+
         try:
-            style.theme_use("vista")
+            names = self.style.theme_names()
+            if dark and "clam" in names:
+                self.style.theme_use("clam")
+            elif not dark and "vista" in names:
+                self.style.theme_use("vista")
+            elif "clam" in names:
+                self.style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        try:
+            self.root.configure(background=colors["window"])
+            style = self.style
+            style.configure("TFrame", background=colors["window"])
+            style.configure("TLabel", background=colors["window"], foreground=colors["foreground"])
+            style.configure("TLabelframe", background=colors["window"], foreground=colors["foreground"], bordercolor=colors["border"])
+            style.configure("TLabelframe.Label", background=colors["window"], foreground=colors["foreground"])
+            style.configure("TButton", background=colors["button"], foreground=colors["foreground"], bordercolor=colors["border"], padding=(8, 4))
+            style.map(
+                "TButton",
+                background=[("disabled", colors["surface"]), ("pressed", colors["selection"]), ("active", colors["button_active"])],
+                foreground=[("disabled", colors["muted"]), ("!disabled", colors["foreground"])],
+            )
+            style.configure("Theme.TButton", background=colors["button"], foreground=colors["foreground"], bordercolor=colors["border"], padding=(0, 2), font=("Segoe UI Symbol", 11))
+            style.map("Theme.TButton", background=[("pressed", colors["selection"]), ("active", colors["button_active"])], foreground=[("!disabled", colors["foreground"])])
+            style.configure("TEntry", fieldbackground=colors["field"], foreground=colors["foreground"], insertcolor=colors["foreground"], bordercolor=colors["border"])
+            style.configure("TCombobox", fieldbackground=colors["field"], background=colors["button"], foreground=colors["foreground"], arrowcolor=colors["foreground"], bordercolor=colors["border"])
+            style.map("TCombobox", fieldbackground=[("readonly", colors["field"]), ("disabled", colors["surface"])], foreground=[("disabled", colors["muted"]), ("readonly", colors["foreground"])], selectbackground=[("readonly", colors["selection"])], selectforeground=[("readonly", colors["foreground"])])
+            style.configure("TSpinbox", fieldbackground=colors["field"], foreground=colors["foreground"], arrowcolor=colors["foreground"], bordercolor=colors["border"])
+            style.configure("TCheckbutton", background=colors["window"], foreground=colors["foreground"])
+            style.map("TCheckbutton", background=[("active", colors["window"])], foreground=[("disabled", colors["muted"]), ("!disabled", colors["foreground"])])
+            style.configure("TRadiobutton", background=colors["window"], foreground=colors["foreground"])
+            style.map("TRadiobutton", background=[("active", colors["window"])], foreground=[("disabled", colors["muted"]), ("!disabled", colors["foreground"])])
+            style.configure("TSeparator", background=colors["border"])
+            style.configure("TPanedwindow", background=colors["window"])
+            style.configure("TProgressbar", background=colors["accent"], troughcolor=colors["panel"], bordercolor=colors["border"], lightcolor=colors["accent"], darkcolor=colors["accent"])
+            style.configure("TScrollbar", background=colors["button"], troughcolor=colors["surface"], bordercolor=colors["border"], arrowcolor=colors["foreground"])
+            style.configure("Treeview", background=colors["field"], fieldbackground=colors["field"], foreground=colors["foreground"])
+            style.configure("Treeview.Heading", background=colors["button"], foreground=colors["foreground"])
+            style.map("Treeview", background=[("selected", colors["selection"])], foreground=[("selected", "#ffffff" if dark else "#111111")])
+        except tk.TclError:
+            pass
+
+        # Эти виджеты используют tk, а не ttk, поэтому настраиваются отдельно.
+        for widget, options in (
+            (getattr(self, "face_list", None), {
+                "background": colors["field"], "foreground": colors["foreground"],
+                "selectbackground": colors["selection"],
+                "selectforeground": "#ffffff" if dark else "#111111",
+                "highlightbackground": colors["border"], "highlightcolor": colors["accent"],
+            }),
+            (getattr(self, "canvas", None), {
+                "background": colors["canvas"], "highlightbackground": colors["window"],
+            }),
+        ):
+            if widget is not None:
+                try:
+                    widget.configure(**options)
+                except tk.TclError:
+                    pass
+
+        if hasattr(self, "theme_toggle_btn"):
+            # Значок показывает тему, на которую переключит кнопка.
+            self.theme_toggle_btn.configure(text="☀" if dark else "☾")
+
+        try:
+            for child in self.root.winfo_children():
+                if isinstance(child, tk.Toplevel):
+                    child.configure(background=colors["window"])
+        except tk.TclError:
+            pass
+
+    def _build_ui(self):
+        self.style = ttk.Style(self.root)
+        try:
+            self.style.theme_use("vista")
         except tk.TclError:
             pass
         # except tk.TclError as e:
@@ -4537,6 +4689,16 @@ class FaceSearchGUI:
             command=self._on_auto_workers_changed,
         )
         self.auto_workers_check.pack(side="right", padx=(12, 8))
+
+        self.theme_toggle_btn = ttk.Button(
+            top,
+            text="☾",
+            width=3,
+            style="Theme.TButton",
+            command=self.toggle_theme,
+            takefocus=True,
+        )
+        self.theme_toggle_btn.pack(side="right", padx=(8, 0), ipadx=0)
 
         self.scan_btn = ttk.Button(
             top,
@@ -4821,10 +4983,11 @@ class FaceSearchGUI:
         # --------------------------------------------------------
         # Основная область
         # --------------------------------------------------------
-        paned = ttk.Panedwindow(
+        self.paned = ttk.Panedwindow(
             self.root,
             orient="horizontal",
         )
+        paned = self.paned
         paned.pack(
             fill="both",
             expand=True,
@@ -6630,6 +6793,7 @@ class FaceSearchGUI:
                 query_image=query_path,
                 output_file=output_file,
                 use_local_crops=self.use_local_crops_var.get(),
+                theme=self.theme_mode,
             )
 
             self.events.put(
