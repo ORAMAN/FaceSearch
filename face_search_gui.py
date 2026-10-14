@@ -1753,9 +1753,31 @@ def import_image_bundle(
         restored_missing_crops = _restore_missing_source_crops(
             conn, image, valid_faces, existing_source_rows
         )
-    # При обычном сканировании существующие записи не переписываем; используем
-    # их как слоты для обновления лишь при явном включении перезаписи.
+    # При обычном сканировании существующие записи не переписываем. После
+    # восстановления отсутствующих файлов дальше не добавляем повторные строки
+    # images/faces для того же самого источника.
     old_crop_rows = existing_source_rows if overwrite_existing_crops else []
+    if existing_source_rows and not overwrite_existing_crops:
+        deleted = False
+        if delete_source:
+            try:
+                image_path.unlink()
+                json_path.unlink()
+                deleted = True
+            except OSError:
+                deleted = False
+        message = "метаданные уже есть в БД"
+        if restored_missing_crops:
+            message += f"; восстановлено CROP: {restored_missing_crops}"
+        return {
+            "faces": 0,
+            "deleted": deleted,
+            "message": message,
+            "updated": 0,
+            "added": 0,
+            "removed": 0,
+            "restored": restored_missing_crops,
+        }
 
     old_crop_row_index = 0
     updated_count = 0
