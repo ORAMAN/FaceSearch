@@ -99,8 +99,10 @@ def generate_html_gallery(
     app_dir: Path | str | None = None,
     load_image_fn=None,
     cv2_module=None,
+    theme: str = "dark",
 ):
     APP_DIR = Path(app_dir).resolve() if app_dir else DEFAULT_APP_DIR
+    theme_mode = "light" if str(theme or "").strip().lower() == "light" else "dark"
     CROP_DIR = Path(crop_dir).resolve() if crop_dir else (APP_DIR / "face_images")
     crop_url_base = str(crop_url or "").strip().rstrip("/")
     if crop_url_base:
@@ -572,8 +574,10 @@ h1 {{
     left: 10px;
     z-index: 2;
     padding: 5px 9px;
-    background: rgba(0,0,0,.75);
+    color: #ffffff;
+    background: rgba(0,0,0,.82);
     border-radius: 6px;
+    text-shadow: 0 1px 2px rgba(0,0,0,.35);
 }}
 
 .score {{
@@ -668,10 +672,30 @@ h1 {{
 .button:hover {{
     background: #444444;
 }}
+
+body[data-theme="light"] {{
+    background: #f3f5f8;
+    color: #20252b;
+}}
+body[data-theme="light"] .info {{ color: #606a75; }}
+body[data-theme="light"] .query {{ background: #ffffff; box-shadow: 0 2px 8px rgba(20, 35, 50, .08); }}
+body[data-theme="light"] .query a {{ color: #075fb2; }}
+body[data-theme="light"] .card {{
+    background: #ffffff;
+    box-shadow: 0 4px 15px rgba(20, 35, 50, .12);
+}}
+body[data-theme="light"] .face {{ background: #e9edf2; }}
+body[data-theme="light"] .no-image {{ color: #69737e; }}
+body[data-theme="light"] .path {{ color: #69737e; }}
+body[data-theme="light"] .source-site a {{ color: #075fb2; }}
+body[data-theme="light"] .vk-info {{ background: #f0f3f7; }}
+body[data-theme="light"] .vk-name {{ color: #075fb2; }}
+body[data-theme="light"] .button {{ background: #e7edf4; color: #20252b; }}
+body[data-theme="light"] .button:hover {{ background: #d6e0eb; }}
 </style>
 </head>
 
-<body>
+<body data-theme="{theme_mode}">
 <h1>Результаты поиска лиц</h1>
 
 <div class="info">
