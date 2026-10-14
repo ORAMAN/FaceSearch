@@ -1758,6 +1758,8 @@ def import_image_bundle(
     # images/faces для того же самого источника.
     old_crop_rows = existing_source_rows if overwrite_existing_crops else []
     if existing_source_rows and not overwrite_existing_crops:
+        # Сохраняем обновлённые метаданные профиля даже при уже известных images.
+        conn.commit()
         deleted = False
         if delete_source:
             try:
