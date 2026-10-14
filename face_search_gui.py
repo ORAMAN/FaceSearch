@@ -1555,11 +1555,11 @@ def _cleanup_replaced_crop_files(
         except Exception:
             pass
 
-    for _image_id, stored_path in rows:
+    for image_id, stored_path in rows:
         if not stored_path:
             continue
         try:
-            path = _resolve_db_storage_path(stored_path).resolve()
+            path = _resolve_db_crop_path(stored_path, image_id=int(image_id)).resolve()
             # Удаляем только файлы внутри активного каталога CROP. Это не даст
             # затронуть исходные фото при встрече с legacy-путём в БД.
             path.relative_to(crop_root)
@@ -1696,12 +1696,14 @@ def import_image_bundle(
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
             if old_crop_row_index < len(old_crop_rows):
                 # Переиспользуем ID существующего CROP вместо DELETE + INSERT.
-                image_id = int(old_crop_rows[old_crop_row_index][0])
+                image_id, old_db_path = old_crop_rows[old_crop_row_index]
+                image_id = int(image_id)
                 old_crop_row_index += 1
                 updated_count += 1
-                bucket = ((image_id - 1) // 1000 + 1) * 1000
-                crop_dir = CROP_DIR / str(bucket)
-                crop_path = crop_dir / f"{image_id}.jpg"
+                # Существующий путь в БД — источник истины: он может содержать
+                # подпапку профиля/пользовательскую структуру, отличную от bucket/id.
+                crop_path = _resolve_db_crop_path(old_db_path, image_id=image_id)
+                crop_dir = crop_path.parent
                 conn.execute(
                     """
                     UPDATE images
@@ -1951,12 +1953,13 @@ def process_local_image(
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
             if existing_row_index < len(existing_rows):
                 # Сохраняем ID CROP и обновляем строку images на месте.
-                image_id = int(existing_rows[existing_row_index][0])
+                image_id, old_db_path = existing_rows[existing_row_index]
+                image_id = int(image_id)
                 existing_row_index += 1
                 updated_count += 1
-                bucket = ((image_id - 1) // 1000 + 1) * 1000
-                crop_dir = CROP_DIR / str(bucket)
-                crop_path = crop_dir / f"{image_id}.jpg"
+                # При обновлении не меняем сохранённое относительное имя/каталог CROP.
+                crop_path = _resolve_db_crop_path(old_db_path, image_id=image_id)
+                crop_dir = crop_path.parent
                 conn.execute(
                     """
                     UPDATE images
@@ -5050,7 +5053,7 @@ class FaceSearchGUI:
         )
 
         scan_controls_enabled = bool(
-            value and self.operation == "scan" and self.scan_running
+            value and self.operation in ("scan", "crop_repair") and self.scan_running
         )
         self.pause_scan_btn.config(
             state="normal" if scan_controls_enabled else "disabled"
@@ -5091,37 +5094,40 @@ class FaceSearchGUI:
             text="⏸ Пауза",
         )
         self.stop_scan_btn.config(state="normal")
-        self.scan_control_status_var.set("Сканирование выполняется")
+        operation_label = "Проверка CROP" if self.operation == "crop_repair" else "Сканирование"
+        self.scan_control_status_var.set(f"{operation_label} выполняется")
 
     def toggle_scan_pause(self):
         if not self.scan_running:
             return
 
+        operation_label = "Проверка CROP" if self.operation == "crop_repair" else "Сканирование"
         if self.scan_paused.is_set():
             self.scan_paused.clear()
             self.pause_scan_btn.config(text="▶ Продолжить")
             self.scan_control_status_var.set(
-                "Пауза: текущие изображения завершаются, новые не запускаются"
+                f"Пауза: {operation_label.lower()}, текущие задачи завершаются"
             )
-            self.status_var.set("Сканирование приостановлено...")
+            self.status_var.set(f"{operation_label} приостановлена...")
         else:
             self.scan_paused.set()
             self.pause_scan_btn.config(text="⏸ Пауза")
-            self.scan_control_status_var.set("Сканирование продолжается")
-            self.status_var.set("Продолжаем сканирование...")
+            self.scan_control_status_var.set(f"{operation_label} продолжается")
+            self.status_var.set(f"Продолжаем: {operation_label.lower()}...")
 
     def stop_scan(self):
         if not self.scan_running:
             return
 
+        operation_label = "проверку CROP" if self.operation == "crop_repair" else "сканирование"
         self.scan_stop.set()
         self.scan_paused.set()  # разблокировать ожидающие worker-ы, чтобы они вышли
         self.pause_scan_btn.config(state="disabled")
         self.stop_scan_btn.config(state="disabled")
         self.scan_control_status_var.set(
-            "Остановка: завершаются уже начатые изображения..."
+            f"Остановка: завершаются уже начатые задачи ({operation_label})..."
         )
-        self.status_var.set("Останавливаем сканирование...")
+        self.status_var.set(f"Останавливаем {operation_label}...")
 
     # --------------------------------------------------------
     # Local scan
@@ -6149,6 +6155,7 @@ class FaceSearchGUI:
             workers = min(workers, LOCAL_MAX_WORKERS)
 
         self.operation = "crop_repair"
+        self._prepare_scan_controls()
         self._set_busy(True)
         self.progress.config(mode="indeterminate")
         self.progress.start(10)
@@ -6188,14 +6195,31 @@ class FaceSearchGUI:
                     """
                 ).fetchall()
                 missing = 0
+                checked = 0
                 for image_id, db_path in rows:
-                    crop_path = _resolve_db_storage_path(db_path)
-                    if crop_path.is_file():
-                        continue
-                    # Считаем запись требующей восстановления даже тогда,
-                    # когда CROP уже существует по стандартному пути: ниже
-                    # будет исправлена ссылка images.path.
-                    missing += 1
+                    if self.scan_stop.is_set():
+                        break
+                    self.scan_paused.wait()
+                    if self.scan_stop.is_set():
+                        break
+                    crop_path = _resolve_db_crop_path(db_path, image_id=int(image_id))
+                    checked += 1
+                    if not crop_path.is_file():
+                        missing += 1
+
+                if self.scan_stop.is_set():
+                    self.events.put((
+                        "crop_repair_done",
+                        {
+                            "checked": checked,
+                            "already_ok": checked - missing,
+                            "missing": missing,
+                            "repaired": 0,
+                            "failed": 0,
+                            "stopped": True,
+                        },
+                    ))
+                    return
 
                 self.events.put((
                     "crop_check_started", len(rows), missing
@@ -6210,6 +6234,7 @@ class FaceSearchGUI:
                             "missing": 0,
                             "repaired": 0,
                             "failed": 0,
+                            "stopped": False,
                         },
                     ))
                     return
@@ -6237,6 +6262,8 @@ class FaceSearchGUI:
                     workers=workers,
                     auto_workers=auto_workers,
                     progress_callback=progress,
+                    pause_event=self.scan_paused,
+                    stop_event=self.scan_stop,
                 )
                 self.events.put(("crop_repair_done", result))
             finally:
@@ -6875,19 +6902,26 @@ class FaceSearchGUI:
                         ),
                     )
 
+                    stopped = bool(result.get("stopped"))
+                    self.scan_running = False
                     self.operation = None
                     self._set_busy(False)
                     self._refresh_stats()
                     self._update_search_state()
 
-                    self.status_var.set(
-                        "Проверка CROP завершена. "
+                    summary = (
                         f"Проверено: {result.get('checked', 0)}; "
                         f"уже были: {result.get('already_ok', 0)}; "
                         f"отсутствовали: {result.get('missing', 0)}; "
                         f"восстановлено: {result.get('repaired', 0)}; "
                         f"ошибок: {result.get('failed', 0)}."
                     )
+                    if stopped:
+                        self.scan_control_status_var.set("Проверка CROP остановлена")
+                        self.status_var.set("Проверка CROP остановлена. " + summary)
+                    else:
+                        self.scan_control_status_var.set("Проверка CROP завершена")
+                        self.status_var.set("Проверка CROP завершена. " + summary)
 
                 elif kind == "index_done":
                     self.progress.stop()
@@ -7188,6 +7222,39 @@ def _expected_crop_path(image_id: int) -> Path:
     return CROP_DIR / str(bucket) / f"{int(image_id)}.jpg"
 
 
+def _resolve_db_crop_path(value: Any, *, image_id: int | None = None) -> Path:
+    """Разрешает путь именно CROP, сохраняя относительный путь из БД.
+
+    Относительные значения images.path всегда относятся к CROP_DIR активного
+    профиля. В отличие от универсального resolver, этот путь выбирается даже
+    тогда, когда файла пока нет: именно сюда нужно восстановить отсутствующий
+    CROP, а не в APP_DIR.
+    """
+    raw = str(value or "").strip()
+    if not raw or raw == "." or Path(raw).name.startswith("pending_"):
+        return _expected_crop_path(int(image_id)) if image_id is not None else Path(".")
+
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() == "file":
+        try:
+            path_text = url2pathname(unquote(parsed.path or ""))
+            if parsed.netloc and parsed.netloc.lower() not in ("", "localhost"):
+                path_text = f"//{parsed.netloc}{path_text}"
+            legacy_path = Path(path_text).expanduser()
+            if legacy_path.is_absolute():
+                return legacy_path.resolve()
+        except (OSError, ValueError):
+            pass
+
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+
+    # Не проверяем is_file() до выбора корня: файла может не быть, но место
+    # его восстановления определяется сохранённым путём и каталогом профиля.
+    return (Path(CROP_DIR).expanduser() / path).resolve()
+
+
 def _source_url_to_local_path(source_url: Any) -> Path | None:
     """Извлекает локальный файл из file:// URL или обычного пути."""
     raw = str(source_url or "").strip()
@@ -7392,23 +7459,9 @@ def _repair_single_missing_crop(
     image_id = int(image_id)
     face_id = int(face_id)
 
-    crop_path = _resolve_db_storage_path(crop_db_path)
-    if not str(crop_db_path or "").strip() or crop_path == Path("."):
-        crop_path = _expected_crop_path(image_id)
-
-    # Если запись БД смотрит в старый путь, но стандартный CROP уже существует,
-    # просто возвращаем рабочий путь в БД без повторного inference.
-    if not crop_path.is_file():
-        expected = _expected_crop_path(image_id)
-        if expected != crop_path and expected.is_file():
-            expected.parent.mkdir(parents=True, exist_ok=True)
-            relative = _relative_crop_db_path(expected)
-            conn.execute(
-                "UPDATE images SET path = ?, filename = ?, processed = 1 WHERE id = ?",
-                (relative, expected.name, image_id),
-            )
-            conn.commit()
-            return True, f"CROP уже существовал: исправлен путь {expected.name}"
+    # Сохраняем путь из images.path. Для относительного значения базой служит
+    # CROP_DIR активного профиля, даже если файла ещё нет.
+    crop_path = _resolve_db_crop_path(crop_db_path, image_id=image_id)
 
     local_source = _source_url_to_local_path(source_url)
     if local_source is not None:
@@ -7501,9 +7554,8 @@ def _repair_single_missing_crop(
     except Exception as exc:
         return False, f"ошибка кодирования CROP: {exc}"
 
-    # Восстановление всегда записывает CROP под активным CROP_DIR.
-    # Старый путь используется только для чтения/совместимости.
-    target = _expected_crop_path(image_id)
+    # Восстанавливаем файл в точный путь, полученный из images.path и CROP_DIR профиля.
+    target = crop_path
     target.parent.mkdir(parents=True, exist_ok=True)
 
     # Пишем сначала во временный файл рядом с CROP, затем заменяем.
@@ -7587,7 +7639,9 @@ def repair_missing_crops(
     workers: int = LOCAL_DEFAULT_WORKERS,
     auto_workers: bool = False,
     progress_callback=None,
-) -> dict[str, int]:
+    pause_event: threading.Event | None = None,
+    stop_event: threading.Event | None = None,
+) -> dict[str, int | bool]:
     """Проверяет и многопоточно восстанавливает отсутствующие CROP.
 
     Сначала проверяются локальные источники из images.source_url и
@@ -7627,10 +7681,24 @@ def repair_missing_crops(
     total_rows = len(rows)
     missing_rows: list[tuple[Any, ...]] = []
     already_ok = 0
+    checked_rows = 0
+
+    def operation_allowed() -> bool:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        if pause_event is not None:
+            # Таймаут нужен, чтобы остановка освобождала worker даже при паузе.
+            while not pause_event.wait(timeout=0.25):
+                if stop_event is not None and stop_event.is_set():
+                    return False
+        return not (stop_event is not None and stop_event.is_set())
 
     for row in rows:
+        if not operation_allowed():
+            break
         image_id = int(row[0])
-        crop_path = _resolve_db_storage_path(row[1])
+        crop_path = _resolve_db_crop_path(row[1], image_id=image_id)
+        checked_rows += 1
         if crop_path.is_file():
             already_ok += 1
             continue
@@ -7638,6 +7706,15 @@ def repair_missing_crops(
         missing_rows.append(row)
 
     total_missing = len(missing_rows)
+    if stop_event is not None and stop_event.is_set():
+        return {
+            "checked": checked_rows,
+            "already_ok": already_ok,
+            "missing": total_missing,
+            "repaired": 0,
+            "failed": 0,
+            "stopped": True,
+        }
     workers = max(1, min(int(workers), LOCAL_MAX_WORKERS))
 
     if progress_callback is not None:
@@ -7654,11 +7731,12 @@ def repair_missing_crops(
 
     if total_missing == 0:
         return {
-            "checked": total_rows,
+            "checked": checked_rows,
             "already_ok": already_ok,
             "missing": 0,
             "repaired": 0,
             "failed": 0,
+            "stopped": False,
         }
 
     def source_key_for_row(row: tuple[Any, ...]) -> str:
@@ -7687,6 +7765,8 @@ def repair_missing_crops(
 
     def worker(group_item):
         source_key, group_rows = group_item
+        if not operation_allowed():
+            return []
         # Одно соединение на поток, а не новое соединение на каждую фотографию.
         # Иначе на большом источнике повторялись и подключение, и инициализация
         # схемы, и проверка путей CROP.
@@ -7709,11 +7789,15 @@ def repair_missing_crops(
             source_url,
             image_url,
         )
+        if not operation_allowed():
+            return []
         source_cache = {source_key: source_result}
         used_matches = {source_key: set()}
 
         results = []
         for row in group_rows:
+            if not operation_allowed():
+                break
             ok, message = _repair_single_missing_crop(
                 worker_conn,
                 app,
@@ -7779,6 +7863,9 @@ def repair_missing_crops(
                 try:
                     results = future.result()
                 except Exception as exc:
+                    # При штатной остановке незавершённая группа не считается ошибкой.
+                    if stop_event is not None and stop_event.is_set():
+                        continue
                     # Ошибка одной группы не должна останавливать остальные.
                     failed_group_size = int(future_groups[future])
                     with progress_lock:
@@ -7854,6 +7941,7 @@ def repair_missing_crops(
         "missing": total_missing,
         "repaired": repaired,
         "failed": failed,
+        "stopped": bool(stop_event is not None and stop_event.is_set()),
     }
 
 
