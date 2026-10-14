@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any
 from .config import APP_DIR, DB_CONFIG_FILE, DB_TYPE_SQLITE, DEFAULT_DB_PROFILE_NAME, DB_DEFAULT_PORTS
 
@@ -55,11 +56,34 @@ def _normalize_profile_storage_paths(profile: dict[str, Any]) -> dict[str, Any]:
     result = dict(profile)
     default_index_path, default_crop_path = _profile_storage_paths(result)
 
+    # Совместимость с ошибочно сохранёнными профилями, где URL ранее
+    # мог быть указан в поле локального каталога CROP.
+    crop_path_value = str(result.get("crop_path") or "").strip()
+    parsed_crop_path = urlparse(crop_path_value)
+    if parsed_crop_path.scheme.lower() in {"http", "https"} and parsed_crop_path.netloc:
+        if not str(result.get("crop_url") or "").strip():
+            result["crop_url"] = crop_path_value.rstrip("/")
+        result["crop_path"] = default_crop_path
+
     if not str(result.get("index_path") or "").strip():
         result["index_path"] = default_index_path
 
     if not str(result.get("crop_path") or "").strip():
         result["crop_path"] = default_crop_path
+
+    # URL используется только браузером для чтения CROP-файлов.
+    # Запись и восстановление всегда направляются в crop_path.
+    crop_url = str(result.get("crop_url") or "").strip()
+    if crop_url:
+        parsed_crop_url = urlparse(crop_url)
+        if parsed_crop_url.scheme.lower() not in {"http", "https"} or not parsed_crop_url.netloc:
+            # Не ломаем загрузку уже существующих профилей из-за старого
+            # ошибочного значения. В GUI новое неверное значение отдельно
+            # блокируется проверкой collect_profile().
+            crop_url = ""
+        else:
+            crop_url = crop_url.rstrip("/")
+    result["crop_url"] = crop_url
 
     return result
 
@@ -88,6 +112,7 @@ def _default_profile() -> dict[str, Any]:
         "crop_path": str(
             APP_DIR / "face_images" / "sqlite_faces_pending"
         ),
+        "crop_url": "",
     }
 
 
