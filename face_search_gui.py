@@ -3569,7 +3569,7 @@ class FaceSearchGUI:
         self.root.bind("<Configure>", self._on_window_configure, add="+")
 
         self.status_var.set("Запуск: подготовка базы данных и проверка CUDA...")
-        self.stats_var.set("\nПодключение к БД и подсчёт статистики.\nДождитесь завершения...")
+        self.stats_var.set("    Подключение к БД и подсчёт статистики.\n    Дождитесь завершения...")
         self.progress.config(mode="indeterminate")
         self.progress.start(10)
         self._show_startup_progress("Подготовка базы данных и проверка CUDA...")
@@ -4762,23 +4762,23 @@ class FaceSearchGUI:
         # --------------------------------------------------------
         # Импорт image + JSON
         # --------------------------------------------------------
-        import_frame = ttk.LabelFrame(
-            self.root,
-            text="Импорт изображений с метаданными",
-            padding=8,
-        )
-        import_frame.pack(fill="x", padx=10, pady=(0, 5))
+        # import_frame = ttk.LabelFrame(
+        #     self.root,
+        #     text="Импорт изображений с метаданными",
+        #     padding=8,
+        # )
+        # import_frame.pack(fill="x", padx=10, pady=(0, 5))
 
-        ttk.Label(
-            import_frame,
-            text=(
-                "Режим с JSON: для image.jpg используется одноимённый image.json, "
-                "данные сохраняются в профиле. Режим без JSON: сохраняются только лица "
-                "и путь к исходной фотографии на HDD. Удаление исходников управляется чекбоксом выше."
-            ),
-            wraplength=1100,
-            justify="left",
-        ).pack(anchor="w")
+        # ttk.Label(
+        #     import_frame,
+        #     text=(
+        #         "Режим с JSON: для image.jpg используется одноимённый image.json, "
+        #         "данные сохраняются в профиле. Режим без JSON: сохраняются только лица "
+        #         "и путь к исходной фотографии на HDD. Удаление исходников управляется чекбоксом выше."
+        #     ),
+        #     wraplength=1100,
+        #     justify="left",
+        # ).pack(anchor="w")
 
         ttk.Separator(
             self.root
