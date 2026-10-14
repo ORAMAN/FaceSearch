@@ -1589,6 +1589,107 @@ def _rollback_crop_file_writes(
             pass
 
 
+def _restore_missing_source_crops(
+    conn: DatabaseConnection,
+    image: np.ndarray,
+    detected_faces: list[Any],
+    crop_rows: list[tuple[int, str]],
+    *,
+    min_match_similarity: float = 0.20,
+) -> int:
+    """Создаёт только отсутствующие CROP для уже известных записей images.
+
+    Не вставляет и не обновляет строки БД/embedding: путь каждой строки
+    берётся из images.path и разрешается относительно CROP_DIR профиля.
+    Детектированные лица сопоставляются с сохранёнными embedding, чтобы
+    изменившийся исходник не подменил старый CROP лицом другого человека.
+    """
+    if image is None or not detected_faces or not crop_rows:
+        return 0
+
+    used_faces: set[int] = set()
+    restored = 0
+
+    for image_id, stored_path in crop_rows:
+        image_id = int(image_id)
+        target = _resolve_db_crop_path(stored_path, image_id=image_id)
+        if target.is_file():
+            # И для существующего CROP резервируем его соответствующее лицо,
+            # чтобы строки с отсутствующим файлом не сопоставились с ним повторно.
+            pass
+
+        embedding_row = conn.execute(
+            "SELECT embedding, embedding_dim FROM faces WHERE image_id = ? ORDER BY id LIMIT 1",
+            (image_id,),
+        ).fetchone()
+        if not embedding_row:
+            continue
+
+        try:
+            stored_embedding = blob_to_embedding(
+                embedding_row[0], int(embedding_row[1])
+            )
+        except Exception as exc:
+            print(f"[CROP] image_id={image_id}: embedding недоступен: {exc}")
+            continue
+
+        candidates = [i for i in range(len(detected_faces)) if i not in used_faces]
+        if not candidates:
+            candidates = list(range(len(detected_faces)))
+
+        best_index = -1
+        best_similarity = -1.0
+        for index in candidates:
+            try:
+                similarity = _cosine_similarity(
+                    stored_embedding,
+                    np.asarray(
+                        detected_faces[index].normed_embedding, dtype=np.float32
+                    ),
+                )
+            except Exception:
+                continue
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_index = index
+
+        if best_index < 0 or best_similarity < min_match_similarity:
+            continue
+
+        used_faces.add(best_index)
+        if target.is_file():
+            continue
+
+        crop_result = _safe_crop(
+            image, detected_faces[best_index].bbox.astype(np.float32)
+        )
+        if crop_result is None:
+            continue
+
+        crop, _crop_left, _crop_top = crop_result
+        crop, _scale = _resize_crop_for_storage(crop)
+        try:
+            encoded, _sha256 = _face_crop_encoded(crop)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_name(
+                f".{target.stem}.restore_{threading.get_ident()}_{time.time_ns()}.tmp"
+            )
+            try:
+                tmp.write_bytes(encoded)
+                tmp.replace(target)
+            finally:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            restored += 1
+            print(f"[CROP] Восстановлен существующий image_id={image_id}: {target}")
+        except Exception as exc:
+            print(f"[CROP] Не удалось восстановить image_id={image_id} в {target}: {exc}")
+
+    return restored
+
+
 def import_image_bundle(
     conn: DatabaseConnection,
     app: FaceAnalysis,
@@ -1639,18 +1740,22 @@ def import_image_bundle(
     created = 0
     created_files: list[Path] = []
     crop_file_backups: dict[Path, bytes] = {}
-    old_crop_rows = (
-        _find_existing_source_crop_rows(
-            conn,
-            source_type="import",
-            source_url=source_url,
-            profile_id=profile_id,
-            url_image=metadata_image_url,
-            fallback_image_url=fallback_image_url,
-        )
-        if overwrite_existing_crops
-        else []
+    existing_source_rows = _find_existing_source_crop_rows(
+        conn,
+        source_type="import",
+        source_url=source_url,
+        profile_id=profile_id,
+        url_image=metadata_image_url,
+        fallback_image_url=fallback_image_url,
     )
+    restored_missing_crops = 0
+    if create_crop_files and not overwrite_existing_crops and existing_source_rows:
+        restored_missing_crops = _restore_missing_source_crops(
+            conn, image, valid_faces, existing_source_rows
+        )
+    # При обычном сканировании существующие записи не переписываем; используем
+    # их как слоты для обновления лишь при явном включении перезаписи.
+    old_crop_rows = existing_source_rows if overwrite_existing_crops else []
 
     old_crop_row_index = 0
     updated_count = 0
@@ -1800,9 +1905,13 @@ def import_image_bundle(
                     deleted = False
             else:
                 deleted = False
+            message = "crop уже есть в БД"
+            if restored_missing_crops:
+                message += f"; восстановлено CROP: {restored_missing_crops}"
             return {
-                "faces": 0, "deleted": deleted, "message": "crop уже есть в БД",
+                "faces": 0, "deleted": deleted, "message": message,
                 "updated": 0, "added": 0, "removed": 0,
+                "restored": restored_missing_crops,
             }
 
         conn.commit()
@@ -1878,6 +1987,22 @@ def process_local_image(
     )
 
     if existing_rows and not overwrite_existing_crops:
+        missing_existing_rows = [
+            (image_id, stored_path)
+            for image_id, stored_path in existing_rows
+            if not _resolve_db_crop_path(stored_path, image_id=int(image_id)).is_file()
+        ]
+        restored_missing_crops = 0
+        if create_crop_files and missing_existing_rows:
+            existing_image = load_image(image_path)
+            if existing_image is not None:
+                existing_faces = _detect_faces_with_padding(
+                    app, existing_image, padding_ratio=0.40
+                )
+                restored_missing_crops = _restore_missing_source_crops(
+                    conn, existing_image, existing_faces, existing_rows
+                )
+
         deleted = False
         if delete_source:
             try:
@@ -1885,10 +2010,14 @@ def process_local_image(
                 deleted = True
             except OSError:
                 deleted = False
+        message = "исходник уже есть в БД"
+        if restored_missing_crops:
+            message += f"; восстановлено CROP: {restored_missing_crops}"
         return {
             "faces": 0,
             "deleted": deleted,
-            "message": "исходник уже есть в БД",
+            "message": message,
+            "restored": restored_missing_crops,
         }
 
     image = load_image(image_path)
