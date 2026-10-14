@@ -32,6 +32,8 @@ def _load_gui_settings() -> dict[str, Any]:
     settings = {
         "window_geometry": "1250x900",
         "window_maximized": True,
+        "theme": "light",
+        "paned_sash_position": 0,
         "selected_db_profile": "",
         "selected_folder": "",
         "query_image": "",
@@ -63,6 +65,12 @@ def _load_gui_settings() -> dict[str, Any]:
                 settings["window_maximized"] = _xml_bool(
                     value, settings["window_maximized"]
                 )
+            value = node.findtext("theme")
+            if value is not None:
+                settings["theme"] = "dark" if value.strip().lower() == "dark" else "light"
+            settings["paned_sash_position"] = max(
+                0, _xml_int(node.findtext("paned_sash_position"), 0)
+            )
 
         node = root.find("database")
         if node is not None:
@@ -146,6 +154,11 @@ def _save_gui_settings_data(settings: dict[str, Any]) -> None:
     )
     ET.SubElement(node, "maximized").text = (
         "true" if bool(settings.get("window_maximized")) else "false"
+    )
+    theme = str(settings.get("theme") or "light").strip().lower()
+    ET.SubElement(node, "theme").text = "dark" if theme == "dark" else "light"
+    ET.SubElement(node, "paned_sash_position").text = str(
+        max(0, _xml_int(settings.get("paned_sash_position"), 0))
     )
 
     node = ET.SubElement(root, "database")
