@@ -4530,31 +4530,30 @@ class FaceSearchGUI:
         self._save_gui_settings()
 
     def _apply_theme(self):
-        """Применяет тему к ttk-виджетам и обычным tkinter Listbox/Canvas."""
+        """Применяет согласованную светлую/тёмную палитру ко всему главному окну."""
         dark = self.theme_mode == "dark"
         colors = {
-            "window": "#17191c" if dark else "#f0f0f0",
-            "surface": "#202328" if dark else "#f0f0f0",
-            "panel": "#262a30" if dark else "#e9e9e9",
-            "field": "#181b1f" if dark else "#ffffff",
-            "foreground": "#e6e9ed" if dark else "#202020",
-            "muted": "#aeb6c0" if dark else "#555555",
-            "border": "#414750" if dark else "#b8b8b8",
-            "button": "#30353d" if dark else "#e6e6e6",
-            "button_active": "#414852" if dark else "#d7d7d7",
-            "selection": "#245b91" if dark else "#c8ddf3",
-            "accent": "#3986d7" if dark else "#1769aa",
-            "canvas": "#202328" if dark else "#ffffff",
+            "window": "#141820" if dark else "#f3f5f9",
+            "surface": "#1d232d" if dark else "#ffffff",
+            "panel": "#252d39" if dark else "#eaf0f7",
+            "field": "#151a22" if dark else "#ffffff",
+            "foreground": "#e9edf4" if dark else "#202939",
+            "muted": "#a6b0c0" if dark else "#667085",
+            "border": "#354052" if dark else "#d6deea",
+            "button": "#293342" if dark else "#ffffff",
+            "button_active": "#36455a" if dark else "#eaf1fc",
+            "selection": "#245b91" if dark else "#d8e8ff",
+            "accent": "#3584f5" if dark else "#1769d2",
+            "accent_active": "#4a93fa" if dark else "#0f58b8",
+            "canvas": "#151a22" if dark else "#ffffff",
+            "danger": "#a9333f" if dark else "#c43d4b",
         }
         self.theme_colors = colors
 
+        # Clam позволяет одинаково контролировать палитру на Windows, Linux и macOS;
+        # нативная Vista-тема игнорирует ряд цветов и делает интерфейс неоднородным.
         try:
-            names = self.style.theme_names()
-            if dark and "clam" in names:
-                self.style.theme_use("clam")
-            elif not dark and "vista" in names:
-                self.style.theme_use("vista")
-            elif "clam" in names:
+            if "clam" in self.style.theme_names():
                 self.style.theme_use("clam")
         except tk.TclError:
             pass
@@ -4562,46 +4561,161 @@ class FaceSearchGUI:
         try:
             self.root.configure(background=colors["window"])
             style = self.style
+            style.configure(".", font=("Segoe UI", 9))
             style.configure("TFrame", background=colors["window"])
-            style.configure("TLabel", background=colors["window"], foreground=colors["foreground"])
-            style.configure("TLabelframe", background=colors["window"], foreground=colors["foreground"], bordercolor=colors["border"])
-            style.configure("TLabelframe.Label", background=colors["window"], foreground=colors["foreground"])
-            style.configure("TButton", background=colors["button"], foreground=colors["foreground"], bordercolor=colors["border"], padding=(8, 4))
+            style.configure("App.TFrame", background=colors["window"])
+            style.configure("Header.TFrame", background=colors["surface"])
+            style.configure("Surface.TFrame", background=colors["surface"])
+            style.configure("Inset.TFrame", background=colors["panel"])
+            style.configure(
+                "TLabel", background=colors["window"], foreground=colors["foreground"],
+                font=("Segoe UI", 9),
+            )
+            style.configure(
+                "Title.TLabel", background=colors["surface"], foreground=colors["foreground"],
+                font=("Segoe UI Semibold", 19),
+            )
+            style.configure(
+                "Subtitle.TLabel", background=colors["surface"], foreground=colors["muted"],
+                font=("Segoe UI", 9),
+            )
+            style.configure(
+                "Section.TLabel", background=colors["surface"], foreground=colors["foreground"],
+                font=("Segoe UI Semibold", 10),
+            )
+            style.configure(
+                "Surface.TLabel", background=colors["surface"], foreground=colors["foreground"],
+            )
+            style.configure(
+                "SurfaceMuted.TLabel", background=colors["surface"], foreground=colors["muted"],
+            )
+            style.configure(
+                "Inset.TLabel", background=colors["panel"], foreground=colors["foreground"],
+            )
+            style.configure(
+                "InsetMuted.TLabel", background=colors["panel"], foreground=colors["muted"],
+            )
+            style.configure(
+                "Muted.TLabel", background=colors["window"], foreground=colors["muted"],
+            )
+            style.configure(
+                "Status.TLabel", background=colors["surface"], foreground=colors["muted"],
+                padding=(8, 5),
+            )
+            style.configure(
+                "TLabelframe", background=colors["window"], foreground=colors["foreground"],
+                bordercolor=colors["border"], relief="solid", padding=8,
+            )
+            style.configure(
+                "TLabelframe.Label", background=colors["window"], foreground=colors["muted"],
+                font=("Segoe UI Semibold", 9),
+            )
+            style.configure(
+                "TButton", background=colors["button"], foreground=colors["foreground"],
+                bordercolor=colors["border"], padding=(10, 7), font=("Segoe UI", 9),
+                relief="flat",
+            )
             style.map(
                 "TButton",
-                background=[("disabled", colors["surface"]), ("pressed", colors["selection"]), ("active", colors["button_active"])],
+                background=[("disabled", colors["panel"]), ("pressed", colors["selection"]),
+                            ("active", colors["button_active"])],
+                foreground=[("disabled", colors["muted"]), ("!disabled", colors["foreground"])],
+                bordercolor=[("focus", colors["accent"])],
+            )
+            style.configure(
+                "Primary.TButton", background=colors["accent"], foreground="#ffffff",
+                bordercolor=colors["accent"], padding=(12, 8), font=("Segoe UI Semibold", 9),
+            )
+            style.map(
+                "Primary.TButton",
+                background=[("disabled", colors["panel"]), ("pressed", colors["accent_active"]),
+                            ("active", colors["accent_active"])],
+                foreground=[("disabled", colors["muted"]), ("!disabled", "#ffffff")],
+            )
+            style.configure(
+                "Danger.TButton", background=colors["danger"], foreground="#ffffff",
+                bordercolor=colors["danger"], padding=(10, 7), font=("Segoe UI Semibold", 9),
+            )
+            style.map(
+                "Danger.TButton",
+                background=[("disabled", colors["panel"]), ("pressed", colors["danger"]),
+                            ("active", colors["danger"])],
+                foreground=[("disabled", colors["muted"]), ("!disabled", "#ffffff")],
+            )
+            style.configure(
+                "Theme.TButton", background=colors["panel"], foreground=colors["foreground"],
+                bordercolor=colors["border"], padding=(0, 0), font=("Segoe UI Symbol", 13),
+            )
+            style.map(
+                "Theme.TButton", background=[("pressed", colors["selection"]),
+                                               ("active", colors["button_active"])],
+            )
+            style.configure(
+                "TEntry", fieldbackground=colors["field"], foreground=colors["foreground"],
+                insertcolor=colors["foreground"], bordercolor=colors["border"], padding=(7, 6),
+            )
+            style.map("TEntry", fieldbackground=[("disabled", colors["panel"])])
+            style.configure(
+                "TCombobox", fieldbackground=colors["field"], background=colors["button"],
+                foreground=colors["foreground"], arrowcolor=colors["muted"],
+                bordercolor=colors["border"], padding=(7, 5),
+            )
+            style.map(
+                "TCombobox",
+                fieldbackground=[("readonly", colors["field"]), ("disabled", colors["panel"])],
+                foreground=[("disabled", colors["muted"]), ("readonly", colors["foreground"])],
+                selectbackground=[("readonly", colors["selection"])],
+                selectforeground=[("readonly", colors["foreground"])],
+            )
+            style.configure(
+                "TSpinbox", fieldbackground=colors["field"], foreground=colors["foreground"],
+                arrowcolor=colors["muted"], bordercolor=colors["border"], padding=(4, 4),
+            )
+            style.configure("TCheckbutton", background=colors["window"], foreground=colors["foreground"], padding=(2, 3))
+            style.map(
+                "TCheckbutton", background=[("active", colors["window"])],
                 foreground=[("disabled", colors["muted"]), ("!disabled", colors["foreground"])],
             )
-            style.configure("Theme.TButton", background=colors["button"], foreground=colors["foreground"], bordercolor=colors["border"], padding=(0, 2), font=("Segoe UI Symbol", 11))
-            style.map("Theme.TButton", background=[("pressed", colors["selection"]), ("active", colors["button_active"])], foreground=[("!disabled", colors["foreground"])])
-            style.configure("TEntry", fieldbackground=colors["field"], foreground=colors["foreground"], insertcolor=colors["foreground"], bordercolor=colors["border"])
-            style.configure("TCombobox", fieldbackground=colors["field"], background=colors["button"], foreground=colors["foreground"], arrowcolor=colors["foreground"], bordercolor=colors["border"])
-            style.map("TCombobox", fieldbackground=[("readonly", colors["field"]), ("disabled", colors["surface"])], foreground=[("disabled", colors["muted"]), ("readonly", colors["foreground"])], selectbackground=[("readonly", colors["selection"])], selectforeground=[("readonly", colors["foreground"])])
-            style.configure("TSpinbox", fieldbackground=colors["field"], foreground=colors["foreground"], arrowcolor=colors["foreground"], bordercolor=colors["border"])
-            style.configure("TCheckbutton", background=colors["window"], foreground=colors["foreground"])
-            style.map("TCheckbutton", background=[("active", colors["window"])], foreground=[("disabled", colors["muted"]), ("!disabled", colors["foreground"])])
-            style.configure("TRadiobutton", background=colors["window"], foreground=colors["foreground"])
-            style.map("TRadiobutton", background=[("active", colors["window"])], foreground=[("disabled", colors["muted"]), ("!disabled", colors["foreground"])])
+            style.configure("TRadiobutton", background=colors["window"], foreground=colors["foreground"], padding=(2, 3))
+            style.map(
+                "TRadiobutton", background=[("active", colors["window"])],
+                foreground=[("disabled", colors["muted"]), ("!disabled", colors["foreground"])],
+            )
             style.configure("TSeparator", background=colors["border"])
-            style.configure("TPanedwindow", background=colors["window"])
-            style.configure("TProgressbar", background=colors["accent"], troughcolor=colors["panel"], bordercolor=colors["border"], lightcolor=colors["accent"], darkcolor=colors["accent"])
-            style.configure("TScrollbar", background=colors["button"], troughcolor=colors["surface"], bordercolor=colors["border"], arrowcolor=colors["foreground"])
-            style.configure("Treeview", background=colors["field"], fieldbackground=colors["field"], foreground=colors["foreground"])
-            style.configure("Treeview.Heading", background=colors["button"], foreground=colors["foreground"])
-            style.map("Treeview", background=[("selected", colors["selection"])], foreground=[("selected", "#ffffff" if dark else "#111111")])
+            style.configure("TPanedwindow", background=colors["border"])
+            style.configure(
+                "TProgressbar", background=colors["accent"], troughcolor=colors["panel"],
+                bordercolor=colors["panel"], lightcolor=colors["accent"], darkcolor=colors["accent"],
+            )
+            style.configure(
+                "TScrollbar", background=colors["button"], troughcolor=colors["surface"],
+                bordercolor=colors["border"], arrowcolor=colors["muted"],
+            )
+            style.configure(
+                "Treeview", background=colors["field"], fieldbackground=colors["field"],
+                foreground=colors["foreground"], rowheight=27, bordercolor=colors["border"],
+                font=("Segoe UI", 9),
+            )
+            style.configure(
+                "Treeview.Heading", background=colors["panel"], foreground=colors["foreground"],
+                font=("Segoe UI Semibold", 9), padding=(8, 7),
+            )
+            style.map(
+                "Treeview", background=[("selected", colors["accent"])],
+                foreground=[("selected", "#ffffff")],
+            )
         except tk.TclError:
             pass
 
-        # Эти виджеты используют tk, а не ttk, поэтому настраиваются отдельно.
         for widget, options in (
             (getattr(self, "face_list", None), {
                 "background": colors["field"], "foreground": colors["foreground"],
-                "selectbackground": colors["selection"],
-                "selectforeground": "#ffffff" if dark else "#111111",
+                "selectbackground": colors["accent"], "selectforeground": "#ffffff",
                 "highlightbackground": colors["border"], "highlightcolor": colors["accent"],
+                "relief": "flat", "borderwidth": 0, "font": ("Segoe UI", 10),
             }),
             (getattr(self, "canvas", None), {
-                "background": colors["canvas"], "highlightbackground": colors["window"],
+                "background": colors["canvas"], "highlightbackground": colors["border"],
             }),
         ):
             if widget is not None:
@@ -4611,8 +4725,7 @@ class FaceSearchGUI:
                     pass
 
         if hasattr(self, "theme_toggle_btn"):
-            # Значок показывает тему, на которую переключит кнопка.
-            self.theme_toggle_btn.configure(text="☀" if dark else "☾")
+            self.theme_toggle_btn.configure(text="☼" if dark else "☾")
 
         try:
             for child in self.root.winfo_children():
@@ -4622,591 +4735,356 @@ class FaceSearchGUI:
             pass
 
     def _build_ui(self):
+        """Создаёт современную компоновку интерфейса, не меняя обработчики приложения."""
         self.style = ttk.Style(self.root)
         try:
-            self.style.theme_use("vista")
+            self.style.theme_use("clam")
         except tk.TclError:
             pass
-        # except tk.TclError as e:
-        #     print("iconbitmap failed:", e)
+
+        self.root.option_add("*Font", ("Segoe UI", 9))
+        self.status_var = tk.StringVar(value="Готово")
+        self.stats_var = tk.StringVar(value="Статистика базы будет показана после подключения.")
+
+        # Контейнер всей страницы — единые внешние отступы вместо разрозненных полей.
+        self.page = ttk.Frame(self.root, style="App.TFrame", padding=(14, 10, 14, 8))
+        self.page.pack(fill="both", expand=True)
 
         # --------------------------------------------------------
-        # Локальное сканирование
+        # Заголовок приложения
         # --------------------------------------------------------
-        top = ttk.Frame(self.root, padding=10)
-        top.pack(fill="x")
-
-        self.choose_folder_btn = ttk.Button(
-            top,
-            text="📁 Выбрать папку",
-            command=self.choose_folder,
-        )
-        self.choose_folder_btn.pack(side="left", padx=(0, 8))
-
-        saved_folder = str(
-            self.gui_settings.get("selected_folder") or ""
-        ).strip()
-        self.folder_var = tk.StringVar(
-            value=saved_folder or "Папка не выбрана"
-        )
-
+        header = ttk.Frame(self.page, style="Header.TFrame", padding=(14, 10))
+        header.pack(fill="x", pady=(0, 10))
+        header_text = ttk.Frame(header, style="Header.TFrame")
+        header_text.pack(side="left", fill="x", expand=True)
+        ttk.Label(header_text, text="FaceSearch", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
-            top,
-            textvariable=self.folder_var,
-        ).pack(side="left", fill="x", expand=True)
-
-        self.local_workers_var = tk.IntVar(
-            value=max(
-                1,
-                min(
-                    LOCAL_MAX_WORKERS,
-                    int(
-                        self.gui_settings.get(
-                            "workers",
-                            LOCAL_DEFAULT_WORKERS,
-                        )
-                    ),
-                ),
-            )
-        )
-
-        self.auto_workers_var = tk.BooleanVar(
-            value=bool(self.gui_settings.get("auto_workers", AUTO_WORKERS_DEFAULT))
-        )
-        self.local_workers_spinbox = ttk.Spinbox(
-            top,
-            from_=1,
-            to=LOCAL_MAX_WORKERS,
-            textvariable=self.local_workers_var,
-            width=5,
-        )
-        self.local_workers_spinbox.pack(side="right", padx=(5, 0))
-        ttk.Label(top, text="Потоки обработки:").pack(side="right", padx=(15, 5))
-        self.auto_workers_check = ttk.Checkbutton(
-            top,
-            text="Автоподстройка потоков",
-            variable=self.auto_workers_var,
-            command=self._on_auto_workers_changed,
-        )
-        self.auto_workers_check.pack(side="right", padx=(12, 8))
+            header_text,
+            text="Поиск лиц • локальные коллекции • FAISS / CUDA",
+            style="Subtitle.TLabel",
+        ).pack(anchor="w", pady=(1, 0))
 
         self.theme_toggle_btn = ttk.Button(
-            top,
+            header,
             text="☾",
             width=3,
             style="Theme.TButton",
             command=self.toggle_theme,
             takefocus=True,
         )
-        self.theme_toggle_btn.pack(side="right", padx=(8, 0), ipadx=0)
+        self.theme_toggle_btn.pack(side="right", padx=(12, 0), ipadx=0, ipady=3)
 
+        # --------------------------------------------------------
+        # Источник изображений и действия
+        # --------------------------------------------------------
+        source_frame = ttk.LabelFrame(
+            self.page, text="Источник изображений", padding=(10, 8),
+        )
+        source_frame.pack(fill="x", pady=(0, 8))
+        source_row = ttk.Frame(source_frame)
+        source_row.pack(fill="x")
+
+        self.choose_folder_btn = ttk.Button(
+            source_row, text="▣  Выбрать папку", command=self.choose_folder,
+        )
+        self.choose_folder_btn.pack(side="left", padx=(0, 10))
+        saved_folder = str(self.gui_settings.get("selected_folder") or "").strip()
+        self.folder_var = tk.StringVar(value=saved_folder or "Папка не выбрана")
+        ttk.Label(
+            source_row, textvariable=self.folder_var, style="Muted.TLabel", anchor="w",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+        self.local_workers_var = tk.IntVar(
+            value=max(1, min(LOCAL_MAX_WORKERS, int(self.gui_settings.get("workers", LOCAL_DEFAULT_WORKERS))))
+        )
+        self.auto_workers_var = tk.BooleanVar(
+            value=bool(self.gui_settings.get("auto_workers", AUTO_WORKERS_DEFAULT))
+        )
+        self.auto_workers_check = ttk.Checkbutton(
+            source_row, text="Автоподстройка", variable=self.auto_workers_var,
+            command=self._on_auto_workers_changed,
+        )
+        self.auto_workers_check.pack(side="right", padx=(10, 6))
+        ttk.Label(source_row, text="Потоки:", style="Muted.TLabel").pack(side="right", padx=(8, 4))
+        self.local_workers_spinbox = ttk.Spinbox(
+            source_row, from_=1, to=LOCAL_MAX_WORKERS,
+            textvariable=self.local_workers_var, width=4,
+        )
+        self.local_workers_spinbox.pack(side="right")
+
+        action_row = ttk.Frame(self.page, padding=(0, 0, 0, 8))
+        action_row.pack(fill="x")
         self.scan_btn = ttk.Button(
-            top,
-            text="▶ Сканировать GPU",
+            action_row, text="▶  Сканировать GPU", style="Primary.TButton",
             command=self.start_scan,
         )
-        self.scan_btn.pack(side="right", padx=(8, 0))
-
+        self.scan_btn.pack(side="left", padx=(0, 8))
         self.index_btn = ttk.Button(
-            top,
-            text="⚙ Обновить индекс (CPU + GPU)",
-            command=self.start_index,
+            action_row, text="⟳  Обновить индекс", command=self.start_index,
         )
-        self.index_btn.pack(side="right")
-
+        self.index_btn.pack(side="left", padx=(0, 8))
         self.repair_crops_btn = ttk.Button(
-            top,
-            text="🛠 Проверить CROP",
-            command=self.start_crop_repair,
+            action_row, text="◇  Проверить CROP", command=self.start_crop_repair,
         )
-        self.repair_crops_btn.pack(side="right", padx=(0, 8))
-
-        # --------------------------------------------------------
-        # Выбор базы данных
-        # --------------------------------------------------------
-        db_frame = ttk.LabelFrame(
-            self.root,
-            text="База данных",
-            padding=(8, 5),
-        )
-        db_frame.pack(fill="x", padx=10, pady=(0, 5))
-
-        ttk.Label(
-            db_frame,
-            text="Активная БД:",
-        ).pack(side="left", padx=(0, 6))
-
-        self.db_combo = ttk.Combobox(
-            db_frame,
-            textvariable=self.db_profile_var,
-            state="readonly",
-            width=42,
-        )
-        self.db_combo.pack(side="left", padx=(0, 6))
-        self.db_combo.bind("<<ComboboxSelected>>", self._on_database_selected)
-
-        self.connect_db_btn = ttk.Button(
-            db_frame,
-            text="Подключиться",
-            command=self.switch_database,
-        )
-        self.connect_db_btn.pack(side="left", padx=(0, 5))
-
-        self.refresh_db_btn = ttk.Button(
-            db_frame,
-            text="⟳ Обновить",
-            command=self.refresh_database_info,
-        )
-        self.refresh_db_btn.pack(side="left", padx=(0, 5))
-
-        self.new_db_btn = ttk.Button(
-            db_frame,
-            text="➕ Новая БД",
-            command=self.new_database_profile,
-        )
-        self.new_db_btn.pack(side="left", padx=(0, 5))
-
-        self.edit_db_btn = ttk.Button(
-            db_frame,
-            text="⚙ Настроить",
-            command=self.edit_database_profile,
-        )
-        self.edit_db_btn.pack(side="left", padx=(0, 5))
-
-        self.delete_db_btn = ttk.Button(
-            db_frame,
-            text="✕ Удалить профиль",
-            command=self.delete_database_profile,
-        )
-        self.delete_db_btn.pack(side="left", padx=(0, 5))
-
-        self.migrate_db_btn = ttk.Button(
-            db_frame,
-            text="⇄ Миграция БД",
-            command=self.open_database_migration,
-        )
-        self.migrate_db_btn.pack(side="left", padx=(0, 5))
-
-        info_frame = ttk.Frame(db_frame)
-        info_frame.pack(side="left", padx=(15, 0), fill="x", expand=True)
-
-        self.db_info_var = tk.StringVar(value="")
-        ttk.Label(
-            info_frame,
-            textvariable=self.db_info_var,
-            anchor="w",
-        ).pack(fill="x")
-
-        self.db_connection_var = tk.StringVar(value="Соединение: инициализация...")
-        ttk.Label(
-            info_frame,
-            textvariable=self.db_connection_var,
-            anchor="w",
-        ).pack(fill="x")
-
-        self.startup_progress_frame = ttk.Frame(info_frame)
-        self.startup_progress_label_var = tk.StringVar(value="")
-        ttk.Label(
-            self.startup_progress_frame,
-            textvariable=self.startup_progress_label_var,
-            anchor="w",
-        ).pack(side="left", fill="x", expand=True)
-        self.startup_progress = ttk.Progressbar(
-            self.startup_progress_frame,
-            mode="indeterminate",
-            length=150,
-        )
-        self.startup_progress.pack(side="right", padx=(8, 0))
-        # Изначально строка скрыта. Она появляется только на время реальной
-        # стартовой операции/загрузки FAISS, а не просто потому, что GUI создан.
-        self.startup_progress_frame.pack_forget()
-
-        self._refresh_database_combo()
-
-        # --------------------------------------------------------
-        # Backend GPU / CPU
-        # --------------------------------------------------------
-        backend_frame = ttk.LabelFrame(
-            self.root,
-            text="Вычисления",
-            padding=(8, 5),
-        )
-        backend_frame.pack(fill="x", padx=10, pady=(0, 5))
-
-        self.backend_gpu_radio = ttk.Radiobutton(
-            backend_frame,
-            text="GPU (CUDA → CPU fallback)",
-            value=BACKEND_GPU,
-            variable=self.backend_mode_var,
-            command=self._on_backend_change,
-        )
-        self.backend_gpu_radio.pack(side="left", padx=(0, 15))
-
-        self.backend_cpu_radio = ttk.Radiobutton(
-            backend_frame,
-            text="CPU",
-            value=BACKEND_CPU,
-            variable=self.backend_mode_var,
-            command=self._on_backend_change,
-        )
-        self.backend_cpu_radio.pack(side="left", padx=(0, 15))
-
-        ttk.Label(
-            backend_frame,
-            textvariable=self.backend_status_var,
-        ).pack(side="left", fill="x", expand=True)
-
-        self._update_backend_ui()
-
-        # --------------------------------------------------------
-        # Параметры локального сканирования
-        # --------------------------------------------------------
-        scan_options = ttk.Frame(self.root, padding=(10, 0, 10, 5))
-        scan_options.pack(fill="x")
-
-        self.delete_processed_var = tk.BooleanVar(
-            value=bool(self.gui_settings.get("delete_processed", False))
-        )
-        self.delete_processed_check = ttk.Checkbutton(
-            scan_options,
-            text="Удалять обработанные исходные файлы",
-            variable=self.delete_processed_var,
-        )
-        self.delete_processed_check.pack(side="left", padx=(0, 20))
-
-        self.use_json_metadata_var = tk.BooleanVar(
-            value=bool(self.gui_settings.get("use_json_metadata", True))
-        )
-        self.use_json_metadata_check = ttk.Checkbutton(
-            scan_options,
-            text="Использовать JSON-описание",
-            variable=self.use_json_metadata_var,
-        )
-        self.use_json_metadata_check.pack(side="left", padx=(0, 20))
-
-        self.create_crop_files_var = tk.BooleanVar(
-            value=bool(self.gui_settings.get("create_crop_files", True))
-        )
-        self.create_crop_files_check = ttk.Checkbutton(
-            scan_options,
-            text="Создавать CROP-файлы при сканировании",
-            variable=self.create_crop_files_var,
-        )
-        self.create_crop_files_check.pack(side="left", padx=(0, 20))
-
-        self.use_local_crops_var = tk.BooleanVar(
-            value=bool(self.gui_settings.get("use_local_crops", True))
-        )
-        self.use_local_crops_check = ttk.Checkbutton(
-            scan_options,
-            text="Использовать CROP-файлы в HTML",
-            variable=self.use_local_crops_var,
-        )
-        self.use_local_crops_check.pack(side="left")
-
-        # Размещаем настройку обновления в том же ряду, что и остальные
-        # параметры сканирования: дополнительный ряд занимал вертикальное
-        # место и мог скрывать нижнюю строку состояния на невысоких экранах.
-        self.overwrite_existing_crops_var = tk.BooleanVar(
-            value=bool(self.gui_settings.get("overwrite_existing_crops", False))
-        )
-        self.overwrite_existing_crops_check = ttk.Checkbutton(
-            scan_options,
-            text="Обновлять CROP/метаданные",
-            variable=self.overwrite_existing_crops_var,
-        )
-        self.overwrite_existing_crops_check.pack(side="left")
-
-        scan_control_frame = ttk.Frame(self.root, padding=(10, 0, 10, 5))
-        scan_control_frame.pack(fill="x")
-
+        self.repair_crops_btn.pack(side="left", padx=(0, 8))
         self.pause_scan_btn = ttk.Button(
-            scan_control_frame,
-            text="⏸ Пауза",
-            command=self.toggle_scan_pause,
-            state="disabled",
+            action_row, text="Ⅱ  Пауза", command=self.toggle_scan_pause, state="disabled",
         )
         self.pause_scan_btn.pack(side="left", padx=(0, 8))
-
         self.stop_scan_btn = ttk.Button(
-            scan_control_frame,
-            text="■ Остановить",
-            command=self.stop_scan,
-            state="disabled",
+            action_row, text="■  Остановить", style="Danger.TButton",
+            command=self.stop_scan, state="disabled",
         )
         self.stop_scan_btn.pack(side="left")
 
-        # Статус операции показывается только во время сканирования/CROP repair.
-        # В состоянии ожидания не занимаем место сообщением «не запущено».
         self.scan_control_status_var = tk.StringVar(value="")
         self.scan_control_status_label = ttk.Label(
-            scan_control_frame,
-            textvariable=self.scan_control_status_var,
+            action_row, textvariable=self.scan_control_status_var, style="Muted.TLabel",
         )
-        # Метка намеренно не pack() до запуска реальной операции.
+        # Показывается только во время сканирования или восстановления CROP.
 
-        # Подробности автонастройки также нужны только пока выполняется задача.
+        # Зарезервированное место между панелью действий и настройками БД:
+        # динамический статус не должен появляться под нижней строкой приложения.
+        self.dynamic_status_area = ttk.Frame(self.page, style="App.TFrame")
+        self.dynamic_status_area.pack(fill="x")
         self.auto_workers_status_label = ttk.Label(
-            self.root,
-            textvariable=self.auto_workers_status_var,
-            anchor="w",
-            padding=(10, 0, 10, 3),
+            self.dynamic_status_area, textvariable=self.auto_workers_status_var, anchor="w",
+            style="Muted.TLabel", padding=(4, 2),
         )
-        # Метка намеренно не pack() в состоянии ожидания.
+        # Элемент появляется только во время активной адаптивной операции.
 
         # --------------------------------------------------------
-        # Импорт image + JSON
+        # Профиль базы данных: выбор/подключение отдельно от управления профилями
         # --------------------------------------------------------
-        # import_frame = ttk.LabelFrame(
-        #     self.root,
-        #     text="Импорт изображений с метаданными",
-        #     padding=8,
-        # )
-        # import_frame.pack(fill="x", padx=10, pady=(0, 5))
-
-        # ttk.Label(
-        #     import_frame,
-        #     text=(
-        #         "Режим с JSON: для image.jpg используется одноимённый image.json, "
-        #         "данные сохраняются в профиле. Режим без JSON: сохраняются только лица "
-        #         "и путь к исходной фотографии на HDD. Удаление исходников управляется чекбоксом выше."
-        #     ),
-        #     wraplength=1100,
-        #     justify="left",
-        # ).pack(anchor="w")
-
-        ttk.Separator(
-            self.root
-        ).pack(fill="x", padx=10, pady=2)
-
-
-        # --------------------------------------------------------
-        # Основная область
-        # --------------------------------------------------------
-        self.paned = ttk.Panedwindow(
-            self.root,
-            orient="horizontal",
+        db_frame = ttk.LabelFrame(
+            self.page, text="База данных", padding=(10, 8),
         )
-        paned = self.paned
-        paned.pack(
-            fill="both",
-            expand=True,
-            padx=10,
-            pady=10,
+        db_frame.pack(fill="x", pady=(0, 8))
+
+        db_select_row = ttk.Frame(db_frame)
+        db_select_row.pack(fill="x")
+        ttk.Label(db_select_row, text="Активный профиль:", style="Muted.TLabel").pack(side="left", padx=(0, 8))
+        self.db_combo = ttk.Combobox(
+            db_select_row, textvariable=self.db_profile_var, state="readonly", width=34,
         )
+        self.db_combo.pack(side="left", padx=(0, 8))
+        self.db_combo.bind("<<ComboboxSelected>>", self._on_database_selected)
+        self.connect_db_btn = ttk.Button(
+            db_select_row, text="Подключиться", style="Primary.TButton", command=self.switch_database,
+        )
+        self.connect_db_btn.pack(side="left", padx=(0, 8))
+        self.refresh_db_btn = ttk.Button(
+            db_select_row, text="↻  Обновить", command=self.refresh_database_info,
+        )
+        self.refresh_db_btn.pack(side="left")
 
-        left = ttk.Frame(paned, padding=8)
-        right = ttk.Frame(paned, padding=8)
+        db_manage_row = ttk.Frame(db_frame, padding=(0, 8, 0, 2))
+        db_manage_row.pack(fill="x")
+        self.new_db_btn = ttk.Button(
+            db_manage_row, text="＋ Новая БД", command=self.new_database_profile,
+        )
+        self.new_db_btn.pack(side="left", padx=(0, 6))
+        self.edit_db_btn = ttk.Button(
+            db_manage_row, text="Настроить", command=self.edit_database_profile,
+        )
+        self.edit_db_btn.pack(side="left", padx=(0, 6))
+        self.delete_db_btn = ttk.Button(
+            db_manage_row, text="Удалить профиль", command=self.delete_database_profile,
+        )
+        self.delete_db_btn.pack(side="left", padx=(0, 6))
+        self.migrate_db_btn = ttk.Button(
+            db_manage_row, text="⇄  Миграция БД", command=self.open_database_migration,
+        )
+        self.migrate_db_btn.pack(side="left")
 
-        paned.add(left, weight=1)
-        paned.add(right, weight=2)
-
+        info_frame = ttk.Frame(db_frame, style="Inset.TFrame", padding=(8, 6))
+        info_frame.pack(fill="x", pady=(5, 0))
+        self.db_info_var = tk.StringVar(value="")
         ttk.Label(
-            left,
-            text="Фотография для поиска",
-            font=("Segoe UI", 12, "bold"),
-        ).pack(anchor="w")
+            info_frame, textvariable=self.db_info_var, anchor="w", style="InsetMuted.TLabel",
+        ).pack(fill="x")
+        self.db_connection_var = tk.StringVar(value="Соединение: инициализация...")
+        ttk.Label(
+            info_frame, textvariable=self.db_connection_var, anchor="w", style="Inset.TLabel",
+        ).pack(fill="x", pady=(2, 0))
+        self.startup_progress_frame = ttk.Frame(info_frame, style="Inset.TFrame")
+        self.startup_progress_label_var = tk.StringVar(value="")
+        ttk.Label(
+            self.startup_progress_frame, textvariable=self.startup_progress_label_var,
+            anchor="w", style="Muted.TLabel",
+        ).pack(side="left", fill="x", expand=True)
+        self.startup_progress = ttk.Progressbar(
+            self.startup_progress_frame, mode="indeterminate", length=170,
+        )
+        self.startup_progress.pack(side="right", padx=(8, 0))
+        self.startup_progress_frame.pack_forget()
+        self._refresh_database_combo()
 
+        # --------------------------------------------------------
+        # Вычисления
+        # --------------------------------------------------------
+        backend_frame = ttk.LabelFrame(
+            self.page, text="Вычисления", padding=(10, 6),
+        )
+        backend_frame.pack(fill="x", pady=(0, 8))
+        self.backend_gpu_radio = ttk.Radiobutton(
+            backend_frame, text="GPU (CUDA с переходом на CPU при ошибке)",
+            value=BACKEND_GPU, variable=self.backend_mode_var, command=self._on_backend_change,
+        )
+        self.backend_gpu_radio.pack(side="left", padx=(0, 16))
+        self.backend_cpu_radio = ttk.Radiobutton(
+            backend_frame, text="Только CPU", value=BACKEND_CPU,
+            variable=self.backend_mode_var, command=self._on_backend_change,
+        )
+        self.backend_cpu_radio.pack(side="left", padx=(0, 16))
+        ttk.Label(
+            backend_frame, textvariable=self.backend_status_var, style="Muted.TLabel",
+        ).pack(side="left", fill="x", expand=True)
+
+        # --------------------------------------------------------
+        # Параметры сканирования. Grid не даёт длинным подписям вытеснять кнопки.
+        # --------------------------------------------------------
+        scan_options = ttk.LabelFrame(
+            self.page, text="Параметры обработки", padding=(10, 5),
+        )
+        scan_options.pack(fill="x", pady=(0, 6))
+        for column in range(3):
+            scan_options.columnconfigure(column, weight=1)
+
+        self.delete_processed_var = tk.BooleanVar(value=bool(self.gui_settings.get("delete_processed", False)))
+        self.delete_processed_check = ttk.Checkbutton(
+            scan_options, text="Удалять обработанные исходники", variable=self.delete_processed_var,
+        )
+        self.delete_processed_check.grid(row=0, column=0, sticky="w", padx=(0, 10), pady=2)
+        self.use_json_metadata_var = tk.BooleanVar(value=bool(self.gui_settings.get("use_json_metadata", True)))
+        self.use_json_metadata_check = ttk.Checkbutton(
+            scan_options, text="Использовать JSON-описание", variable=self.use_json_metadata_var,
+        )
+        self.use_json_metadata_check.grid(row=0, column=1, sticky="w", padx=(0, 10), pady=2)
+        self.create_crop_files_var = tk.BooleanVar(value=bool(self.gui_settings.get("create_crop_files", True)))
+        self.create_crop_files_check = ttk.Checkbutton(
+            scan_options, text="Создавать CROP при сканировании", variable=self.create_crop_files_var,
+        )
+        self.create_crop_files_check.grid(row=0, column=2, sticky="w", pady=2)
+        self.use_local_crops_var = tk.BooleanVar(value=bool(self.gui_settings.get("use_local_crops", True)))
+        self.use_local_crops_check = ttk.Checkbutton(
+            scan_options, text="Использовать CROP в HTML", variable=self.use_local_crops_var,
+        )
+        self.use_local_crops_check.grid(row=1, column=0, sticky="w", padx=(0, 10), pady=2)
+        self.overwrite_existing_crops_var = tk.BooleanVar(value=bool(self.gui_settings.get("overwrite_existing_crops", False)))
+        self.overwrite_existing_crops_check = ttk.Checkbutton(
+            scan_options, text="Обновлять CROP и метаданные", variable=self.overwrite_existing_crops_var,
+        )
+        self.overwrite_existing_crops_check.grid(row=1, column=1, sticky="w", padx=(0, 10), pady=2)
+
+        # --------------------------------------------------------
+        # Область поиска и просмотра
+        # --------------------------------------------------------
+        self.paned = ttk.Panedwindow(self.page, orient="horizontal")
+        self.paned.pack(fill="both", expand=True, pady=(4, 8))
+        left = ttk.Frame(self.paned, style="Surface.TFrame", padding=(12, 10))
+        right = ttk.Frame(self.paned, style="Surface.TFrame", padding=(12, 10))
+        self.paned.add(left, weight=1)
+        self.paned.add(right, weight=2)
+
+        ttk.Label(left, text="Поиск по лицу", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(
+            left, text="Выберите фотографию и лицо для поиска похожих изображений.",
+            style="SurfaceMuted.TLabel", wraplength=320, justify="left",
+        ).pack(anchor="w", pady=(2, 8))
         self.choose_query_btn = ttk.Button(
-            left,
-            text="🖼 Выбрать фотографию",
-            command=self.choose_query,
+            left, text="▧  Выбрать фотографию", style="Primary.TButton", command=self.choose_query,
         )
-        self.choose_query_btn.pack(fill="x", pady=8)
+        self.choose_query_btn.pack(fill="x", pady=(0, 8))
 
-        saved_query = str(
-            self.gui_settings.get("query_image") or ""
-        ).strip()
-        self.query_var = tk.StringVar(
-            value=saved_query or "Файл не выбран"
-        )
-
-        # Однострочное поле не переносит длинный путь и не меняет высоту формы.
-        # Полный путь хранится в self.query_path и доступен для копирования из поля.
+        saved_query = str(self.gui_settings.get("query_image") or "").strip()
+        self.query_var = tk.StringVar(value=saved_query or "Файл не выбран")
         self.query_path_entry = ttk.Entry(
-            left,
-            textvariable=self.query_var,
-            state="readonly",
-            width=42,
+            left, textvariable=self.query_var, state="readonly", width=42,
         )
-        self.query_path_entry.pack(fill="x", pady=(0, 8))
+        self.query_path_entry.pack(fill="x", pady=(0, 10))
         self.root.after_idle(self._show_query_path_tail)
 
-        ttk.Label(
-            left,
-            text="Найденные лица:",
-        ).pack(anchor="w")
-
+        ttk.Label(left, text="Найденные лица", style="Section.TLabel").pack(anchor="w")
         self.face_list = tk.Listbox(
-            left,
-            height=8,
-            exportselection=False,
+            left, height=7, exportselection=False, activestyle="none",
+            selectmode="browse", relief="flat", borderwidth=0, highlightthickness=1,
         )
-        self.face_list.pack(fill="x", pady=5)
-        self.face_list.bind(
-            "<<ListboxSelect>>",
-            self.on_face_list_select,
-        )
+        self.face_list.pack(fill="x", pady=(5, 10))
+        self.face_list.bind("<<ListboxSelect>>", self.on_face_list_select)
 
-        controls = ttk.Frame(left)
-        controls.pack(fill="x", pady=8)
-
-        ttk.Label(
-            controls,
-            text="Результатов:",
-        ).pack(side="left")
-
+        controls = ttk.Frame(left, style="Surface.TFrame")
+        controls.pack(fill="x", pady=(0, 10))
+        ttk.Label(controls, text="Результатов:", style="SurfaceMuted.TLabel").pack(side="left")
         self.topk_var = tk.IntVar(
-            value=max(
-                1,
-                min(
-                    500,
-                    int(self.gui_settings.get("top_k", DEFAULT_TOP_K)),
-                ),
-            )
+            value=max(1, min(500, int(self.gui_settings.get("top_k", DEFAULT_TOP_K))))
         )
-
         self.topk_spinbox = ttk.Spinbox(
-            controls,
-            from_=1,
-            to=500,
-            textvariable=self.topk_var,
-            width=7,
+            controls, from_=1, to=500, textvariable=self.topk_var, width=6,
         )
-        self.topk_spinbox.pack(side="left", padx=5)
-
-        ttk.Label(
-            controls,
-            text="Мин. сходство (%):",
-        ).pack(side="left", padx=(15, 0))
-
+        self.topk_spinbox.pack(side="left", padx=(5, 12))
+        ttk.Label(controls, text="Мин. сходство, %:", style="SurfaceMuted.TLabel").pack(side="left")
         self.min_similarity_var = tk.DoubleVar(
-            value=max(
-                0.0,
-                min(
-                    100.0,
-                    float(self.gui_settings.get("min_similarity", 43.0)),
-                ),
-            )
+            value=max(0.0, min(100.0, float(self.gui_settings.get("min_similarity", 43.0))))
         )
-
         self.min_similarity_spinbox = ttk.Spinbox(
-            controls,
-            from_=0,
-            to=100,
-            increment=1,
-            textvariable=self.min_similarity_var,
-            width=7,
+            controls, from_=0, to=100, increment=1,
+            textvariable=self.min_similarity_var, width=6,
         )
-        self.min_similarity_spinbox.pack(side="left", padx=5)
+        self.min_similarity_spinbox.pack(side="left", padx=(5, 0))
 
         self.search_btn = ttk.Button(
-            left,
-            text="🔎 Искать выбранное лицо",
-            command=self.start_search,
+            left, text="⌕  Искать выбранное лицо", style="Primary.TButton", command=self.start_search,
         )
-        self.search_btn.pack(
-            fill="x",
-            pady=8,
-        )
-
+        self.search_btn.pack(fill="x", pady=(0, 7))
         self.open_results_btn = ttk.Button(
-            left,
-            text="🌐 Открыть последний HTML",
-            command=self.open_last_html,
+            left, text="↗  Открыть последний HTML", command=self.open_last_html,
             state="normal" if os.path.exists(os.path.join(os.getcwd(), "face_search_results_gui.html")) else "disabled",
         )
         self.open_results_btn.pack(fill="x")
 
-        ttk.Separator(left).pack(
-            fill="x",
-            pady=15,
-        )
-
+        ttk.Separator(left).pack(fill="x", pady=12)
+        ttk.Label(left, text="Статистика базы", style="Section.TLabel").pack(anchor="w")
         ttk.Label(
-            left,
-            text="База:",
-            font=("Consolas", 11, "bold"),
-        ).pack(anchor="w")
+            left, textvariable=self.stats_var, justify="left", anchor="nw",
+            wraplength=370, font=("Consolas", 9),
+        ).pack(anchor="nw", fill="x", pady=(5, 0))
 
-        self.stats_var = tk.StringVar()
-
+        ttk.Label(right, text="Предпросмотр изображения", style="Section.TLabel").pack(anchor="w")
         ttk.Label(
-            left,
-            textvariable=self.stats_var,
-            justify="left",
-            font=("Consolas", 10), 
-        ).pack(anchor="w")
-
-        ttk.Label(
-            right,
-            text="Предпросмотр — кликните по лицу",
-            font=("Segoe UI", 12, "bold"),
-        ).pack(anchor="w")
-
-        canvas_frame = ttk.Frame(right)
-        canvas_frame.pack(
-            fill="both",
-            expand=True,
-            pady=8,
-        )
-
+            right, text="Нажмите на лицо на изображении, чтобы выбрать его.",
+            style="SurfaceMuted.TLabel",
+        ).pack(anchor="w", pady=(2, 8))
+        canvas_frame = ttk.Frame(right, style="Surface.TFrame")
+        canvas_frame.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(
-            canvas_frame,
-            background="#202020",
-            highlightthickness=0,
-            cursor="crosshair",
+            canvas_frame, background="#151a22", highlightthickness=0, cursor="crosshair",
         )
-        self.canvas.pack(
-            fill="both",
-            expand=True,
-        )
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Button-1>", self.on_canvas_click)
+        self.canvas.bind("<Configure>", self._redraw_preview)
 
-        self.canvas.bind(
-            "<Button-1>",
-            self.on_canvas_click,
-        )
-
-        self.canvas.bind(
-            "<Configure>",
-            self._redraw_preview,
-        )
-
-        self.progress = ttk.Progressbar(
-            self.root,
-            mode="determinate",
-        )
-        self.progress.pack(
-            fill="x",
-            padx=10,
-            pady=(0, 3),
-        )
-
-        status_frame = ttk.Frame(self.root, padding=(10, 2))
+        # --------------------------------------------------------
+        # Нижняя полоса состояния
+        # --------------------------------------------------------
+        self.progress = ttk.Progressbar(self.page, mode="determinate", style="TProgressbar")
+        self.progress.pack(fill="x", pady=(0, 5))
+        status_frame = ttk.Frame(self.page, style="Header.TFrame", padding=(8, 3))
         status_frame.pack(fill="x")
+        self.cpu_status_label = ttk.Label(
+            status_frame, textvariable=self.cpu_status_var, style="Status.TLabel", anchor="w",
+        )
+        self.cpu_status_label.pack(side="left", padx=(0, 6))
+        self.gpu_status_label = ttk.Label(
+            status_frame, textvariable=self.gpu_status_var, style="Status.TLabel", anchor="w",
+        )
+        self.gpu_status_label.pack(side="left", padx=(0, 6))
+        self.status_label = ttk.Label(
+            status_frame, textvariable=self.status_var, style="Status.TLabel", anchor="w",
+        )
+        self.status_label.pack(side="left", fill="x", expand=True)
 
-        self.status_var = tk.StringVar(value="Готово")
-
-        ttk.Label(
-            status_frame,
-            textvariable=self.cpu_status_var,
-            anchor="w",
-            padding=(0, 2, 18, 2),
-        ).pack(side="left")
-
-        ttk.Label(
-            status_frame,
-            textvariable=self.gpu_status_var,
-            anchor="w",
-            padding=(0, 2, 18, 2),
-        ).pack(side="left")
-
-        ttk.Label(
-            status_frame,
-            textvariable=self.status_var,
-            anchor="w",
-            padding=(0, 2),
-        ).pack(side="left", fill="x", expand=True)
+        self._update_backend_ui()
 
     # --------------------------------------------------------
     # GUI state
