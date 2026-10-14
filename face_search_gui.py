@@ -3501,7 +3501,7 @@ class FaceSearchGUI:
         self.scan_stop = threading.Event()
         self.scan_running = False
         self.auto_workers_controller = None
-        self.auto_workers_status_var = tk.StringVar(value="Автоподстройка: выключена")
+        self.auto_workers_status_var = tk.StringVar(value="")
         self._gpu_telemetry_stop = threading.Event()
 
         # CUDA проверяется параллельно с запуском окна: никакого cuda_runtime_available()
@@ -4741,19 +4741,23 @@ class FaceSearchGUI:
         )
         self.stop_scan_btn.pack(side="left")
 
-        self.scan_control_status_var = tk.StringVar(value="Сканирование не запущено")
-        ttk.Label(
+        # Статус операции показывается только во время сканирования/CROP repair.
+        # В состоянии ожидания не занимаем место сообщением «не запущено».
+        self.scan_control_status_var = tk.StringVar(value="")
+        self.scan_control_status_label = ttk.Label(
             scan_control_frame,
             textvariable=self.scan_control_status_var,
-        ).pack(side="left", padx=(12, 0))
+        )
+        # Метка намеренно не pack() до запуска реальной операции.
 
+        # Подробности автонастройки также нужны только пока выполняется задача.
         self.auto_workers_status_label = ttk.Label(
             self.root,
             textvariable=self.auto_workers_status_var,
             anchor="w",
-            padding=(10, 0, 10, 5),
+            padding=(10, 0, 10, 3),
         )
-        self.auto_workers_status_label.pack(fill="x")
+        # Метка намеренно не pack() в состоянии ожидания.
 
         # --------------------------------------------------------
         # Импорт image + JSON
@@ -5236,6 +5240,46 @@ class FaceSearchGUI:
         self._update_worker_control_state()
 
 
+    def _show_scan_control_status(self, message: str):
+        """Показывает краткий статус только активной операции сканирования/CROP."""
+        label = getattr(self, "scan_control_status_label", None)
+        if label is None:
+            return
+        self.scan_control_status_var.set(str(message or ""))
+        if not label.winfo_manager():
+            label.pack(side="left", padx=(12, 0))
+
+    def _hide_scan_control_status(self):
+        """Убирает статус сканирования/CROP в состоянии ожидания."""
+        self.scan_control_status_var.set("")
+        label = getattr(self, "scan_control_status_label", None)
+        if label is not None and label.winfo_manager():
+            label.pack_forget()
+
+    def _set_auto_workers_status(self, message: str):
+        """Отображает адаптивный статус только для активной AUTO-задачи."""
+        label = getattr(self, "auto_workers_status_label", None)
+        if label is None:
+            return
+        is_auto_operation = (
+            bool(self.auto_workers_var.get())
+            and self.operation in ("scan", "crop_repair")
+            and self.scan_running
+        )
+        if not is_auto_operation:
+            self._hide_auto_workers_status()
+            return
+        self.auto_workers_status_var.set(str(message or ""))
+        if not label.winfo_manager():
+            label.pack(fill="x", padx=10, pady=(0, 3))
+
+    def _hide_auto_workers_status(self):
+        """Очищает и скрывает адаптивный статус вне активной AUTO-задачи."""
+        self.auto_workers_status_var.set("")
+        label = getattr(self, "auto_workers_status_label", None)
+        if label is not None and label.winfo_manager():
+            label.pack_forget()
+
     def _prepare_scan_controls(self):
         self.scan_paused.set()
         self.scan_stop.clear()
@@ -5246,7 +5290,7 @@ class FaceSearchGUI:
         )
         self.stop_scan_btn.config(state="normal")
         operation_label = "Проверка CROP" if self.operation == "crop_repair" else "Сканирование"
-        self.scan_control_status_var.set(f"{operation_label} выполняется")
+        self._show_scan_control_status(f"{operation_label} выполняется")
 
     def toggle_scan_pause(self):
         if not self.scan_running:
@@ -5297,18 +5341,11 @@ class FaceSearchGUI:
             )
         except (AttributeError, tk.TclError):
             pass
-        if not auto and not self.busy:
-            self.auto_workers_status_var.set("Автоподстройка: выключена")
-
     def _on_auto_workers_changed(self):
+        # Сам отмеченный чекбокс уже показывает выбранный режим. До запуска
+        # задачи не выводим ложный статус «выключена» или «подготовка».
         self._update_worker_control_state()
-        if self.auto_workers_var.get():
-            minimum, start, maximum = _auto_worker_limits()
-            self.auto_workers_status_var.set(
-                f"Авто: подготовка ({minimum}–{maximum} потоков, старт {start})"
-            )
-        else:
-            self.auto_workers_status_var.set("Автоподстройка: выключена")
+        self._hide_auto_workers_status()
         self._schedule_settings_save()
 
     def choose_folder(self):
@@ -5405,7 +5442,9 @@ class FaceSearchGUI:
             f"{mode_text}{delete_text}{crop_text}{overwrite_text}"
         )
         if auto_workers:
-            self.auto_workers_status_var.set("Авто: запуск адаптивного контроллера...")
+            self._set_auto_workers_status("Авто: запуск адаптивного контроллера...")
+        else:
+            self._hide_auto_workers_status()
 
         threading.Thread(
             target=self._scan_worker,
@@ -6315,7 +6354,9 @@ class FaceSearchGUI:
             f"Проверка CROP: поиск отсутствующих файлов... потоков: {worker_text}"
         )
         if auto_workers:
-            self.auto_workers_status_var.set("Авто: запуск адаптивного контроллера для CROP...")
+            self._set_auto_workers_status("Авто: запуск адаптивного контроллера для CROP...")
+        else:
+            self._hide_auto_workers_status()
 
         backend = self.backend_mode_var.get()
         threading.Thread(
@@ -6766,7 +6807,9 @@ class FaceSearchGUI:
                 kind = event[0]
 
                 if kind == "auto_workers_status":
-                    self.auto_workers_status_var.set(str(event[1]))
+                    # Событие могло прийти в очередь одновременно с завершением
+                    # worker-а; helper отсекает устаревший статус после завершения.
+                    self._set_auto_workers_status(str(event[1]))
 
                 elif kind == "startup_db_progress":
                     message = event[1]
@@ -7007,6 +7050,8 @@ class FaceSearchGUI:
 
                     self.scan_running = False
                     self.operation = None
+                    self._hide_scan_control_status()
+                    self._hide_auto_workers_status()
                     self._set_busy(False)
                     self._refresh_stats()
                     self._update_search_state()
@@ -7056,6 +7101,7 @@ class FaceSearchGUI:
                     stopped = bool(result.get("stopped"))
                     self.scan_running = False
                     self.operation = None
+                    self._hide_auto_workers_status()
                     self._set_busy(False)
                     self._refresh_stats()
                     self._update_search_state()
@@ -7068,11 +7114,10 @@ class FaceSearchGUI:
                         f"ошибок: {result.get('failed', 0)}."
                     )
                     if stopped:
-                        self.scan_control_status_var.set("Проверка CROP остановлена")
                         self.status_var.set("Проверка CROP остановлена. " + summary)
                     else:
-                        self.scan_control_status_var.set("Проверка CROP завершена")
                         self.status_var.set("Проверка CROP завершена. " + summary)
+                    self._hide_scan_control_status()
 
                 elif kind == "index_done":
                     self.progress.stop()
@@ -7138,6 +7183,8 @@ class FaceSearchGUI:
                     self.operation = None
                     self.scan_stop.set()
                     self.scan_paused.set()
+                    self._hide_scan_control_status()
+                    self._hide_auto_workers_status()
                     self._set_busy(False)
                     self._update_search_state()
 
