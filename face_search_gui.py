@@ -87,6 +87,8 @@ from facesearch.export.html_report import (
 DB_FILE = str(APP_DIR / "faces.db")
 INDEX_FILE = str(APP_DIR / "indexes" / "legacy_unselected.faiss")
 CROP_DIR = APP_DIR / "face_images" / "legacy_unselected"
+# HTTP(S)-корень CROP для HTML-галереи; пустая строка означает локальные файлы.
+CROP_URL = ""
 
 # Тяжёлые ML/vision-библиотеки загружаются лениво: окно GUI должно появляться
 # до импорта PyTorch, ONNX Runtime, OpenCV, NumPy, FAISS и InsightFace.
@@ -775,7 +777,7 @@ def create_database_for_profile(
     Подключает выбранный профиль и гарантирует наличие таблиц/индексов.
     Для серверных БД при create_if_missing=True сама БД создаётся при отсутствии.
     """
-    global DB_FILE, INDEX_FILE, CROP_DIR
+    global DB_FILE, INDEX_FILE, CROP_DIR, CROP_URL
 
     profile = _normalize_profile_storage_paths(profile)
     backend = str(profile.get("type") or DB_TYPE_SQLITE)
@@ -820,6 +822,7 @@ def create_database_for_profile(
     if activate_storage:
         INDEX_FILE = str(index_path)
         CROP_DIR = crop_path
+        CROP_URL = str(profile.get("crop_url") or "").strip().rstrip("/")
 
     if initialize:
         if progress_callback:
@@ -3290,6 +3293,7 @@ def generate_html_gallery(
         output_file=output_file,
         use_local_crops=use_local_crops,
         crop_dir=CROP_DIR,
+        crop_url=CROP_URL,
         app_dir=APP_DIR,
         load_image_fn=load_image,
         cv2_module=cv2,
@@ -3819,6 +3823,7 @@ class FaceSearchGUI:
         old_db_file = globals().get("DB_FILE")
         old_index_file = globals().get("INDEX_FILE")
         old_crop_dir = globals().get("CROP_DIR")
+        old_crop_url = globals().get("CROP_URL", "")
 
         new_conn = None
         try:
@@ -3878,6 +3883,7 @@ class FaceSearchGUI:
                 globals()["INDEX_FILE"] = old_index_file
             if old_crop_dir is not None:
                 globals()["CROP_DIR"] = old_crop_dir
+            globals()["CROP_URL"] = old_crop_url or ""
 
             self.db_profile_var.set(self.active_db_name)
             self._update_database_info()
@@ -3894,7 +3900,7 @@ class FaceSearchGUI:
 
         win = tk.Toplevel(self.root)
         win.title("Новая база данных" if is_new else "Настройка базы данных")
-        win.geometry("760x500")
+        win.geometry("800x550")
         win.transient(self.root)
         win.grab_set()
 
@@ -3986,10 +3992,21 @@ class FaceSearchGUI:
             command=lambda: crop_var.set(
                 filedialog.askdirectory(
                     parent=win,
-                    title="Каталог CROP"
+                    title="Локальный каталог CROP"
                 ) or crop_var.get()
             ),
         ).grid(row=10, column=2, padx=(6, 0))
+
+        ttk.Label(frame, text="URL CROP (необязательно):").grid(row=11, column=0, sticky="w", pady=4)
+        crop_url_var = tk.StringVar(value=str(profile.get("crop_url") or ""))
+        ttk.Entry(frame, textvariable=crop_url_var, width=60).grid(
+            row=11, column=1, columnspan=2, sticky="ew"
+        )
+        ttk.Label(
+            frame,
+            text="Только для отображения в HTML. Новые CROP-файлы всегда сохраняются локально.",
+            foreground="#666666",
+        ).grid(row=12, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
         status_var = tk.StringVar(value="")
         ttk.Label(
@@ -3997,7 +4014,7 @@ class FaceSearchGUI:
             textvariable=status_var,
             wraplength=680,
             justify="left",
-        ).grid(row=11, column=0, columnspan=3, sticky="w", pady=(10, 4))
+        ).grid(row=13, column=0, columnspan=3, sticky="w", pady=(6, 4))
 
         def update_type(_event=None):
             backend = label_to_backend.get(type_var.get(), type_var.get())
@@ -4032,7 +4049,14 @@ class FaceSearchGUI:
                 "driver": driver_var.get().strip(),
                 "index_path": index_var.get().strip(),
                 "crop_path": crop_var.get().strip(),
+                "crop_url": crop_url_var.get().strip(),
             }
+
+            if result["crop_url"]:
+                parsed_crop_url = urlparse(result["crop_url"])
+                if parsed_crop_url.scheme.lower() not in {"http", "https"} or not parsed_crop_url.netloc:
+                    raise ValueError("URL CROP должен начинаться с http:// или https://")
+                result["crop_url"] = result["crop_url"].rstrip("/")
 
             if backend == DB_TYPE_SQLITE and not result["path"]:
                 raise ValueError("Для SQLite укажите путь к .db файлу.")
@@ -4104,7 +4128,7 @@ class FaceSearchGUI:
                 status_var.set(f"Ошибка: {exc}")
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=12, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        buttons.grid(row=14, column=0, columnspan=3, sticky="e", pady=(8, 0))
         ttk.Button(buttons, text="Сохранить / создать БД", command=save_profile).pack(side="left", padx=4)
         ttk.Button(buttons, text="Отмена", command=win.destroy).pack(side="left", padx=4)
 
@@ -4526,7 +4550,7 @@ class FaceSearchGUI:
         )
         self.use_local_crops_check = ttk.Checkbutton(
             scan_options,
-            text="Использовать локальные CROP в HTML",
+            text="Использовать CROP-файлы в HTML",
             variable=self.use_local_crops_var,
         )
         self.use_local_crops_check.pack(side="left")
@@ -4643,11 +4667,16 @@ class FaceSearchGUI:
             value=saved_query or "Файл не выбран"
         )
 
-        ttk.Label(
+        # Однострочное поле не переносит длинный путь и не меняет высоту формы.
+        # Полный путь хранится в self.query_path и доступен для копирования из поля.
+        self.query_path_entry = ttk.Entry(
             left,
             textvariable=self.query_var,
-            wraplength=330,
-        ).pack(anchor="w", pady=(0, 8))
+            state="readonly",
+            width=42,
+        )
+        self.query_path_entry.pack(fill="x", pady=(0, 8))
+        self.root.after_idle(self._show_query_path_tail)
 
         ttk.Label(
             left,
@@ -5606,6 +5635,16 @@ class FaceSearchGUI:
     # Query image
     # --------------------------------------------------------
 
+    def _show_query_path_tail(self):
+        """Показывает конец длинного пути в однострочном поле выбора файла."""
+        entry = getattr(self, "query_path_entry", None)
+        if entry is None:
+            return
+        try:
+            entry.xview_moveto(1.0)
+        except tk.TclError:
+            pass
+
     def choose_query(self):
         if not self._startup_ready_or_warn("выбор изображения"):
             return
@@ -5628,9 +5667,8 @@ class FaceSearchGUI:
             return
 
         self.query_path = Path(path)
-        self.query_var.set(
-            str(self.query_path)
-        )
+        self.query_var.set(str(self.query_path))
+        self.root.after_idle(self._show_query_path_tail)
         self._schedule_settings_save()
         self._detect_query_faces()
 
@@ -6468,17 +6506,15 @@ class FaceSearchGUI:
                 activate_storage=False,
                 initialize=False,
             )
-            images = int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0] or 0)
-            processed = int(conn.execute("SELECT COUNT(*) FROM images WHERE processed = 1").fetchone()[0] or 0)
-            faces = int(conn.execute("SELECT COUNT(*) FROM faces").fetchone()[0] or 0)
-            profiles = int(conn.execute("SELECT COUNT(*) FROM profiles").fetchone()[0] or 0)
-            imported = int(conn.execute("SELECT COUNT(*) FROM profiles WHERE source = 'import'").fetchone()[0] or 0)
+            db_stats = _get_database_statistics(conn)
+            images = db_stats["images"]
+            faces = db_stats["faces"]
+            profiles = db_stats["profiles"]
             index_path = Path(str(profile.get("index_path") or INDEX_FILE)).expanduser().resolve()
             faiss_status = get_faiss_index_file_status(index_path, read_metadata=False)
             self.events.put((
                 "stats_done", profile_name, getattr(conn, "backend", "unknown"),
-                images, processed, faces, profiles, imported, faiss_status,
-                get_gpu_search_status(),
+                images, faces, profiles, faiss_status, get_gpu_search_status(),
             ))
         except Exception as exc:
             self.events.put(("stats_error", profile_name, str(exc)))
@@ -6491,8 +6527,8 @@ class FaceSearchGUI:
 
     def _apply_stats(self, event):
         (
-            _kind, profile_name, backend, images, processed, faces,
-            profiles, imported, faiss_file_status, gpu_status,
+            _kind, profile_name, backend, images, faces, profiles,
+            faiss_file_status, gpu_status,
         ) = event
         selected_backend = self.backend_mode_var.get()
         faiss_count = int(faiss_file_status.get("count") or 0)
@@ -6534,10 +6570,8 @@ class FaceSearchGUI:
             faiss_sync = "нет индекса"
 
         self.stats_var.set(
-            f"{'    Профилей:':<24}{profiles}\n"
-            f"{'    Импортировано:':<24}{imported}\n"
-            f"{'    Изображений:':<24}{images}\n"
-            f"{'    Обработано:':<24}{processed}\n"
+            f"{'    Профилей:':<24}{profiles:,}\n"
+            f"{'    Изображений:':<24}{images:,}\n"
             f"{'    Лиц в БД:':<24}{faces:,}\n"
             f"{'    СУБД:':<24}{backend}\n"
             f"{'    Активный профиль:':<24}{profile_name}\n"
@@ -6985,51 +7019,71 @@ def launch_gui():
 # STATISTICS
 # ============================================================
 
-def print_stats(conn: DatabaseConnection):
-    images = conn.execute(
-        "SELECT COUNT(*) FROM images"
-    ).fetchone()[0]
+def _get_database_statistics(conn: DatabaseConnection) -> dict[str, int]:
+    """Возвращает согласованную статистику БД по смыслу полей images/faces.
 
-    processed = conn.execute(
+    Профили — количество уникальных непустых images.source_url.
+    Изображения — уникальные images.url_image; для строк без url_image
+    вместо него учитывается уникальный images.source_url (локальный оригинал).
+    Лица — количество записей в faces.
+
+    Запросы используют общие для SQLite/PostgreSQL/MySQL/MSSQL конструкции.
+    """
+    profiles = int(conn.execute(
         """
-        SELECT COUNT(*)
+        SELECT COUNT(DISTINCT TRIM(source_url))
         FROM images
-        WHERE processed = 1
+        WHERE source_url IS NOT NULL AND TRIM(source_url) <> ''
         """
-    ).fetchone()[0]
+    ).fetchone()[0] or 0)
 
-    faces = conn.execute(
+    remote_images = int(conn.execute(
+        """
+        SELECT COUNT(DISTINCT TRIM(url_image))
+        FROM images
+        WHERE url_image IS NOT NULL AND TRIM(url_image) <> ''
+        """
+    ).fetchone()[0] or 0)
+
+    local_images = int(conn.execute(
+        """
+        SELECT COUNT(DISTINCT TRIM(source_url))
+        FROM images
+        WHERE (url_image IS NULL OR TRIM(url_image) = '')
+          AND source_url IS NOT NULL
+          AND TRIM(source_url) <> ''
+        """
+    ).fetchone()[0] or 0)
+
+    faces = int(conn.execute(
         "SELECT COUNT(*) FROM faces"
-    ).fetchone()[0]
+    ).fetchone()[0] or 0)
 
-    profiles = conn.execute(
-        "SELECT COUNT(*) FROM profiles"
-    ).fetchone()[0]
+    return {
+        "profiles": profiles,
+        "images": remote_images + local_images,
+        "faces": faces,
+    }
 
-    vk_with_photo = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM profiles
-        WHERE source = 'vk'
-          AND has_photo = 1
-        """
-    ).fetchone()[0]
+
+def print_stats(conn: DatabaseConnection):
+    stats = _get_database_statistics(conn)
+    images = stats["images"]
+    faces = stats["faces"]
 
     print()
     print("=" * 60)
     print("DATABASE")
     print("=" * 60)
     print(f"СУБД:              {getattr(conn, 'backend', 'unknown')}")
-    print(f"Профилей:          {profiles}")
-    print(f"Импортировано:     {vk_with_photo}")
-    print(f"Изображений:       {images}")
-    print(f"Обработано:        {processed}")
-    print(f"Лиц:               {faces}")
+    print(f"Профилей:          {stats['profiles']:,}")
+    print(f"Изображений:       {images:,}")
+    print(f"Лиц в БД:          {faces:,}")
     print(
-        "Среднее лиц/фото:  "
-        f"{faces / processed:.2f}"
-        if processed
-        else "Среднее лиц/фото:  0"
+        "Среднее лиц/изображение:  "
+        f"{faces / images:.2f}"
+        if images
+        else "Среднее лиц/изображение:  0"
     )
 
 
