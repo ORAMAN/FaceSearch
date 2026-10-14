@@ -5,11 +5,12 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 from urllib.request import url2pathname
 
 from ..config import APP_DIR as DEFAULT_APP_DIR
@@ -94,12 +95,18 @@ def generate_html_gallery(
     use_local_crops: bool = True,
     *,
     crop_dir: Path | str | None = None,
+    crop_url: str | None = None,
     app_dir: Path | str | None = None,
     load_image_fn=None,
     cv2_module=None,
 ):
     APP_DIR = Path(app_dir).resolve() if app_dir else DEFAULT_APP_DIR
     CROP_DIR = Path(crop_dir).resolve() if crop_dir else (APP_DIR / "face_images")
+    crop_url_base = str(crop_url or "").strip().rstrip("/")
+    if crop_url_base:
+        parsed_crop_url = urlparse(crop_url_base)
+        if parsed_crop_url.scheme.lower() not in {"http", "https"} or not parsed_crop_url.netloc:
+            crop_url_base = ""
     load_image = load_image_fn or _default_load_image
     cv2 = cv2_module
     if cv2 is None and use_local_crops:
@@ -136,11 +143,55 @@ def generate_html_gallery(
         is_local = source_type == "local"
         is_import = source_type == "import"
 
-        filename = html.escape(str(result.get("filename") or ""))
+        filename_raw = str(result.get("filename") or "").strip()
+        filename = html.escape(filename_raw)
+        filename_path = Path(filename_raw.replace("\\", "/")).name
+        numeric_crop_filename = (
+            Path(filename_path).suffix.lower() in {".jpg", ".jpeg"}
+            and Path(filename_path).stem.isdigit()
+        )
+        # Имена вида 141414.jpg — технические имена CROP по ID записи,
+        # а не информативная подпись для пользователя.
+        filename_html = (
+            f'<div class="filename">{filename}</div>'
+            if filename_raw and not numeric_crop_filename
+            else ""
+        )
 
-        # В режиме локальных CROP используем физический файл из face_images.
-        # При отключённом чекбоксе local CROP вообще не используется:
-        # изображение будет взято из сохранённого url_image ниже.
+        # URL строится из относительного images.path. Абсолютные старые пути
+        # разрешены только если они действительно находятся внутри CROP_DIR.
+        # Так исходные изображения случайно не подменяются URL-каталогом CROP.
+        remote_crop_href = ""
+        if use_local_crops and crop_url_base:
+            crop_relative = None
+            normalized_db_path = raw_result_path.replace("\\", "/").strip()
+            if normalized_db_path:
+                candidate_posix = Path(normalized_db_path)
+                if not candidate_posix.is_absolute() and not re.match(r"^[A-Za-z]:/", normalized_db_path):
+                    normalized_parts = [part for part in normalized_db_path.split("/") if part not in ("", ".")]
+                    if normalized_parts and ".." not in normalized_parts:
+                        # Для отсутствующей локальной копии принимаем основной
+                        # формат CROP: <bucket>/<image_id>.jpg.
+                        if (
+                            len(normalized_parts) >= 2
+                            and normalized_parts[-2].isdigit()
+                            and Path(normalized_parts[-1]).stem.isdigit()
+                            and Path(normalized_parts[-1]).suffix.lower() in {".jpg", ".jpeg"}
+                        ):
+                            crop_relative = "/".join(normalized_parts)
+                elif path.is_absolute():
+                    try:
+                        crop_relative = path.resolve().relative_to(CROP_DIR.resolve()).as_posix()
+                    except (OSError, ValueError):
+                        crop_relative = None
+            if crop_relative:
+                remote_crop_href = (
+                    crop_url_base + "/" + quote(crop_relative, safe="/._~-")
+                )
+
+        # В режиме локальных CROP используем физический файл, если он есть.
+        # При наличии URL сперва показываем сетевую копию, а локальную используем
+        # как запасную, если сетевой файл пока не опубликован.
         crop_href = ""
         local_image_exists = path.is_file()
 
@@ -239,7 +290,7 @@ def generate_html_gallery(
                     if source_value.lower().startswith("file://"):
                         # Надёжно преобразуем file:// URI в локальный путь.
                         # Поддерживаются обычные Windows URI и UNC-пути.
-                        from urllib.parse import unquote, urlparse
+                        from urllib.parse import unquote
 
                         parsed = urlparse(source_value)
                         uri_path = unquote(parsed.path or "")
@@ -281,7 +332,22 @@ def generate_html_gallery(
                     local_source_path = None
                     local_source_href = ""
 
-        if crop_href:
+        if remote_crop_href:
+            if crop_href:
+                remote_crop_onerror = (
+                    f"this.onerror=null;this.src='{html.escape(crop_href, quote=True)}';"
+                )
+            else:
+                # Не оставляем значок сломанного изображения. HTML-парсер не
+                # должен разбирать встроенную разметку внутри JS-атрибута.
+                remote_crop_onerror = "this.style.display='none';"
+            image_html = f"""
+                <img src="{html.escape(remote_crop_href, quote=True)}"
+                    loading="lazy"
+                    alt="{filename}"
+                    onerror="{remote_crop_onerror}">
+            """
+        elif crop_href:
             image_html = f"""
                 <img src="{html.escape(crop_href)}"
                     loading="lazy"
@@ -364,11 +430,12 @@ def generate_html_gallery(
                 'target="_blank" rel="noopener noreferrer">Открыть изображение</a>'
                 if remote_image_url else ""
             )
+            crop_button_href = remote_crop_href or (_safe_file_href(path) if local_image_exists else "")
             buttons = f"""
                 <div class="buttons">
                     {f'<a class="button" href="{html.escape(source_href, quote=True)}" target="_blank" rel="noopener noreferrer">Источник</a>' if source_href else ''}
                     {original_image_button}
-                    {f'<a class="button" href="{html.escape(_safe_file_href(path), quote=True)}">Crop</a>' if use_local_crops and local_image_exists else ''}
+                    {f'<a class="button" href="{html.escape(crop_button_href, quote=True)}" target="_blank" rel="noopener noreferrer">Crop</a>' if use_local_crops and crop_button_href else ''}
                 </div>
             """
 
@@ -386,9 +453,12 @@ def generate_html_gallery(
 
         # Путь под изображением показываем только для локальных изображений
         # без JSON-метаданных. Для импортов вместо него показывается сайт+favicon.
+        path_looks_like_generated_crop_id = (
+            path.suffix.lower() in {".jpg", ".jpeg"} and path.stem.isdigit()
+        )
         local_path_html = (
             f'<div class="path">{html.escape(str(path))}</div>'
-            if is_local
+            if is_local and not path_looks_like_generated_crop_id
             else ""
         )
 
@@ -402,7 +472,7 @@ def generate_html_gallery(
                     {image_html}
                 </div>
 
-                <div class="filename">{filename}</div>
+                {filename_html}
                 {profile_html}
                 {site_html}
                 {local_path_html}
