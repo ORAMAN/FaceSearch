@@ -3671,25 +3671,37 @@ class FaceSearchGUI:
         self.events.put(("startup_cuda_done", available, detail))
 
     def _finish_startup_progress_if_ready(self):
-        """Фиксирует конечное состояние запуска и не оставляет вечную анимацию."""
+        """Завершает стартовую анимацию только после отображения статистики БД."""
         done = self.startup_db_ready and self.cuda_check_done
         failed = self.startup_db_failed
 
-        if done or failed:
+        if failed:
+            # При ошибке подключения статистику уже не дождёмся.
             try:
                 self.progress.stop()
                 self.progress.config(mode="determinate", value=0)
             except tk.TclError:
                 pass
 
-        if failed:
-            # Ошибка уже выводится в строке состояния/подключения. Никакой
-            # движущийся индикатор после завершившейся с ошибкой инициализации.
             self._hide_startup_progress()
             return
 
         if not done:
             return
+
+        # Пока статистика БД загружается, сохраняем анимацию.
+        if self.startup_stats_pending:
+            self._show_startup_progress(
+                "Получение и отображение статистики БД..."
+            )
+            return
+
+        # Статистика получена и применена к интерфейсу.
+        try:
+            self.progress.stop()
+            self.progress.config(mode="determinate", value=0)
+        except tk.TclError:
+            pass
 
         # Единственная длительная стартовая операция после БД/CUDA — загрузка FAISS.
         # Оставляем движение только если worker действительно выполняется.
@@ -6902,6 +6914,7 @@ class FaceSearchGUI:
                     if self._stats_refresh_pending:
                         self._stats_refresh_pending = False
                         self._refresh_stats()
+                    self._finish_startup_progress_if_ready()
 
                 elif kind == "stats_error":
                     profile_name, error = event[1:]
@@ -6911,6 +6924,7 @@ class FaceSearchGUI:
                     if self._stats_refresh_pending:
                         self._stats_refresh_pending = False
                         self._refresh_stats()
+                    self._finish_startup_progress_if_ready()
 
                 elif kind == "gpu_index_progress":
                     profile_name, index_path, message = event[1:]
