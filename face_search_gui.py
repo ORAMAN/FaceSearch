@@ -3514,6 +3514,9 @@ class FaceSearchGUI:
         self.startup_tasks_started = False
         self.startup_index_started = False
         self.startup_stats_pending = False
+        # Первичная статистика завершена: последующие фоновые обновления
+        # не должны повторно запускать стартовые индикаторы.
+        self.startup_stats_initial_done = False
         self._stats_refresh_pending = False
         self._stats_refresh_profile = ""
 
@@ -3689,14 +3692,32 @@ class FaceSearchGUI:
         if not done:
             return
 
-        # Пока статистика БД загружается, сохраняем анимацию.
-        if self.startup_stats_pending:
-            self._show_startup_progress(
-                "Получение и отображение статистики БД..."
-            )
+        # Ждём только первичный запрос статистики. Последующие фоновые
+        # обновления (например, после завершения загрузки FAISS) не должны
+        # повторно включать стартовые progress bar-ы.
+        if self.startup_stats_pending and not self.startup_stats_initial_done:
+            current_message = ""
+            try:
+                current_message = str(self.startup_progress_label_var.get() or "")
+            except (tk.TclError, AttributeError):
+                pass
+
+            # Если параллельно уже загружается FAISS, не затираем его реальный
+            # статус сообщением о статистике.
+            if self.gpu_index_loading:
+                if (
+                    not self.startup_progress_frame.winfo_manager()
+                    or current_message.startswith("Получение и отображение статистики БД")
+                ):
+                    self._show_startup_progress("Загрузка FAISS продолжается...")
+            else:
+                self._show_startup_progress(
+                    "Получение и отображение статистики БД..."
+                )
             return
 
-        # Статистика получена и применена к интерфейсу.
+        # Первичная статистика получена и применена к интерфейсу. Повторный
+        # запрос может оставаться в фоне, но стартовый индикатор уже завершён.
         try:
             self.progress.stop()
             self.progress.config(mode="determinate", value=0)
@@ -6908,8 +6929,12 @@ class FaceSearchGUI:
 
                 elif kind == "stats_done":
                     profile_name = str(event[1])
-                    if profile_name == str(getattr(self, "connected_db_name", "")):
+                    is_current_profile = (
+                        profile_name == str(getattr(self, "connected_db_name", ""))
+                    )
+                    if is_current_profile:
                         self._apply_stats(event)
+                        self.startup_stats_initial_done = True
                     self.startup_stats_pending = False
                     if self._stats_refresh_pending:
                         self._stats_refresh_pending = False
@@ -6918,9 +6943,12 @@ class FaceSearchGUI:
 
                 elif kind == "stats_error":
                     profile_name, error = event[1:]
-                    self.startup_stats_pending = False
                     if profile_name == str(getattr(self, "connected_db_name", "")):
                         self.stats_var.set(f"Ошибка статистики: {error}")
+                        # Ошибка первичного запроса тоже завершает стартовый
+                        # этап: не оставляем progress bar крутиться бесконечно.
+                        self.startup_stats_initial_done = True
+                    self.startup_stats_pending = False
                     if self._stats_refresh_pending:
                         self._stats_refresh_pending = False
                         self._refresh_stats()
@@ -7139,7 +7167,9 @@ class FaceSearchGUI:
                         f"уже были: {result.get('already_ok', 0)}; "
                         f"отсутствовали: {result.get('missing', 0)}; "
                         f"восстановлено: {result.get('repaired', 0)}; "
-                        f"ошибок: {result.get('failed', 0)}."
+                        f"ошибок восстановления: {result.get('failed', 0)}; "
+                        f"удалено записей по недоступным URL: "
+                        f"{result.get('deleted_unavailable_records', 0)}."
                     )
                     if stopped:
                         self.status_var.set("Проверка CROP остановлена. " + summary)
@@ -7651,6 +7681,56 @@ def _load_repair_source_image(
     return None, None
 
 
+def _is_direct_http_image_url(value: Any) -> bool:
+    """True only for a syntactically valid HTTP(S) URL stored as image URL."""
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return False
+    return parsed.scheme.lower() in ("http", "https") and bool(parsed.netloc)
+
+
+def _delete_records_for_unavailable_image_url(
+    conn: DatabaseConnection,
+    image_url: str,
+) -> int:
+    """Удаляет все CROP/face-записи, ссылающиеся на недоступный URL изображения.
+
+    Удаление выполняется только для прямого HTTP(S)-URL изображения из
+    ``images.url_image``. ``source_url`` намеренно не используется: для импорта
+    это часто URL страницы профиля, а не исходного файла. Локальные источники
+    эта функция не затрагивает.
+    """
+    normalized_url = str(image_url or "").strip()
+    if not _is_direct_http_image_url(normalized_url):
+        return 0
+
+    rows = conn.execute(
+        "SELECT id FROM images WHERE TRIM(url_image) = ? ORDER BY id",
+        (normalized_url,),
+    ).fetchall()
+    if not rows:
+        return 0
+
+    image_ids = [(int(row[0]),) for row in rows]
+    try:
+        # Сначала удаляем лица/embeddings, затем все image rows для этого URL.
+        conn.executemany("DELETE FROM faces WHERE image_id = ?", image_ids)
+        conn.executemany("DELETE FROM images WHERE id = ?", image_ids)
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+
+    return len(image_ids)
+
+
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     aa = np.asarray(a, dtype=np.float32)
     bb = np.asarray(b, dtype=np.float32)
@@ -7939,6 +8019,7 @@ def repair_missing_crops(
             "missing": total_missing,
             "repaired": 0,
             "failed": 0,
+            "deleted_unavailable_records": 0,
             "stopped": True,
         }
     workers = max(1, min(int(workers), LOCAL_MAX_WORKERS))
@@ -7962,6 +8043,7 @@ def repair_missing_crops(
             "missing": 0,
             "repaired": 0,
             "failed": 0,
+            "deleted_unavailable_records": 0,
             "stopped": False,
         }
 
@@ -7984,12 +8066,14 @@ def repair_missing_crops(
     repaired = 0
     failed = 0
     completed = 0
+    deleted_unavailable_records = 0
     progress_lock = threading.Lock()
     db_local = threading.local()
     db_connections: list[DatabaseConnection] = []
     db_connections_lock = threading.Lock()
 
     def worker(group_item):
+        nonlocal deleted_unavailable_records
         source_key, group_rows = group_item
         if not operation_allowed():
             return []
@@ -8017,6 +8101,44 @@ def repair_missing_crops(
         )
         if not operation_allowed():
             return []
+
+        # Если именно прямая ссылка на изображение недоступна после всех
+        # HTTP-попыток, удаляем все связанные с этим URL image rows и faces,
+        # в том числе записи для других лиц с уже существующими CROP-файлами.
+        # Недоступность одного только локального файла сюда не попадает.
+        group_uses_same_image_url = all(
+            str(row[5] or "").strip() == str(image_url or "").strip()
+            for row in group_rows
+        )
+        if (
+            source_result[0] is None
+            and _is_direct_http_image_url(image_url)
+            and group_uses_same_image_url
+        ):
+            try:
+                deleted_count = _delete_records_for_unavailable_image_url(
+                    worker_conn,
+                    str(image_url).strip(),
+                )
+            except Exception as exc:
+                deleted_count = 0
+                deletion_note = f"не удалось удалить записи БД: {exc}"
+            else:
+                if deleted_count:
+                    with progress_lock:
+                        deleted_unavailable_records += deleted_count
+                    deletion_note = f"удалено записей БД: {deleted_count}"
+                else:
+                    deletion_note = "связанных записей в БД не найдено"
+
+            results = []
+            for index, row in enumerate(group_rows):
+                message = "URL изображения недоступен; " + deletion_note
+                if index:
+                    message = "тот же недоступный URL; " + deletion_note
+                results.append((row, False, message))
+            return results
+
         source_cache = {source_key: source_result}
         used_matches = {source_key: set()}
 
@@ -8167,6 +8289,7 @@ def repair_missing_crops(
         "missing": total_missing,
         "repaired": repaired,
         "failed": failed,
+        "deleted_unavailable_records": deleted_unavailable_records,
         "stopped": bool(stop_event is not None and stop_event.is_set()),
     }
 
@@ -8361,7 +8484,6 @@ def main():
 
         elif args.command == "stats":
             print_stats(conn)
-
     finally:
         conn.close()
 
