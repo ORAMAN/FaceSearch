@@ -3569,7 +3569,7 @@ class FaceSearchGUI:
         self.root.bind("<Configure>", self._on_window_configure, add="+")
 
         self.status_var.set("Запуск: подготовка базы данных и проверка CUDA...")
-        self.stats_var.set("Подключение к БД; статистика появится после инициализации")
+        self.stats_var.set("\nПодключение к БД и подсчёт статистики.\nДождитесь завершения...")
         self.progress.config(mode="indeterminate")
         self.progress.start(10)
         self._show_startup_progress("Подготовка базы данных и проверка CUDA...")
@@ -5271,7 +5271,20 @@ class FaceSearchGUI:
             return
         self.auto_workers_status_var.set(str(message or ""))
         if not label.winfo_manager():
-            label.pack(fill="x", padx=10, pady=(0, 3))
+            label.pack(fill="x", padx=0, pady=(0, 3))
+
+    def _set_crop_progress_status(self, message: str):
+        """Показывает ход восстановления CROP в строке над сведениями об устройствах.
+
+        Эта строка используется и при ручном количестве потоков: она отражает
+        процесс CROP, а не остаётся с устаревшим сообщением о запуске AUTO.
+        """
+        label = getattr(self, "auto_workers_status_label", None)
+        if label is None:
+            return
+        self.auto_workers_status_var.set(str(message or ""))
+        if not label.winfo_manager():
+            label.pack(fill="x", padx=0, pady=(0, 3))
 
     def _hide_auto_workers_status(self):
         """Очищает и скрывает адаптивный статус вне активной AUTO-задачи."""
@@ -6350,13 +6363,11 @@ class FaceSearchGUI:
         self.progress.config(mode="indeterminate")
         self.progress.start(10)
         worker_text = "AUTO" if auto_workers else str(workers)
-        self.status_var.set(
+        # Статус CROP выводим в выделенную строку над индикаторами CPU/GPU.
+        # Не помещаем подробный ход операции в status_var рядом с телеметрией.
+        self._set_crop_progress_status(
             f"Проверка CROP: поиск отсутствующих файлов... потоков: {worker_text}"
         )
-        if auto_workers:
-            self._set_auto_workers_status("Авто: запуск адаптивного контроллера для CROP...")
-        else:
-            self._hide_auto_workers_status()
 
         backend = self.backend_mode_var.get()
         threading.Thread(
@@ -7071,8 +7082,9 @@ class FaceSearchGUI:
                             maximum=max(1, checked),
                             value=checked,
                         )
-                    self.status_var.set(
-                        f"CROP: проверено записей {checked}; отсутствует файлов: {missing}"
+                    self._set_crop_progress_status(
+                        f"CROP: проверено записей {checked}; отсутствует файлов: {missing}; "
+                        + ("начинается восстановление..." if missing else "все файлы на месте")
                     )
 
                 elif kind == "crop_repair_progress":
@@ -7082,7 +7094,9 @@ class FaceSearchGUI:
                         maximum=max(1, int(total_missing)),
                         value=min(int(done), int(total_missing)),
                     )
-                    self.status_var.set(
+                    # Прогресс восстановления обновляет ту же строку, где ранее
+                    # отображалось «Авто: запуск адаптивного контроллера для CROP...».
+                    self._set_crop_progress_status(
                         f"CROP [{done}/{total_missing}] — восстановлено: {repaired}, "
                         f"ошибок: {failed}. {message}"
                     )
