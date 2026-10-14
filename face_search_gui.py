@@ -4533,19 +4533,19 @@ class FaceSearchGUI:
         """Применяет согласованную светлую/тёмную палитру ко всему главному окну."""
         dark = self.theme_mode == "dark"
         colors = {
-            "window": "#141820" if dark else "#f3f5f9",
+            "window": "#141820" if dark else "#f3f3f3",
             "surface": "#1d232d" if dark else "#ffffff",
-            "panel": "#252d39" if dark else "#eaf0f7",
+            "panel": "#252d39" if dark else "#e7e7e7",
             "field": "#151a22" if dark else "#ffffff",
-            "foreground": "#e9edf4" if dark else "#202939",
-            "muted": "#a6b0c0" if dark else "#667085",
-            "border": "#354052" if dark else "#d6deea",
+            "foreground": "#e9edf4" if dark else "#202020",
+            "muted": "#a6b0c0" if dark else "#555555",
+            "border": "#354052" if dark else "#bdbdbd",
             "button": "#293342" if dark else "#ffffff",
-            "button_active": "#36455a" if dark else "#eaf1fc",
-            "selection": "#245b91" if dark else "#d8e8ff",
-            "accent": "#3584f5" if dark else "#1769d2",
-            "accent_active": "#4a93fa" if dark else "#0f58b8",
-            "canvas": "#151a22" if dark else "#ffffff",
+            "button_active": "#36455a" if dark else "#e2e2e2",
+            "selection": "#245b91" if dark else "#cccccc",
+            "accent": "#3584f5" if dark else "#444444",
+            "accent_active": "#4a93fa" if dark else "#303030",
+            "canvas": "#151a22" if dark else "#e0e0e0",
             "danger": "#a9333f" if dark else "#c43d4b",
         }
         self.theme_colors = colors
