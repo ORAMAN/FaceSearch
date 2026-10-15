@@ -4980,7 +4980,8 @@ class FaceSearchGUI:
             ("faiss_state", "Состояние FAISS", "w"),
             ("gpu", "GPU search", "w"),
         ]
-        for row_number, (key, title, anchor) in enumerate(stats_rows, start=2):
+        for row_index, (key, title, anchor) in enumerate(stats_rows):
+            row_number = 2 + row_index * 2
             ttk.Label(
                 self.stats_table, text=title, anchor="w",
             ).grid(
@@ -4998,7 +4999,7 @@ class FaceSearchGUI:
                 padx=(4, 2), pady=2,
             )
             self.stats_value_labels[key] = value_label
-            if row_number < len(stats_rows) + 1:
+            if row_index < len(stats_rows) - 1:
                 ttk.Separator(self.stats_table, orient="horizontal").grid(
                     row=row_number + 1, column=0, columnspan=2,
                     sticky="ew", pady=1,
