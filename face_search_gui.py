@@ -6158,8 +6158,10 @@ class FaceSearchGUI:
                         and not model_pool_state["capacity_exhausted"]
                     ):
                         free_mb, _total_mb = gpu_memory_info_mb()
-                        # До загрузки следующей CUDA-сессии оставляем запас 2 ГБ.
-                        if free_mb is None or free_mb < 2048:
+                        # Оставляем динамический запас 1.5 ГБ, но не ограничиваем
+                        # 12-ГБ GPU четырьмя моделями: фактическая VRAM проверяется
+                        # перед каждой загрузкой, поэтому пул растёт по реальной памяти.
+                        if free_mb is None or free_mb < 1536:
                             model_pool_state["capacity_exhausted"] = True
                             if free_mb is None:
                                 print(
@@ -6531,16 +6533,24 @@ class FaceSearchGUI:
                     except (TypeError, ValueError):
                         total_vram_mb = 0.0
 
-                if total_vram_mb >= 16384:
-                    vram_model_cap = 6
+                # Это верхний защитный предел, а не целевое число моделей.
+                # Фактическое число дополнительно ограничивается свободной VRAM
+                # перед каждой инициализацией CUDA-сессии.
+                if total_vram_mb >= 24576:
+                    vram_model_cap = 12
+                elif total_vram_mb >= 16384:
+                    vram_model_cap = 10
                 elif total_vram_mb >= 12288:
-                    vram_model_cap = 4
+                    # В том числе RTX 3060 12 GB: больше прежнего лимита в 4 модели.
+                    vram_model_cap = 8
                 elif total_vram_mb >= 8192:
-                    vram_model_cap = 3
+                    vram_model_cap = 6
+                elif total_vram_mb >= 6144:
+                    vram_model_cap = 4
                 elif total_vram_mb >= 4096:
                     vram_model_cap = 2
                 else:
-                    # Очень мало VRAM или неизвестная ёмкость — одна модель.
+                    # Для GPU с малым объёмом VRAM оставляем одну модель.
                     vram_model_cap = 1
 
                 model_pool_state["max_count"] = max(
