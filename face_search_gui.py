@@ -7867,7 +7867,7 @@ def _crop_path_migration_needed(conn: DatabaseConnection) -> bool:
                OR i.path LIKE ?
                OR i.path LIKE ?
             """,
-            (r"%:\%", "/%", "file:%", r"\\%"),
+            (r"%:\\%", "/%", "file:%", r"\\\\%"),
         ).fetchone()
         return row is not None
     finally:
