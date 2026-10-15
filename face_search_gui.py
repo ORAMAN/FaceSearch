@@ -4981,7 +4981,7 @@ class FaceSearchGUI:
             anchor="e",
         ).grid(row=0, column=1, sticky="ew", padx=(2, 1), pady=(0, 1))
         ttk.Separator(self.stats_table, orient="horizontal").grid(
-            row=1, column=0, columnspan=2, sticky="ew", pady=(0, 3),
+            row=1, column=0, columnspan=2, sticky="ew", pady=0,
         )
 
         self.stats_value_vars = {}
