@@ -447,6 +447,7 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
                 # Новая БД: копируем все записи без поиска дублей. Слияние:
                 # оставляем сопоставление существующих изображений по пути/SHA.
                 if create_target:
+                    found_paths = []
                     by_migration_path = {}
                     found_hashes = []
                 else:
