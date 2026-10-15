@@ -344,7 +344,7 @@ def _target_file_for_path(raw_path: str, target_profile: dict, core) -> Path | N
 
 
 def migrate_database_data(core, source_profile: dict, target_profile: dict, *, create_target: bool,
-                          rebuild_index: bool, log_callback=None) -> dict:
+                          rebuild_index: bool, log_callback=None, progress_callback=None) -> dict:
     """Копирует записи profiles/images/faces. CROP-файлы не копируются, images.path сохраняется без изменений."""
     def log(message):
         if log_callback:
