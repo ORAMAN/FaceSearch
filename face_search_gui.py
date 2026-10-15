@@ -5767,6 +5767,22 @@ class FaceSearchGUI:
             ]
             total = len(files)
             self.events.put(("scan_total", total))
+
+            # Определяем тип именно профиля БД, а не backend распознавания.
+            # На удалённом PostgreSQL лимит подключений сервера часто невелик;
+            # каждый scan-worker держит отдельное постоянное соединение.
+            scan_db_profiles, scan_db_active = _load_db_profiles()
+            scan_db_profile = next(
+                (
+                    item for item in scan_db_profiles
+                    if str(item.get("name")) == str(scan_db_active)
+                ),
+                None,
+            )
+            scan_db_type = str(
+                (scan_db_profile or {}).get("type") or DB_TYPE_SQLITE
+            ).strip().lower()
+
             self.events.put((
                 "scan_startup_status",
                 f"Найдено изображений: {total}. Проверка базы данных...",
@@ -5836,7 +5852,13 @@ class FaceSearchGUI:
                             f"{type(exc).__name__}: {exc}"
                         )
                         if connection_attempt < 2:
-                            time.sleep(0.2 * (connection_attempt + 1))
+                            # Для удалённого PostgreSQL даём серверу время
+                            # освободить слот подключения, не создавая шквал
+                            # повторных запросов от нескольких worker-ов.
+                            if scan_db_type == DB_TYPE_POSTGRESQL:
+                                time.sleep(1.0 * (connection_attempt + 1))
+                            else:
+                                time.sleep(0.2 * (connection_attempt + 1))
 
                 raise RuntimeError(
                     "Не удалось открыть соединение с БД после 3 попыток: "
@@ -6029,6 +6051,19 @@ class FaceSearchGUI:
                             )
 
             executor_max_workers = controller.max_workers if controller is not None else workers
+            if scan_db_type == DB_TYPE_POSTGRESQL:
+                requested_workers = max(1, int(executor_max_workers))
+                # Один worker = одно удерживаемое соединение psycopg. Ограничиваем
+                # параллельные соединения до двух, чтобы не исчерпывать max_connections
+                # удалённого сервера и не блокировать сканирование массовыми отказами.
+                executor_max_workers = min(requested_workers, 2)
+                if executor_max_workers < requested_workers:
+                    self.events.put((
+                        "scan_startup_status",
+                        "Удалённый PostgreSQL: для стабильности ограничено "
+                        f"число потоков сканирования до {executor_max_workers} "
+                        f"(запрошено {requested_workers})",
+                    ))
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=executor_max_workers,
                 thread_name_prefix="gpu-face",
