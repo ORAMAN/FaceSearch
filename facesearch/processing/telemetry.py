@@ -74,7 +74,7 @@ def _detect_storage_types() -> dict[str, str]:
                 partitions = psutil.disk_partitions(all=True) if psutil is not None else []
                 for part in partitions:
                     device = str(part.device or "").rsplit("/", 1)[-1]
-                    device = re.sub(r"\\d+$", "", device)
+                    device = re.sub(r"p?\\d+$", "", device)
                     rotational = Path("/sys/block") / device / "queue" / "rotational"
                     if rotational.is_file():
                         value = rotational.read_text(encoding="ascii", errors="ignore").strip()
@@ -612,6 +612,7 @@ class AdaptiveWorkerController:
         output_path: Any = None,
         input_is_network: bool = False,
         remote_db: bool = False,
+        auto_adjust: bool = True,
     ):
         self.enabled = True
         self.backend = backend
@@ -620,18 +621,27 @@ class AdaptiveWorkerController:
         self.output_path = output_path
         self.input_is_network = bool(input_is_network)
         self.remote_db = bool(remote_db)
+        self.auto_adjust = bool(auto_adjust)
         min_w, start_w, max_w = _auto_worker_limits(
             backend=self.backend,
             input_paths=self.input_paths,
             output_path=self.output_path,
             remote_db=self.remote_db,
         )
-        self.min_workers = min_w
-        self.max_workers = max_w
-        self.current_workers = max(
-            self.min_workers,
-            min(self.max_workers, int(initial_workers or start_w)),
-        )
+        if self.auto_adjust:
+            self.min_workers = min_w
+            self.max_workers = max_w
+            self.current_workers = max(
+                self.min_workers,
+                min(self.max_workers, int(initial_workers or start_w)),
+            )
+        else:
+            # В ручном режиме число worker-ов фиксировано; контроллер только
+            # измеряет скорость и нагрузку, не меняя заданное пользователем число.
+            fixed_workers = max(1, int(initial_workers or 1))
+            self.min_workers = fixed_workers
+            self.max_workers = fixed_workers
+            self.current_workers = fixed_workers
         self.last_report = time.monotonic()
         self.last_change = self.last_report
         self.last_completed = 0
@@ -740,7 +750,12 @@ class AdaptiveWorkerController:
             )
         )
 
-        if enough_time:
+        if not self.auto_adjust:
+            reason = (
+                "ручной режим, ресурсы близки к пределу: " + ", ".join(saturated)
+                if saturated else f"ручной режим: фиксировано {old_workers} поток(ов)"
+            )
+        elif enough_time:
             if severe or regression:
                 if old_workers > self.min_workers:
                     new_workers = old_workers - 1
@@ -815,8 +830,9 @@ class AdaptiveWorkerController:
         vram_text = f"{float(vram):.0f}%" if vram is not None else "н/д"
         gpu = report.get("gpu")
         gpu_text = f"{float(gpu):.0f}%" if gpu is not None else "н/д"
+        status_prefix = "Авто" if self.auto_adjust else "Мониторинг (ручной режим)"
         return (
-            f"Авто: {int(report['workers'])} поток(ов) • "
+            f"{status_prefix}: {int(report['workers'])} поток(ов) • "
             f"{float(report['speed_ema']):.2f} изобр/с • "
             f"CPU {float(report['cpu']):.0f}% • "
             f"GPU {gpu_text} • VRAM {vram_text} • "
