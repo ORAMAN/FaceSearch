@@ -46,6 +46,7 @@ def _load_gui_settings() -> dict[str, Any]:
         "create_crop_files": True,
         "overwrite_existing_crops": False,
         "use_local_crops": True,
+        "create_crops_on_html": False,
         "top_k": DEFAULT_TOP_K,
         "min_similarity": 43.0,
     }
@@ -136,6 +137,10 @@ def _load_gui_settings() -> dict[str, Any]:
                 node.findtext("use_local_crops"),
                 settings["use_local_crops"],
             )
+            settings["create_crops_on_html"] = _xml_bool(
+                node.findtext("create_crops_on_html"),
+                settings["create_crops_on_html"],
+            )
 
         node = root.find("compute")
         if node is not None:
@@ -208,6 +213,9 @@ def _save_gui_settings_data(settings: dict[str, Any]) -> None:
     )
     ET.SubElement(node, "use_local_crops").text = (
         "true" if bool(settings.get("use_local_crops")) else "false"
+    )
+    ET.SubElement(node, "create_crops_on_html").text = (
+        "true" if bool(settings.get("create_crops_on_html", False)) else "false"
     )
 
     node = ET.SubElement(root, "compute")
