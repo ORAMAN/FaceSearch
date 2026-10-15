@@ -3840,6 +3840,20 @@ class FaceSearchGUI:
     def _on_settings_variable_changed(self, *_args):
         self._schedule_settings_save()
 
+    def _update_stats_table_wraplength(self):
+        """Подгоняет перенос длинных значений под ширину правой панели статистики."""
+        try:
+            width = int(self.stats_table.winfo_width())
+            if width <= 1:
+                return
+            # Оставляем место под столбец показателей и промежутки между ячейками.
+            value_width = max(120, width - 150)
+            for label in self.stats_value_labels.values():
+                label.configure(wraplength=value_width)
+            self.stats_message_label.configure(wraplength=max(220, width - 12))
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            pass
+
     def _update_status_wraplength(self):
         """Подгоняет перенос нижнего статуса под доступную ширину окна."""
         label = getattr(self, "status_label", None)
@@ -3860,6 +3874,7 @@ class FaceSearchGUI:
         # Обновляем ширину строки при разворачивании, восстановлении и
         # ручном изменении размеров окна; сам статус продолжает занимать всю ширину.
         self._update_status_wraplength()
+        self._update_stats_table_wraplength()
         if self._settings_ready:
             self._schedule_settings_save()
 
@@ -4923,16 +4938,71 @@ class FaceSearchGUI:
         )
         db_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
 
-        # Статистика размещена рядом с настройками БД, а не внизу панели
-        # предпросмотра, где она могла обрезаться при небольшой высоте окна.
+        # Табличная статистика БД: подписи в первом столбце, результаты —
+        # во втором. Числовые значения выравниваются по правому краю.
         db_stats_frame = ttk.LabelFrame(
             db_groups_row, text="Статистика БД", padding=(10, 8),
         )
         db_stats_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        db_stats_frame.columnconfigure(1, weight=1)
+
+        self.stats_message_label = ttk.Label(
+            db_stats_frame, textvariable=self.stats_var, justify="left",
+            anchor="w", wraplength=460,
+        )
+        self.stats_message_label.pack(fill="x", anchor="w", pady=(0, 4))
+
+        self.stats_table = ttk.Frame(db_stats_frame)
+        self.stats_table.pack(fill="both", expand=True)
+        self.stats_table.columnconfigure(1, weight=1)
+
         ttk.Label(
-            db_stats_frame, textvariable=self.stats_var, justify="left", anchor="nw",
-            wraplength=520,
-        ).pack(fill="both", expand=True, anchor="nw")
+            self.stats_table, text="Показатель", style="Muted.TLabel",
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew", padx=(2, 12), pady=(0, 4))
+        ttk.Label(
+            self.stats_table, text="Значение", style="Muted.TLabel",
+            anchor="e",
+        ).grid(row=0, column=1, sticky="ew", padx=(4, 2), pady=(0, 4))
+        ttk.Separator(self.stats_table, orient="horizontal").grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(0, 3),
+        )
+
+        self.stats_value_vars = {}
+        self.stats_value_labels = {}
+        stats_rows = [
+            ("profiles", "Профилей", "e"),
+            ("images", "Изображений", "e"),
+            ("faces", "Лиц в БД", "e"),
+            ("backend", "СУБД", "w"),
+            ("profile", "Активный профиль", "w"),
+            ("faiss_size", "Размер FAISS", "w"),
+            ("faiss_state", "Состояние FAISS", "w"),
+            ("gpu", "GPU search", "w"),
+        ]
+        for row_number, (key, title, anchor) in enumerate(stats_rows, start=2):
+            ttk.Label(
+                self.stats_table, text=title, anchor="w",
+            ).grid(
+                row=row_number, column=0, sticky="nw",
+                padx=(2, 12), pady=2,
+            )
+            value_var = tk.StringVar(value="—")
+            self.stats_value_vars[key] = value_var
+            value_label = ttk.Label(
+                self.stats_table, textvariable=value_var,
+                anchor=anchor, justify="left", wraplength=300,
+            )
+            value_label.grid(
+                row=row_number, column=1, sticky="new",
+                padx=(4, 2), pady=2,
+            )
+            self.stats_value_labels[key] = value_label
+            if row_number < len(stats_rows) + 1:
+                ttk.Separator(self.stats_table, orient="horizontal").grid(
+                    row=row_number + 1, column=0, columnspan=2,
+                    sticky="ew", pady=1,
+                )
 
         # Одна строка: выбор и подключение слева, управление профилями справа.
         # Вертикальный разделитель и дополнительный отступ визуально отделяют
@@ -7030,16 +7100,24 @@ class FaceSearchGUI:
         else:
             faiss_sync = "нет индекса"
 
-        self.stats_var.set(
-            f"{'    Профилей:':<24}{profiles:,}\n"
-            f"{'    Изображений:':<24}{images:,}\n"
-            f"{'    Лиц в БД:':<24}{faces:,}\n"
-            f"{'    СУБД:':<24}{backend}\n"
-            f"{'    Активный профиль:':<24}{profile_name}\n"
-            f"{'    Размер FAISS:':<24}{faiss_text}\n"
-            f"{'    Состояние FAISS:':<24}{faiss_sync}\n"
-            f"{'    GPU search:':<24}{gpu_text}"
-        )
+        # Обновляем значения в отдельных ячейках: строки выравниваются
+        # независимо от длины подписей, а счётчики имеют одинаковый правый край.
+        values = {
+            "profiles": f"{int(profiles):,}",
+            "images": f"{int(images):,}",
+            "faces": f"{int(faces):,}",
+            "backend": str(backend),
+            "profile": str(profile_name),
+            "faiss_size": faiss_text,
+            "faiss_state": faiss_sync,
+            "gpu": gpu_text,
+        }
+        for key, value in values.items():
+            variable = self.stats_value_vars.get(key)
+            if variable is not None:
+                variable.set(str(value))
+        self.stats_var.set("")
+        self._update_stats_table_wraplength()
         self._update_database_info()
 
     def _poll_events(self):
