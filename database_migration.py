@@ -1014,6 +1014,7 @@ class DatabaseMigrationWindow:
 
         def worker():
             try:
+                self.events.put(("progress", 0, "Подготовка модуля приложения и драйверов БД…", True))
                 self.events.put(("log", "Подготовка модуля приложения и драйверов БД…"))
                 import face_search_gui as core
                 actual_source = next((p for p in core._load_db_profiles()[0] if str(p.get("name")) == str(source_profile.get("name"))), None)
@@ -1084,6 +1085,9 @@ class DatabaseMigrationWindow:
                     messagebox.showinfo("Миграция БД", summary, parent=self.root)
                 elif kind == "error":
                     self.progress.stop()
+                    if str(self.progress.cget("mode")) == "indeterminate":
+                        self.progress.configure(mode="determinate", maximum=100, value=0)
+                        self.progress_percent_var.set("ERR")
                     self.running = False
                     self.start_button.configure(state="normal")
                     self._set_log("ОШИБКА: " + event[1])
