@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from collections import deque
 import ctypes
 import gc
 import hashlib
@@ -1230,6 +1231,26 @@ def _allocate_new_crop_path(conn: DatabaseConnection, image_id: int) -> Path:
     )
 
 
+# Несколько файлов одного профиля могут одновременно обновлять одну строку profiles.
+# Полосатые блокировки ограничивают память фиксированным размером и сериализуют
+# только импорты, чей url_source попадает в одну и ту же блокировку.
+_IMPORT_PROFILE_LOCKS = tuple(threading.RLock() for _ in range(256))
+
+
+def _import_profile_lock_for_json(json_path: Path):
+    """Возвращает блокировку для url_source из JSON до начала DB-импорта."""
+    try:
+        metadata = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    source_url = str(metadata.get("url_source") or "").strip()
+    if not source_url:
+        return None
+    return _IMPORT_PROFILE_LOCKS[hash(source_url) % len(_IMPORT_PROFILE_LOCKS)]
+
+
 def _upsert_import_profile(conn: DatabaseConnection, metadata: dict[str, Any]) -> int:
     source_url = str(metadata.get("url_source") or "").strip() or None
     name = str(metadata.get("name") or "").strip()
@@ -1818,6 +1839,9 @@ def import_image_bundle(
     # images/faces для того же самого источника.
     old_crop_rows = existing_source_rows if overwrite_existing_crops else []
     if existing_source_rows and not overwrite_existing_crops:
+        # _upsert_import_profile мог обновить профиль. Фиксируем транзакцию до
+        # выхода из функции, пока блокировка данного url_source ещё удерживается.
+        conn.commit()
         deleted = False
         if delete_source:
             try:
@@ -3482,8 +3506,9 @@ def generate_html_gallery(
     output_file: str = "face_search_results.html",
     use_local_crops: bool = True,
     theme: str = "dark",
+    retry_missing_crops: bool = False,
 ):
-    """Совместимая точка входа; реализация находится в facesearch.export.html_report."""
+    """Создаёт HTML; при необходимости браузер повторно загружает создаваемые CROP."""
     return _generate_html_gallery_impl(
         results,
         query_image,
@@ -3495,6 +3520,7 @@ def generate_html_gallery(
         load_image_fn=load_image,
         cv2_module=cv2,
         theme=theme,
+        retry_missing_crops=retry_missing_crops,
     )
 
 
@@ -3575,6 +3601,8 @@ class FaceSearchGUI:
         self.backend_status_var = tk.StringVar(value="Проверка CUDA/ONNX Runtime в фоне...")
         self.cpu_status_var = tk.StringVar(value="CPU: проверка...")
         self.gpu_status_var = tk.StringVar(value="GPU: проверка CUDA...")
+        # Скорость сканирования выводится только в auto_workers_status_label.
+        self.scan_rate_var = tk.StringVar(value="")
 
         self.db_profiles, self.active_db_name = _load_db_profiles()
         saved_db_profile = str(self.gui_settings.get("selected_db_profile") or "").strip()
@@ -3855,6 +3883,7 @@ class FaceSearchGUI:
             self.create_crop_files_var,
             self.overwrite_existing_crops_var,
             self.use_local_crops_var,
+            self.create_crops_on_html_var,
             self.query_var,
             self.topk_var,
             self.min_similarity_var,
@@ -4072,6 +4101,7 @@ class FaceSearchGUI:
                 "create_crop_files": bool(self.create_crop_files_var.get()),
                 "overwrite_existing_crops": bool(self.overwrite_existing_crops_var.get()),
                 "use_local_crops": bool(self.use_local_crops_var.get()),
+                "create_crops_on_html": bool(self.create_crops_on_html_var.get()),
                 "top_k": int(self.topk_var.get()),
                 "min_similarity": float(self.min_similarity_var.get()),
             }
@@ -5152,6 +5182,17 @@ class FaceSearchGUI:
             scan_options, text="Обновлять CROP и метаданные", variable=self.overwrite_existing_crops_var,
         )
         self.overwrite_existing_crops_check.grid(row=1, column=1, sticky="w", padx=(0, 10), pady=2)
+        self.create_crops_on_html_var = tk.BooleanVar(
+            value=bool(self.gui_settings.get("create_crops_on_html", False))
+        )
+        self.create_crops_on_html_check = ttk.Checkbutton(
+            scan_options,
+            text="Создавать CROP при создании HTML",
+            variable=self.create_crops_on_html_var,
+        )
+        self.create_crops_on_html_check.grid(
+            row=1, column=2, sticky="w", padx=(0, 10), pady=2
+        )
 
         # --------------------------------------------------------
         # Нижняя полоса состояния закреплена у нижнего края окна.
@@ -5178,6 +5219,8 @@ class FaceSearchGUI:
             style="Status.TLabel", anchor="w",
         )
         self.gpu_status_label.pack(side="left", padx=(0, 6))
+        # Скорости сканирования отображаются только в верхней строке мониторинга,
+        # чтобы не дублировать их рядом с CPU/GPU.
 
         self.progress = ttk.Progressbar(self.page, mode="determinate", style="TProgressbar")
         self.progress.pack(side="bottom", fill="x", pady=(0, 5))
@@ -5506,6 +5549,7 @@ class FaceSearchGUI:
         self.use_json_metadata_check.config(state=state)
         self.create_crop_files_check.config(state=state)
         self.use_local_crops_check.config(state=state)
+        self.create_crops_on_html_check.config(state=state)
         # Новая настройка перезаписи должна блокироваться вместе с остальными
         # параметрами сканирования и индексации, чтобы флажок не менялся
         # посреди операции после того, как worker уже прочитал его значение.
@@ -5580,19 +5624,53 @@ class FaceSearchGUI:
             label.pack_forget()
 
     def _set_auto_workers_status(self, message: str):
-        """Отображает адаптивный статус только для активной AUTO-задачи."""
+        """Отображает мониторинг и скорость сканирования в верхней строке."""
         label = getattr(self, "auto_workers_status_label", None)
         if label is None:
             return
-        is_auto_operation = (
+        # При ручном сканировании тот же блок показывает telemetry, но не
+        # меняет заданное пользователем количество потоков.
+        is_active_scan = self.operation == "scan" and self.scan_running
+        is_auto_crop_operation = (
             bool(self.auto_workers_var.get())
-            and self.operation in ("scan", "crop_repair")
+            and self.operation == "crop_repair"
             and self.scan_running
         )
-        if not is_auto_operation:
+        if not (is_active_scan or is_auto_crop_operation):
             self._hide_auto_workers_status()
             return
-        self.auto_workers_status_var.set(str(message or ""))
+        self._scan_monitor_base_status = str(message or "")
+        if is_active_scan:
+            # AdaptiveWorkerController добавляет свою скорость изображений/с.
+            # Для сканирования оставляем скорость из общего счётчика изображений
+            # и лиц, иначе «изобр/с» показывается дважды в одной строке.
+            self._scan_monitor_base_status = re.sub(
+                r"\\s*•\\s*[-+]?\\d+(?:[.,]\\d+)?\\s*изобр/с\\s*•\\s*",
+                " • ",
+                self._scan_monitor_base_status,
+                count=1,
+            )
+        # Пересчитываем окно и на очередном обновлении telemetry: если новые
+        # результаты временно не поступают, скорость постепенно падает к нулю.
+        if is_active_scan and hasattr(self, "_scan_rate_samples"):
+            now = time.monotonic()
+            window_seconds = max(0.001, float(getattr(self, "_scan_rate_window_seconds", 5.0)))
+            cutoff = now - window_seconds
+            while self._scan_rate_samples and self._scan_rate_samples[0][0] < cutoff:
+                self._scan_rate_samples.popleft()
+            images_in_window = sum(sample[1] for sample in self._scan_rate_samples)
+            faces_in_window = sum(sample[2] for sample in self._scan_rate_samples)
+            started_at = float(getattr(self, "_scan_rate_started_at", now))
+            elapsed = min(window_seconds, max(0.001, now - started_at))
+            self._scan_rate_text = (
+                f"Скорость: {images_in_window / elapsed:.1f} изображений/с • "
+                f"{faces_in_window / elapsed:.1f} лиц/с"
+            )
+        rate_text = str(getattr(self, "_scan_rate_text", "") or "").strip()
+        display_text = self._scan_monitor_base_status
+        if is_active_scan and rate_text:
+            display_text = f"{display_text} | {rate_text}" if display_text else rate_text
+        self.auto_workers_status_var.set(display_text)
         if not label.winfo_manager():
             label.pack(fill="x", padx=0, pady=(0, 3))
 
@@ -5722,7 +5800,30 @@ class FaceSearchGUI:
 
         auto_workers = bool(self.auto_workers_var.get())
 
+        # Профиль среды определяем до запуска: это влияет только на стартовое
+        # число потоков. После запуска AUTO продолжает подстраиваться по telemetry.
+        selected_profile_name = str(self.db_profile_var.get() or self.connected_db_name or "")
+        scan_profile = next(
+            (
+                profile for profile in getattr(self, "db_profiles", [])
+                if str(profile.get("name") or "") == selected_profile_name
+            ),
+            None,
+        )
+        scan_profile = scan_profile or {}
+        scan_db_type = str(scan_profile.get("type") or DB_TYPE_SQLITE).lower()
+        scan_db_host = str(scan_profile.get("host") or "").strip().lower()
+        remote_db = (
+            scan_db_type != DB_TYPE_SQLITE
+            and scan_db_host not in {"", "localhost", "127.0.0.1", "::1"}
+        )
+        if scan_db_type == DB_TYPE_SQLITE:
+            sqlite_path = str(scan_profile.get("path") or "")
+            remote_db = sqlite_path.startswith(("\\\\", "//"))
+
         if auto_workers:
+            # Быстрый предварительный выбор по CPU не блокирует Tkinter.
+            # Полный профиль GPU/диска/БД определяется в scan worker в фоне.
             _auto_min, workers, _auto_max = _auto_worker_limits()
         else:
             try:
@@ -5796,7 +5897,9 @@ class FaceSearchGUI:
         if auto_workers:
             self._set_auto_workers_status("Авто: запуск адаптивного контроллера...")
         else:
-            self._hide_auto_workers_status()
+            self._set_auto_workers_status(
+                f"Мониторинг: ручной режим, фиксировано {workers} поток(ов); сбор нагрузки включён"
+            )
 
         threading.Thread(
             target=self._scan_worker,
@@ -5809,6 +5912,7 @@ class FaceSearchGUI:
                 auto_workers,
                 create_crop_files,
                 overwrite_existing_crops,
+                remote_db,
             ),
             daemon=True,
         ).start()
@@ -5823,16 +5927,19 @@ class FaceSearchGUI:
         auto_workers=False,
         create_crop_files=True,
         overwrite_existing_crops=False,
+        remote_db=False,
     ):
-        """Высокопроизводительное HDD -> CPU -> единственная GPU model -> DB pipeline.
+        """Высокопроизводительный HDD -> CPU/GPU inference -> DB pipeline.
 
         Принципы:
-        1. Одна общая FaceAnalysis/ONNX Runtime model на GPU.
-        2. Несколько worker-потоков одновременно вызывают одну model, что
-           позволяет держать CUDA pipeline занятым.
-        3. SQLite connection переиспользуется каждым worker-потоком.
-        4. Тяжёлая очистка duplicate SHA выполняется только один раз до worker-ов.
-        5. В executor одновременно находится ограниченное число futures.
+        1. На GPU используется ограниченный пул FaceAnalysis/ONNX Runtime моделей:
+           ориентир — одна модель на два worker-потока, с лимитом по VRAM.
+        2. Если свободной видеопамяти недостаточно, потоки совместно используют
+           уже созданные модели вместо отказа сканирования.
+        3. На CPU остаётся один экземпляр модели, поскольку ONNX Runtime сам
+           распараллеливает CPU-инференс.
+        4. DB connection переиспользуется каждым worker-потоком.
+        5. Тяжёлая очистка duplicate SHA выполняется только один раз до worker-ов.
         """
         try:
             # Не выполнять полную проверку всех images и файлов на диске перед
@@ -5864,10 +5971,113 @@ class FaceSearchGUI:
                 f"Найдено изображений: {total}. Подготовка модели распознавания...",
             ))
 
-            # Одна и только одна модель InsightFace выбранного backend.
+            # Сначала создаём базовую модель выбранного backend; дополнительные
+            # GPU-модели при необходимости будут добавлены в ограниченный пул.
             app = create_face_app(backend)
             self.app = app
             actual_backend = face_app_backend(app)
+            # Модель №1 уже загружена. Дополнительные сессии создаются только
+            # для GPU, лениво, когда подключаются новые worker-потоки.
+            model_pool = [app]
+            model_pool_lock = threading.RLock()
+            model_local = threading.local()
+            model_pool_state = {
+                "max_count": 1,
+                "assigned_threads": 0,
+                "capacity_exhausted": False,
+            }
+
+            def gpu_memory_info_mb():
+                """Текущая свободная/общая VRAM; None означает неизвестное значение."""
+                if actual_backend != BACKEND_GPU or torch is None:
+                    return None, None
+                try:
+                    if not torch.cuda.is_available():
+                        return None, None
+                    free_bytes, total_bytes = torch.cuda.mem_get_info(GPU_INDEX_DEVICE)
+                    return (
+                        float(free_bytes) / (1024 ** 2),
+                        float(total_bytes) / (1024 ** 2),
+                    )
+                except Exception:
+                    return None, None
+
+            def get_worker_app():
+                """Назначает потоку свою модель; если VRAM мало — делит имеющиеся."""
+                local_app = getattr(model_local, "app", None)
+                if local_app is not None:
+                    return local_app
+
+                with model_pool_lock:
+                    local_app = getattr(model_local, "app", None)
+                    if local_app is not None:
+                        return local_app
+
+                    slot = model_pool_state["assigned_threads"]
+                    model_pool_state["assigned_threads"] = slot + 1
+                    preferred_index = slot // 2
+
+                    while (
+                        preferred_index >= len(model_pool)
+                        and len(model_pool) < model_pool_state["max_count"]
+                        and not model_pool_state["capacity_exhausted"]
+                    ):
+                        free_mb, _total_mb = gpu_memory_info_mb()
+                        # До загрузки следующей CUDA-сессии оставляем запас 2 ГБ.
+                        if free_mb is None or free_mb < 2048:
+                            model_pool_state["capacity_exhausted"] = True
+                            if free_mb is None:
+                                print(
+                                    "[SCAN MODEL POOL] Свободная VRAM неизвестна; "
+                                    "оставляем одну/уже созданные модели."
+                                )
+                            else:
+                                print(
+                                    "[SCAN MODEL POOL] Дополнительная модель не "
+                                    f"создана: свободно VRAM {free_mb:.0f} MB."
+                                )
+                            break
+
+                        model_number = len(model_pool) + 1
+                        self.events.put((
+                            "scan_startup_status",
+                            f"Подготовка GPU-модели {model_number}/"
+                            f"{model_pool_state['max_count']}...",
+                        ))
+                        try:
+                            candidate = create_face_app(BACKEND_GPU)
+                        except Exception as exc:
+                            model_pool_state["capacity_exhausted"] = True
+                            print(
+                                "[SCAN MODEL POOL] Не удалось создать модель "
+                                f"{model_number}: {type(exc).__name__}: {exc}"
+                            )
+                            break
+
+                        if face_app_backend(candidate) != BACKEND_GPU:
+                            model_pool_state["capacity_exhausted"] = True
+                            print(
+                                "[SCAN MODEL POOL] Дополнительная модель не "
+                                "использовала CUDA; сохраняем текущий пул."
+                            )
+                            break
+
+                        model_pool.append(candidate)
+                        print(
+                            f"[SCAN MODEL POOL] GPU-модель {len(model_pool)}/"
+                            f"{model_pool_state['max_count']} готова."
+                        )
+
+                    if preferred_index < len(model_pool):
+                        selected_app = model_pool[preferred_index]
+                    else:
+                        # VRAM-лимит достигнут: распределяем потоки по готовым
+                        # моделям вместо прерывания сканирования.
+                        selected_app = model_pool[slot % len(model_pool)]
+
+                    model_local.app = selected_app
+                    return selected_app
+
             self.events.put(("backend_actual", actual_backend, backend))
 
             self.events.put(("scan_total", total))
@@ -5944,13 +6154,16 @@ class FaceSearchGUI:
                     }
 
                 try:
+                    # Сначала назначаем модель, поскольку создание ONNX-сессии
+                    # может занять время; в этот момент DB-соединение ещё не открыто.
+                    worker_app = get_worker_app()
                     conn = get_worker_conn()
 
-                    # SQL Server может кратковременно вернуть deadlock/lock timeout,
-                    # когда несколько worker-ов одновременно обновляют profiles/images.
-                    # Повторяем только транзиентные ошибки MSSQL; обычные ошибки не
-                    # маскируем.
-                    max_attempts = 3 if conn.backend == DB_TYPE_MSSQL else 1
+                    # MySQL может вернуть ER_CHECKREAD (1020), когда несколько
+                    # worker-ов одновременно обновляют одну строку profiles. MSSQL
+                    # также может возвращать deadlock/lock timeout. Повторяем только
+                    # распознанные временные конфликты и ограниченное число раз.
+                    max_attempts = 4 if conn.backend in (DB_TYPE_MYSQL, DB_TYPE_MSSQL) else 1
                 except Exception as exc:
                     # Это исключение раньше выходило из worker до его основного
                     # try/except, после чего интерфейс показывал «<unknown>».
@@ -5979,21 +6192,46 @@ class FaceSearchGUI:
                         json_path = path.with_suffix(".json")
 
                         if use_json_metadata and json_path.is_file():
-                            result = import_image_bundle(
-                                conn,
-                                app,
-                                path,
-                                json_path,
-                                delete_source=delete_processed,
-                                create_crop_files=create_crop_files,
-                                overwrite_existing_crops=overwrite_existing_crops,
-                            )
+                            profile_lock = _import_profile_lock_for_json(json_path)
+                            if profile_lock is None:
+                                result = import_image_bundle(
+                                    conn,
+                                    worker_app,
+                                    path,
+                                    json_path,
+                                    delete_source=delete_processed,
+                                    create_crop_files=create_crop_files,
+                                    overwrite_existing_crops=overwrite_existing_crops,
+                                )
+                            else:
+                                # Удерживаем блокировку до завершения транзакции импорта,
+                                # а не только вокруг UPDATE profiles.
+                                with profile_lock:
+                                    try:
+                                        result = import_image_bundle(
+                                            conn,
+                                            worker_app,
+                                            path,
+                                            json_path,
+                                            delete_source=delete_processed,
+                                            create_crop_files=create_crop_files,
+                                            overwrite_existing_crops=overwrite_existing_crops,
+                                        )
+                                    except Exception:
+                                        # Откатываем транзакцию до освобождения lock:
+                                        # следующий файл того же профиля не должен
+                                        # читать незавершённое состояние предыдущего.
+                                        try:
+                                            conn.rollback()
+                                        except Exception:
+                                            pass
+                                        raise
                             count = int(result["faces"])
                             return path, count, None, result
 
                         result = process_local_image(
                             conn,
-                            app,
+                            worker_app,
                             path,
                             delete_source=delete_processed,
                             create_crop_files=create_crop_files,
@@ -6007,23 +6245,40 @@ class FaceSearchGUI:
                         except Exception:
                             pass
 
-                        if conn.backend != DB_TYPE_MSSQL or attempt + 1 >= max_attempts:
+                        if (
+                            conn.backend not in (DB_TYPE_MYSQL, DB_TYPE_MSSQL)
+                            or attempt + 1 >= max_attempts
+                        ):
                             return path, 0, exc, {
                                 "faces": 0,
                                 "deleted": False,
                             }
 
                         error_text = str(exc).lower()
-                        transient = any(
-                            marker in error_text
-                            for marker in (
-                                "deadlock",
-                                "1205",
-                                "lock request time out",
-                                "1222",
-                                "timeout expired",
-                                "hyt00",
-                                "40001",
+                        error_code = None
+                        try:
+                            if getattr(exc, "args", None):
+                                error_code = int(exc.args[0])
+                        except (TypeError, ValueError):
+                            pass
+                        transient = (
+                            error_code in {1020, 1205, 1206, 1213}
+                            or any(
+                                marker in error_text
+                                for marker in (
+                                    "record has changed since last read",
+                                    "deadlock",
+                                    "1020",
+                                    "1205",
+                                    "1206",
+                                    "1213",
+                                    "lock wait timeout",
+                                    "lock request time out",
+                                    "1222",
+                                    "timeout expired",
+                                    "hyt00",
+                                    "40001",
+                                )
                             )
                         )
                         if not transient:
@@ -6032,32 +6287,43 @@ class FaceSearchGUI:
                                 "deleted": False,
                             }
 
+                        print(
+                            f"[SCAN DB RETRY] {path.name}: временный конфликт БД "
+                            f"({error_code or type(exc).__name__}), "
+                            f"повтор {attempt + 2}/{max_attempts}"
+                        )
                         time.sleep(0.15 * (attempt + 1))
 
                 return path, 0, RuntimeError(
-                    "Не удалось завершить запись в Microsoft SQL Server."
+                    "Не удалось завершить запись в БД после повторных попыток."
                 ), {"faces": 0, "deleted": False}
 
             # Для AUTO pool создаём только один раз с верхним пределом, а фактическое
             # количество одновременно работающих задач регулируем limiter-ом. Это
             # позволяет менять число потоков без пересоздания ThreadPoolExecutor.
-            controller = None
-            limiter = None
+            controller = AdaptiveWorkerController(
+                # 0 означает использовать стартовую оценку после определения
+                # фактического backend, накопителя и типа БД в фоновом потоке.
+                initial_workers=0 if auto_workers else workers,
+                backend=actual_backend,
+                operation="scan",
+                input_paths=[directory],
+                output_path=CROP_DIR,
+                remote_db=remote_db,
+                auto_adjust=auto_workers,
+            )
             if auto_workers:
-                controller = AdaptiveWorkerController(
-                    initial_workers=workers,
-                    backend=actual_backend,
-                    operation="scan",
-                    input_paths=[directory],
-                    output_path=CROP_DIR,
-                )
-                limiter = AdaptiveConcurrencyLimiter(controller.current_workers)
-                self.events.put((
-                    "auto_workers_status",
+                workers = controller.current_workers
+            limiter = AdaptiveConcurrencyLimiter(controller.current_workers)
+            if auto_workers:
+                initial_status = (
                     f"Авто: старт {controller.current_workers} из {controller.max_workers} потоков"
-                ))
+                )
             else:
-                limiter = AdaptiveConcurrencyLimiter(workers)
+                initial_status = (
+                    f"Мониторинг (ручной режим): фиксировано {workers} поток(ов)"
+                )
+            self.events.put(("auto_workers_status", initial_status))
 
             def adaptive_worker(path):
                 acquired = False
@@ -6108,6 +6374,43 @@ class FaceSearchGUI:
                             )
 
             executor_max_workers = controller.max_workers if controller is not None else workers
+
+            # Верхний предел пула определяется количеством возможных worker-ов
+            # и объёмом VRAM. Модели создаются лениво, только когда нужны потоки.
+            if actual_backend == BACKEND_GPU:
+                _free_mb, total_vram_mb = gpu_memory_info_mb()
+                if total_vram_mb is None:
+                    metrics = _read_gpu_system_metrics(refresh=True)
+                    try:
+                        total_vram_mb = float(metrics.get("gpu_mem_total_mb") or 0.0)
+                    except (TypeError, ValueError):
+                        total_vram_mb = 0.0
+
+                if total_vram_mb >= 16384:
+                    vram_model_cap = 6
+                elif total_vram_mb >= 12288:
+                    vram_model_cap = 4
+                elif total_vram_mb >= 8192:
+                    vram_model_cap = 3
+                elif total_vram_mb >= 4096:
+                    vram_model_cap = 2
+                else:
+                    # Очень мало VRAM или неизвестная ёмкость — одна модель.
+                    vram_model_cap = 1
+
+                model_pool_state["max_count"] = max(
+                    1,
+                    min((executor_max_workers + 1) // 2, vram_model_cap),
+                )
+            else:
+                model_pool_state["max_count"] = 1
+
+            self.events.put((
+                "scan_startup_status",
+                f"Пул моделей: 1/{model_pool_state['max_count']}; "
+                "дополнительные модели будут загружаться по мере необходимости.",
+            ))
+
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=executor_max_workers,
                 thread_name_prefix="gpu-face",
@@ -6246,9 +6549,14 @@ class FaceSearchGUI:
                 final_report = controller.observe(completed)
                 if final_report is not None:
                     self.events.put(("auto_workers_status", controller.status_text(final_report)))
+                final_prefix = "Авто: завершено" if auto_workers else "Мониторинг: завершено"
+                final_workers_text = (
+                    f"итоговая настройка {controller.current_workers} потоков"
+                    if auto_workers else f"ручная настройка сохранена: {workers} поток(ов)"
+                )
                 self.events.put((
                     "auto_workers_status",
-                    f"Авто: завершено, итоговая настройка {controller.current_workers} потоков"
+                    f"{final_prefix}, {final_workers_text}"
                 ))
             self.events.put((
                 "scan_done", total_faces, completed, total, stopped,
@@ -6839,6 +7147,7 @@ class FaceSearchGUI:
 
             workers = min(workers, LOCAL_MAX_WORKERS)
 
+        self._crop_repair_after_html = False
         self.operation = "crop_repair"
         self._prepare_scan_controls()
         self._set_busy(True)
@@ -6859,26 +7168,135 @@ class FaceSearchGUI:
             name="crop-repair",
         ).start()
 
+    def _start_html_crop_repair_for_results(self, face_ids):
+        """Восстанавливает CROP только для лиц, попавших в открытую HTML-галерею."""
+        if self.busy:
+            return
+
+        normalized_ids = sorted({
+            int(value) for value in (face_ids or [])
+            if str(value).strip().isdigit() and int(value) > 0
+        })
+        if not normalized_ids:
+            return
+
+        auto_workers = bool(self.auto_workers_var.get())
+        if auto_workers:
+            _auto_min, workers, _auto_max = _auto_worker_limits()
+        else:
+            try:
+                workers = max(1, min(int(self.local_workers_var.get()), LOCAL_MAX_WORKERS))
+            except (TypeError, ValueError):
+                workers = LOCAL_DEFAULT_WORKERS
+
+        self._crop_repair_after_html = True
+        self.operation = "crop_repair"
+        self._prepare_scan_controls()
+        self._set_busy(True)
+        self.progress.config(mode="indeterminate")
+        self.progress.start(10)
+        worker_text = "AUTO" if auto_workers else str(workers)
+        self._set_crop_progress_status(
+            "HTML открыт. Создание отсутствующих CROP для результатов поиска... "
+            f"потоков: {worker_text}"
+        )
+
+        backend = self.backend_mode_var.get()
+        threading.Thread(
+            target=self._crop_repair_worker,
+            args=(backend, workers, auto_workers, normalized_ids),
+            daemon=True,
+            name="html-crop-repair",
+        ).start()
+
+    def _start_html_regeneration_after_crop(self):
+        """Повторно формирует HTML после восстановления CROP и открывает обновлённый файл."""
+        context = getattr(self, "_html_crop_rebuild_context", None)
+        if not context:
+            return False
+
+        # Контекст одноразовый: повторное событие не должно запускать вторую генерацию.
+        self._html_crop_rebuild_context = None
+        self.operation = "html_regenerate"
+        self._set_busy(True)
+        self.progress.config(mode="indeterminate")
+        self.progress.start(10)
+        self.status_var.set("CROP восстановлены. Повторное создание HTML...")
+
+        threading.Thread(
+            target=self._html_regeneration_worker,
+            args=(context,),
+            daemon=True,
+            name="html-regenerate-after-crop",
+        ).start()
+        return True
+
+    def _html_regeneration_worker(self, context):
+        """Повторно создаёт HTML из результатов завершившегося поиска, не выполняя поиск заново."""
+        try:
+            results = context["results"]
+            html_file = generate_html_gallery(
+                results=results,
+                query_image=Path(context["query_image"]),
+                output_file=str(context["html_file"]),
+                use_local_crops=bool(context["use_local_crops"]),
+                theme=str(context["theme"]),
+                retry_missing_crops=True,
+            )
+            self.events.put(("html_regenerated", html_file, len(results)))
+        except Exception as exc:
+            self.events.put(("html_regeneration_error", str(exc)))
+
     def _crop_repair_worker(
         self,
         backend=BACKEND_GPU,
         workers=LOCAL_DEFAULT_WORKERS,
         auto_workers=False,
+        face_ids=None,
     ):
         try:
             conn = create_database(maintenance=False)
             try:
                 # Быстрая предварительная выборка позволяет не создавать
                 # InsightFace вообще, если все CROP уже существуют.
-                rows = conn.execute(
-                    """
-                    SELECT i.id, i.path
-                    FROM images i
-                    WHERE EXISTS (
-                        SELECT 1 FROM faces f WHERE f.image_id = i.id
-                    )
-                    """
-                ).fetchall()
+                normalized_face_ids = None
+                if face_ids is not None:
+                    normalized_face_ids = sorted({
+                        int(value) for value in face_ids
+                        if str(value).strip().isdigit() and int(value) > 0
+                    })
+                    if not normalized_face_ids:
+                        self.events.put((
+                            "crop_repair_done",
+                            {
+                                "checked": 0, "already_ok": 0, "missing": 0,
+                                "repaired": 0, "failed": 0,
+                                "deleted_unavailable_records": 0, "stopped": False,
+                            },
+                        ))
+                        return
+                    placeholders = ",".join("?" for _ in normalized_face_ids)
+                    rows = conn.execute(
+                        f"""
+                        SELECT i.id, i.path
+                        FROM images i
+                        WHERE EXISTS (
+                            SELECT 1 FROM faces f
+                            WHERE f.image_id = i.id AND f.id IN ({placeholders})
+                        )
+                        """,
+                        tuple(normalized_face_ids),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT i.id, i.path
+                        FROM images i
+                        WHERE EXISTS (
+                            SELECT 1 FROM faces f WHERE f.image_id = i.id
+                        )
+                        """
+                    ).fetchall()
                 missing = 0
                 checked = 0
                 for image_id, db_path in rows:
@@ -6949,6 +7367,8 @@ class FaceSearchGUI:
                     progress_callback=progress,
                     pause_event=self.scan_paused,
                     stop_event=self.scan_stop,
+                    face_ids=normalized_face_ids,
+                    delete_unavailable_records=(normalized_face_ids is None),
                 )
                 self.events.put(("crop_repair_done", result))
             finally:
@@ -7044,6 +7464,9 @@ class FaceSearchGUI:
                 top_k,
                 min_similarity,
                 self.backend_mode_var.get(),
+                bool(self.create_crops_on_html_var.get()),
+                bool(self.use_local_crops_var.get()),
+                self.theme_mode,
             ),
             daemon=True,
         ).start()
@@ -7055,6 +7478,9 @@ class FaceSearchGUI:
         top_k,
         min_similarity,
         backend=BACKEND_GPU,
+        create_crops_on_html=False,
+        use_local_crops=True,
+        theme="dark",
     ):
         try:
             conn = create_database()
@@ -7078,15 +7504,32 @@ class FaceSearchGUI:
                 results=results,
                 query_image=query_path,
                 output_file=output_file,
-                use_local_crops=self.use_local_crops_var.get(),
-                theme=self.theme_mode,
+                use_local_crops=bool(use_local_crops),
+                theme=theme,
+                retry_missing_crops=bool(create_crops_on_html),
             )
+
+            result_face_ids = []
+            if create_crops_on_html:
+                for result in results:
+                    try:
+                        face_id = int(result.get("face_id"))
+                    except (TypeError, ValueError):
+                        continue
+                    if face_id > 0:
+                        result_face_ids.append(face_id)
 
             self.events.put(
                 (
                     "search_done",
                     html_file,
                     len(results),
+                    result_face_ids,
+                    results,
+                    Path(query_path),
+                    bool(use_local_crops),
+                    theme,
+                    bool(create_crops_on_html),
                 )
             )
 
@@ -7436,6 +7879,15 @@ class FaceSearchGUI:
 
                 elif kind == "scan_total":
                     total = event[1]
+                    self._scan_rate_started_at = time.monotonic()
+                    self._scan_rate_last_completed = 0
+                    # Скользящее окно: время, число завершённых изображений и лиц.
+                    self._scan_rate_window_seconds = 5.0
+                    self._scan_rate_samples = deque()
+                    self._scan_rate_text = "Скорость: 0.0 изображений/с • 0.0 лиц/с"
+                    self._set_auto_workers_status(
+                        str(getattr(self, "_scan_monitor_base_status", ""))
+                    )
 
                     self.progress.stop()
                     self.progress.config(
@@ -7451,10 +7903,48 @@ class FaceSearchGUI:
                 elif kind == "scan_progress":
                     n, total, count, path = event[1:]
 
-                    self.progress.config(
-                        value=n
-                    )
+                    self.progress.config(value=n)
 
+                    # Скорость за скользящее окно последних 5 секунд, а не
+                    # среднее за всё сканирование. Одно изображение может содержать
+                    # несколько лиц, поэтому учитываем обе величины отдельно.
+                    now = time.monotonic()
+                    if n <= 1 or not hasattr(self, "_scan_rate_samples"):
+                        self._scan_rate_started_at = now
+                        self._scan_rate_last_completed = 0
+                        self._scan_rate_window_seconds = 5.0
+                        self._scan_rate_samples = deque()
+                    previous_n = int(getattr(self, "_scan_rate_last_completed", 0) or 0)
+                    completed_delta = max(0, int(n or 0) - previous_n)
+                    faces_delta = max(0, int(count or 0))
+                    self._scan_rate_last_completed = int(n or 0)
+                    if completed_delta or faces_delta:
+                        self._scan_rate_samples.append((now, completed_delta, faces_delta))
+                    window_seconds = max(0.001, float(getattr(self, "_scan_rate_window_seconds", 5.0)))
+                    cutoff = now - window_seconds
+                    while self._scan_rate_samples and self._scan_rate_samples[0][0] < cutoff:
+                        self._scan_rate_samples.popleft()
+                    images_in_window = sum(sample[1] for sample in self._scan_rate_samples)
+                    faces_in_window = sum(sample[2] for sample in self._scan_rate_samples)
+                    # В начале сканирования делим на реально прошедшее время;
+                    # после заполнения окна используем ровно 5 секунд.
+                    elapsed = min(window_seconds, max(0.001, now - self._scan_rate_started_at))
+                    images_per_sec = images_in_window / elapsed
+                    faces_per_sec = faces_in_window / elapsed
+
+                    self._scan_rate_text = (
+                        f"Скорость: {images_per_sec:.1f} изображений/с • "
+                        f"{faces_per_sec:.1f} лиц/с"
+                    )
+                    # Главная строка мониторинга находится вверху интерфейса.
+                    # Обновляем её при каждом результате и повторно добавляем
+                    # скорость после любого очередного telemetry-события.
+                    monitor_label = getattr(self, "auto_workers_status_label", None)
+                    if monitor_label is not None and monitor_label.winfo_manager():
+                        base = str(getattr(self, "_scan_monitor_base_status", "") or "")
+                        self.auto_workers_status_var.set(
+                            f"{base} | {self._scan_rate_text}" if base else self._scan_rate_text
+                        )
                     self.status_var.set(
                         f"[{n}/{total}] лиц: {count} — {path}"
                     )
@@ -7584,8 +8074,12 @@ class FaceSearchGUI:
                             maximum=max(1, checked),
                             value=checked,
                         )
+                    crop_scope = (
+                        "CROP из HTML" if getattr(self, "_crop_repair_after_html", False)
+                        else "CROP"
+                    )
                     self._set_crop_progress_status(
-                        f"CROP: проверено записей {checked}; отсутствует файлов: {missing}; "
+                        f"{crop_scope}: проверено записей {checked}; отсутствует файлов: {missing}; "
                         + ("начинается восстановление..." if missing else "все файлы на месте")
                     )
 
@@ -7605,6 +8099,9 @@ class FaceSearchGUI:
 
                 elif kind == "crop_repair_done":
                     result = event[1]
+                    was_html_crop_repair = bool(
+                        getattr(self, "_crop_repair_after_html", False)
+                    )
                     self.progress.stop()
                     self.progress.config(
                         mode="determinate",
@@ -7631,11 +8128,60 @@ class FaceSearchGUI:
                         f"удалено записей по недоступным URL: "
                         f"{result.get('deleted_unavailable_records', 0)}."
                     )
-                    if stopped:
-                        self.status_var.set("Проверка CROP остановлена. " + summary)
+                    if getattr(self, "_crop_repair_after_html", False):
+                        operation_title = "Создание CROP после HTML"
                     else:
-                        self.status_var.set("Проверка CROP завершена. " + summary)
+                        operation_title = "Проверка CROP"
+                    if stopped:
+                        self.status_var.set(f"{operation_title} остановлено. " + summary)
+                    else:
+                        self.status_var.set(f"{operation_title} завершено. " + summary)
+                    self._crop_repair_after_html = False
                     self._hide_scan_control_status()
+
+                    if was_html_crop_repair:
+                        if stopped:
+                            self._html_crop_rebuild_context = None
+                        else:
+                            # После завершения CROP повторно создаём HTML из тех же
+                            # результатов, чтобы ссылки и карточки соответствовали диску.
+                            self._start_html_regeneration_after_crop()
+
+                elif kind == "html_regenerated":
+                    html_file, count = event[1:3]
+                    self.progress.stop()
+                    self.progress.config(value=0)
+                    self.operation = None
+                    self._set_busy(False)
+
+                    try:
+                        # Уникальный query-параметр заставляет браузер открыть именно
+                        # обновлённый файл, а не использовать уже открытую страницу.
+                        refreshed_url = (
+                            Path(html_file).resolve().as_uri()
+                            + f"?refresh={time.time_ns()}"
+                        )
+                        webbrowser.open(refreshed_url, new=2)
+                    except Exception as exc:
+                        print(f"Не удалось открыть обновлённый HTML в браузере: {exc}")
+
+                    self.status_var.set(
+                        "CROP восстановлены. HTML повторно создан и открыт в браузере. "
+                        f"Результатов: {count}."
+                    )
+                    self._update_search_state()
+
+                elif kind == "html_regeneration_error":
+                    error_text = str(event[1]) if len(event) > 1 else "неизвестная ошибка"
+                    self.progress.stop()
+                    self.progress.config(value=0)
+                    self.operation = None
+                    self._set_busy(False)
+                    self.status_var.set(
+                        "CROP обработаны, но повторно создать HTML не удалось: "
+                        + error_text
+                    )
+                    self._update_search_state()
 
                 elif kind == "index_done":
                     self.progress.stop()
@@ -7664,7 +8210,13 @@ class FaceSearchGUI:
                     self._update_search_state()
 
                 elif kind == "search_done":
-                    html_file, count = event[1:]
+                    html_file, count = event[1:3]
+                    result_face_ids = event[3] if len(event) > 3 else []
+                    search_results = event[4] if len(event) > 4 else []
+                    query_image = event[5] if len(event) > 5 else self.query_path
+                    use_local_crops = event[6] if len(event) > 6 else bool(self.use_local_crops_var.get())
+                    html_theme = event[7] if len(event) > 7 else self.theme_mode
+                    create_crops_after_html = event[8] if len(event) > 8 else bool(self.create_crops_on_html_var.get())
 
                     self.progress.stop()
                     self.progress.config(
@@ -7683,11 +8235,29 @@ class FaceSearchGUI:
                         state="normal"
                     )
 
-                    webbrowser.open(
-                        Path(html_file)
-                        .resolve()
-                        .as_uri()
-                    )
+                    try:
+                        webbrowser.open(
+                            Path(html_file)
+                            .resolve()
+                            .as_uri()
+                        )
+                    except Exception as exc:
+                        print(f"Не удалось открыть HTML в браузере: {exc}")
+
+                    # Браузер уже открыт. Если настройка включена, восстанавливаем
+                    # отсутствующие CROP только для показанных результатов, а затем
+                    # повторно генерируем HTML из сохранённого результата поиска.
+                    if create_crops_after_html and result_face_ids:
+                        self._html_crop_rebuild_context = {
+                            "results": search_results,
+                            "query_image": query_image,
+                            "html_file": html_file,
+                            "use_local_crops": use_local_crops,
+                            "theme": html_theme,
+                        }
+                        self._start_html_crop_repair_for_results(result_face_ids)
+                    else:
+                        self._html_crop_rebuild_context = None
 
                     self._update_search_state()
 
@@ -8407,6 +8977,8 @@ def repair_missing_crops(
     progress_callback=None,
     pause_event: threading.Event | None = None,
     stop_event: threading.Event | None = None,
+    face_ids: set[int] | list[int] | tuple[int, ...] | None = None,
+    delete_unavailable_records: bool = True,
 ) -> dict[str, int | bool]:
     """Проверяет и многопоточно восстанавливает отсутствующие CROP.
 
@@ -8426,8 +8998,7 @@ def repair_missing_crops(
     и того же URL и сохраняет корректное сопоставление нескольких лиц из одной
     фотографии. Каждый worker использует собственное DB connection.
     """
-    rows = conn.execute(
-        """
+    query = """
         SELECT
             i.id,
             i.path,
@@ -8440,9 +9011,33 @@ def repair_missing_crops(
             f.embedding_dim
         FROM images i
         JOIN faces f ON f.image_id = i.id
-        ORDER BY i.id, f.id
-        """
-    ).fetchall()
+    """
+    params = ()
+    if face_ids is not None:
+        normalized_face_ids = set()
+        for value in face_ids:
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                normalized_face_ids.add(value)
+        normalized_face_ids = sorted(normalized_face_ids)
+        if not normalized_face_ids:
+            return {
+                "checked": 0, "already_ok": 0, "missing": 0,
+                "repaired": 0, "failed": 0,
+                "deleted_unavailable_records": 0, "stopped": False,
+            }
+        placeholders = ",".join("?" for _ in normalized_face_ids)
+        query += f" WHERE f.id IN ({placeholders})"
+        params = tuple(normalized_face_ids)
+    query += " ORDER BY i.id, f.id"
+    rows = (
+        conn.execute(query, params).fetchall()
+        if params
+        else conn.execute(query).fetchall()
+    )
 
     total_rows = len(rows)
     missing_rows: list[tuple[Any, ...]] = []
@@ -8571,7 +9166,8 @@ def repair_missing_crops(
             for row in group_rows
         )
         if (
-            source_result[0] is None
+            delete_unavailable_records
+            and source_result[0] is None
             and _is_direct_http_image_url(image_url)
             and group_uses_same_image_url
         ):
