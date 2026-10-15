@@ -39,6 +39,7 @@ import sys
 import subprocess
 import threading
 import time
+import traceback
 import webbrowser
 import xml.etree.ElementTree as ET
 import tkinter as tk
@@ -5809,14 +5810,38 @@ class FaceSearchGUI:
 
             def get_worker_conn():
                 conn = getattr(db_local, "conn", None)
-                if conn is None:
-                    # КРИТИЧНО: maintenance=False. Старый код вызывал
-                    # cleanup_duplicate_images() на КАЖДОМ файле.
-                    conn = create_database(maintenance=False, initialize=False)
-                    db_local.conn = conn
-                    with scan_connections_lock:
-                        self._scan_worker_connections.append(conn)
-                return conn
+                if conn is not None:
+                    return conn
+
+                # Ошибка открытия соединения не должна вылетать из Future без
+                # привязки к файлу. Кратковременные сбои подключения повторяем.
+                last_error = None
+                for connection_attempt in range(3):
+                    try:
+                        # maintenance=False: обслуживание БД не запускается
+                        # повторно на каждом изображении и в каждом worker-е.
+                        conn = create_database(
+                            maintenance=False,
+                            initialize=False,
+                        )
+                        db_local.conn = conn
+                        with scan_connections_lock:
+                            self._scan_worker_connections.append(conn)
+                        return conn
+                    except Exception as exc:
+                        last_error = exc
+                        print(
+                            "[SCAN DB] Не удалось открыть соединение "
+                            f"(попытка {connection_attempt + 1}/3): "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                        if connection_attempt < 2:
+                            time.sleep(0.2 * (connection_attempt + 1))
+
+                raise RuntimeError(
+                    "Не удалось открыть соединение с БД после 3 попыток: "
+                    f"{type(last_error).__name__}: {last_error}"
+                ) from last_error
 
             def worker(path):
                 # Пауза действует между изображениями; текущий inference не
@@ -5839,13 +5864,36 @@ class FaceSearchGUI:
                         "message": "остановлено до начала обработки",
                     }
 
-                conn = get_worker_conn()
+                try:
+                    conn = get_worker_conn()
 
-                # SQL Server может кратковременно вернуть deadlock/lock timeout,
-                # когда несколько worker-ов одновременно обновляют profiles/images.
-                # Повторяем только транзиентные ошибки MSSQL; обычные ошибки не
-                # маскируем.
-                max_attempts = 3 if conn.backend == DB_TYPE_MSSQL else 1
+                    # SQL Server может кратковременно вернуть deadlock/lock timeout,
+                    # когда несколько worker-ов одновременно обновляют profiles/images.
+                    # Повторяем только транзиентные ошибки MSSQL; обычные ошибки не
+                    # маскируем.
+                    max_attempts = 3 if conn.backend == DB_TYPE_MSSQL else 1
+                except Exception as exc:
+                    # Это исключение раньше выходило из worker до его основного
+                    # try/except, после чего интерфейс показывал «<unknown>».
+                    try:
+                        stale_conn = getattr(db_local, "conn", None)
+                        if stale_conn is not None:
+                            stale_conn.close()
+                    except Exception:
+                        pass
+                    try:
+                        del db_local.conn
+                    except AttributeError:
+                        pass
+                    print(
+                        f"[SCAN ERROR] {path}: {type(exc).__name__}: {exc}"
+                    )
+                    traceback.print_exception(type(exc), exc, exc.__traceback__)
+                    return path, 0, exc, {
+                        "faces": 0,
+                        "deleted": False,
+                        "message": "ошибка подключения к БД",
+                    }
 
                 for attempt in range(max_attempts):
                     try:
@@ -5933,18 +5981,52 @@ class FaceSearchGUI:
                 limiter = AdaptiveConcurrencyLimiter(workers)
 
             def adaptive_worker(path):
-                if limiter is None or limiter.acquire(self.scan_stop):
+                acquired = False
+                try:
+                    if limiter is not None:
+                        acquired = limiter.acquire(self.scan_stop)
+                        if not acquired:
+                            return path, 0, None, {
+                                "faces": 0,
+                                "deleted": False,
+                                "stopped": True,
+                                "message": "остановлено до начала обработки",
+                            }
+
                     try:
                         return worker(path)
-                    finally:
-                        if limiter is not None:
+                    except Exception as exc:
+                        # Последний защитный уровень: даже неожиданная ошибка
+                        # из limiter/worker-а должна сохранить конкретный путь.
+                        print(
+                            f"[SCAN ERROR] {path}: {type(exc).__name__}: {exc}"
+                        )
+                        traceback.print_exception(type(exc), exc, exc.__traceback__)
+                        return path, 0, exc, {
+                            "faces": 0,
+                            "deleted": False,
+                            "message": "внутренняя ошибка worker",
+                        }
+                except Exception as exc:
+                    print(
+                        f"[SCAN ERROR] {path}: {type(exc).__name__}: {exc}"
+                    )
+                    traceback.print_exception(type(exc), exc, exc.__traceback__)
+                    return path, 0, exc, {
+                        "faces": 0,
+                        "deleted": False,
+                        "message": "ошибка запуска worker-а",
+                    }
+                finally:
+                    if limiter is not None and acquired:
+                        try:
                             limiter.release()
-                return path, 0, None, {
-                    "faces": 0,
-                    "deleted": False,
-                    "stopped": True,
-                    "message": "остановлено до начала обработки",
-                }
+                        except Exception as exc:
+                            # Сбой release не должен заменять результат изображения.
+                            print(
+                                "[SCAN WARN] Ошибка освобождения лимитера: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
 
             executor_max_workers = controller.max_workers if controller is not None else workers
             with concurrent.futures.ThreadPoolExecutor(
@@ -5953,6 +6035,9 @@ class FaceSearchGUI:
             ) as executor:
                 path_iter = iter(files)
                 pending = set()
+                # Future -> исходный файл: даже при непредвиденном исключении
+                # не теряем имя изображения и не показываем «<unknown>».
+                future_paths = {}
 
                 # Очередь небольшая: достаточно держать executor занятым, но не
                 # резервировать память под огромное количество Future.
@@ -5965,7 +6050,9 @@ class FaceSearchGUI:
                         path = next(path_iter)
                     except StopIteration:
                         break
-                    pending.add(executor.submit(adaptive_worker, path))
+                    future = executor.submit(adaptive_worker, path)
+                    pending.add(future)
+                    future_paths[future] = path
 
                 while pending:
                     done, pending = concurrent.futures.wait(
@@ -5976,21 +6063,31 @@ class FaceSearchGUI:
                     for future in done:
                         completed += 1
 
+                        expected_path = future_paths.pop(future, None)
                         try:
                             result_path, count, error, import_result = future.result()
                         except Exception as exc:
-                            result_path, count, error, import_result = (
-                                Path("<unknown>"),
-                                0,
-                                exc,
-                                {},
+                            result_path = expected_path or Path("<unknown>")
+                            count = 0
+                            error = exc
+                            import_result = {}
+                            print(
+                                f"[SCAN FUTURE ERROR] {result_path}: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                            traceback.print_exception(
+                                type(exc), exc, exc.__traceback__
                             )
 
                         if error is not None:
+                            error_message = str(error).strip()
+                            error_detail = f"{type(error).__name__}: {error_message}"
+                            if not error_message:
+                                error_detail += " (исключение без текстового сообщения)"
                             self.events.put((
                                 "scan_error",
                                 str(result_path),
-                                str(error),
+                                error_detail,
                             ))
                         else:
                             total_faces += count
@@ -6054,7 +6151,9 @@ class FaceSearchGUI:
                                 next_path = None
 
                             if next_path is not None:
-                                pending.add(executor.submit(adaptive_worker, next_path))
+                                future = executor.submit(adaptive_worker, next_path)
+                                pending.add(future)
+                                future_paths[future] = next_path
 
             stopped = self.scan_stop.is_set()
             if controller is not None:
@@ -7275,8 +7374,10 @@ class FaceSearchGUI:
                     )
 
                 elif kind == "scan_error":
+                    error_path = str(event[1]) if len(event) > 1 else "файл не определён"
+                    error_reason = str(event[2]) if len(event) > 2 else "причина не передана"
                     self.status_var.set(
-                        f"Ошибка: {event[1]}"
+                        f"Ошибка: {error_path} — {error_reason}"
                     )
 
                 elif kind == "gpu_index_done":
