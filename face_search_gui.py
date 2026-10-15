@@ -2001,8 +2001,11 @@ def process_local_image(
     в БД, но JPEG не записывается. Исходная фотография остаётся на месте,
     чтобы CROP можно было позднее восстановить кнопкой «Проверить CROP».
     В images.source_url хранится file://-ссылка на исходник.
+    Исходный локальный файл никогда не удаляется; удаление разрешено только
+    для пары изображение+JSON в import_image_bundle(). Параметр delete_source
+    сохранён для совместимости со старыми вызывающими участками.
     """
-    delete_source = bool(delete_source and create_crop_files)
+    delete_source = False  # локальные исходники сохраняем при любых настройках
     overwrite_existing_crops = bool(overwrite_existing_crops)
     image_path = image_path.resolve()
 
@@ -2043,13 +2046,8 @@ def process_local_image(
                     conn, existing_image, existing_faces, existing_rows
                 )
 
+        # Локальные исходные изображения сохраняются даже при повторном сканировании.
         deleted = False
-        if delete_source:
-            try:
-                image_path.unlink()
-                deleted = True
-            except OSError:
-                deleted = False
         message = "исходник уже есть в БД"
         if restored_missing_crops:
             message += f"; восстановлено CROP: {restored_missing_crops}"
@@ -2075,9 +2073,7 @@ def process_local_image(
     )
 
     if not valid_faces:
-        # Ноль обнаруженных лиц — штатный результат сканирования, не ошибка.
-        # Если включено удаление обработанных исходников, удаляем эту фотографию.
-        deleted = _delete_processed_source_files(image_path) if delete_source else False
+        # Отсутствие лиц — штатный результат, но локальный исходник сохраняем.
         return {
             "faces": 0,
             "deleted": deleted,
@@ -2221,9 +2217,9 @@ def process_local_image(
             conn.rollback()
             _rollback_crop_file_writes(created_files, crop_file_backups)
 
-            # Здесь лица были найдены, но все соответствующие crop уже есть
-            # в БД. Такой файл всё равно считается обработанным.
-            deleted = _delete_processed_source_files(image_path) if delete_source else False
+            # Все crop уже есть в БД. Даже после успешной обработки локальный
+            # исходник оставляем на диске: удаляются только пары image+JSON.
+            deleted = False
 
             return {
                 "faces": 0,
@@ -2244,13 +2240,9 @@ def process_local_image(
     if overwrite_existing_crops and existing_rows:
         _cleanup_replaced_crop_files(existing_rows, created_files)
 
+    # Даже если распознавание прошло успешно, отдельный локальный исходник
+    # без обработки пары image+JSON не удаляем.
     deleted = False
-    if delete_source:
-        try:
-            image_path.unlink()
-            deleted = True
-        except OSError:
-            deleted = False
 
     return {
         "faces": created,
@@ -5603,6 +5595,22 @@ class FaceSearchGUI:
                 return
 
             workers = min(workers, LOCAL_MAX_WORKERS)
+
+        if bool(self.delete_processed_var.get()):
+            confirmed = messagebox.askyesno(
+                "Подтверждение удаления исходников",
+                "Включено удаление исходников.\\n\\n"
+                "Будут удаляться только пары «изображение + одноимённый JSON», "
+                "обработанные с включённым параметром «Использовать JSON-описание». "
+                "Пары, у которых лицо не найдено, тоже удаляются после штатной обработки.\\n\\n"
+                "Локальные изображения без JSON не удаляются ни при каких условиях. "
+                "Если при обработке возникнет ошибка, исходные файлы сохраняются.\\n\\n"
+                "Продолжить сканирование?",
+                parent=self.root,
+            )
+            if not confirmed:
+                self.status_var.set("Сканирование отменено пользователем; исходники не удалялись.")
+                return
 
         self.operation = "scan"
         self._prepare_scan_controls()
