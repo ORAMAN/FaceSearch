@@ -5702,12 +5702,9 @@ class FaceSearchGUI:
             remote_db = sqlite_path.startswith(("\\\\", "//"))
 
         if auto_workers:
-            _auto_min, workers, _auto_max = _auto_worker_limits(
-                backend=str(self.backend_mode_var.get() or BACKEND_GPU),
-                input_paths=[self.selected_dir],
-                output_path=CROP_DIR,
-                remote_db=remote_db,
-            )
+            # Быстрый предварительный выбор по CPU не блокирует Tkinter.
+            # Полный профиль GPU/диска/БД определяется в scan worker в фоне.
+            _auto_min, workers, _auto_max = _auto_worker_limits()
         else:
             try:
                 workers = int(self.local_workers_var.get())
@@ -6030,7 +6027,9 @@ class FaceSearchGUI:
             # количество одновременно работающих задач регулируем limiter-ом. Это
             # позволяет менять число потоков без пересоздания ThreadPoolExecutor.
             controller = AdaptiveWorkerController(
-                initial_workers=workers,
+                # 0 означает использовать стартовую оценку после определения
+                # фактического backend, накопителя и типа БД в фоновом потоке.
+                initial_workers=0 if auto_workers else workers,
                 backend=actual_backend,
                 operation="scan",
                 input_paths=[directory],
@@ -6038,6 +6037,8 @@ class FaceSearchGUI:
                 remote_db=remote_db,
                 auto_adjust=auto_workers,
             )
+            if auto_workers:
+                workers = controller.current_workers
             limiter = AdaptiveConcurrencyLimiter(controller.current_workers)
             if auto_workers:
                 initial_status = (
