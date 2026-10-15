@@ -3951,10 +3951,12 @@ class FaceSearchGUI:
                     )
                 return
 
-            # Первый разделитель теперь ограничивает компактную панель статистики.
-            # Старое сохранённое значение относилось к границе поиска и предпросмотра,
-            # поэтому его нужно ограничить, иначе статистика растянется на пол-окна.
-            target = max(180, min(position, 260, width - 700))
+            # Восстанавливаем сохранённую ширину панели статистики.
+            # Не ограничиваем её прежним максимумом 260 px: пользовательская
+            # ширина должна переживать перезапуск. Оставляем место для поиска и
+            # предпросмотра, если окно при запуске оказалось уже обычного.
+            max_position = max(180, width - 700)
+            target = max(180, min(position, max_position))
             self.paned.sashpos(0, target)
         except (tk.TclError, TypeError, ValueError):
             pass
@@ -3967,7 +3969,10 @@ class FaceSearchGUI:
                 return fallback
             if int(self.paned.winfo_width()) <= 1:
                 return fallback
-            return max(0, int(self.paned.sashpos(0)))
+            position = int(self.paned.sashpos(0))
+            # Во время первичной раскладки ttk иногда временно возвращает 0.
+            # Не затираем им корректное значение, сохранённое в settings.xml.
+            return position if position > 0 else fallback
         except (tk.TclError, TypeError, ValueError):
             return fallback
 
