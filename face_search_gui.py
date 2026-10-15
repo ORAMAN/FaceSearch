@@ -616,6 +616,8 @@ def _raw_server_connection(profile: dict[str, Any], database: str | None = None)
             "password": password,
             "dbname": db_name or "postgres",
             "connect_timeout": 15,
+            # Помогает отличать подключения приложения от pgAdmin и прочих клиентов.
+            "application_name": "FaceSearch",
         }
         return psycopg.connect(**kwargs)
 
@@ -1201,31 +1203,55 @@ def _upsert_import_profile(conn: DatabaseConnection, metadata: dict[str, Any]) -
     if not isinstance(info, dict):
         info = {}
 
+    # url_image относится к конкретной фотографии и хранится в images.url_image,
+    # а не в профиле. Если включать его в profiles.raw_json, каждый снимок одного
+    # человека меняет JSON и блокирует UPDATE profiles у соседних worker-ов.
+    profile_metadata = dict(metadata)
+    profile_metadata.pop("url_image", None)
+    profile_raw_json = json.dumps(
+        profile_metadata, ensure_ascii=False, sort_keys=True
+    )
+    profile_bdate = str(info.get("БД")) if info.get("БД") is not None else None
+    profile_city = str(info.get("Город")) if info.get("Город") is not None else None
+    profile_status = str(info.get("Статус")) if info.get("Статус") is not None else None
+
     if source_url:
         row = conn.execute(
-            "SELECT id FROM profiles WHERE source = 'import' AND profile_url = ? LIMIT 1",
+            """
+            SELECT id, first_name, last_name, bdate, city_title, status, raw_json
+            FROM profiles
+            WHERE source = 'import' AND profile_url = ?
+            LIMIT 1
+            """,
             (source_url,),
         ).fetchone()
         if row:
             profile_id = int(row[0])
-            conn.execute(
-                """
-                UPDATE profiles
-                SET first_name = ?, last_name = '',
-                    bdate = ?, city_title = ?, status = ?,
-                    raw_json = ?, scanned_at = ?
-                WHERE id = ?
-                """,
-                (
-                    name,
-                    str(info.get("БД")) if info.get("БД") is not None else None,
-                    str(info.get("Город")) if info.get("Город") is not None else None,
-                    str(info.get("Статус")) if info.get("Статус") is not None else None,
-                    json.dumps(metadata, ensure_ascii=False),
-                    time.strftime("%Y-%m-%d %H:%M:%S"),
-                    profile_id,
-                ),
+            desired_values = (
+                name, "", profile_bdate, profile_city, profile_status, profile_raw_json
             )
+            current_values = tuple(row[1:7])
+            # Не блокируем строку профиля, если его метаданные не изменились.
+            # scanned_at обновляем только при реальном изменении профиля.
+            if current_values != desired_values:
+                conn.execute(
+                    """
+                    UPDATE profiles
+                    SET first_name = ?, last_name = '',
+                        bdate = ?, city_title = ?, status = ?,
+                        raw_json = ?, scanned_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        name,
+                        profile_bdate,
+                        profile_city,
+                        profile_status,
+                        profile_raw_json,
+                        time.strftime("%Y-%m-%d %H:%M:%S"),
+                        profile_id,
+                    ),
+                )
             return profile_id
 
     cur = conn.execute(
@@ -1254,7 +1280,7 @@ def _upsert_import_profile(conn: DatabaseConnection, metadata: dict[str, Any]) -
             str(info.get("Статус")) if info.get("Статус") is not None else None,
             str(info.get("Город")) if info.get("Город") is not None else None,
             source_url,
-            json.dumps(metadata, ensure_ascii=False),
+            profile_raw_json,
             time.strftime("%Y-%m-%d %H:%M:%S"),
         ),
     )
@@ -5931,6 +5957,12 @@ class FaceSearchGUI:
                                 create_crop_files=create_crop_files,
                                 overwrite_existing_crops=overwrite_existing_crops,
                             )
+                            # Some valid no-op return paths run SELECT but perform no
+                            # commit. psycopg would then keep this worker connection
+                            # idle in transaction while it waits for the next image.
+                            # All actual writes are committed inside import_image_bundle.
+                            if conn.backend == DB_TYPE_POSTGRESQL:
+                                conn.rollback()
                             count = int(result["faces"])
                             return path, count, None, result
 
@@ -5942,6 +5974,8 @@ class FaceSearchGUI:
                             create_crop_files=create_crop_files,
                             overwrite_existing_crops=overwrite_existing_crops,
                         )
+                        if conn.backend == DB_TYPE_POSTGRESQL:
+                            conn.rollback()
                         return path, int(result["faces"]), None, result
 
                     except Exception as exc:
@@ -7823,18 +7857,27 @@ def _crop_path_migration_needed(conn: DatabaseConnection) -> bool:
     """Быстро определяет, есть ли в БД абсолютные/legacy CROP-пути."""
     # Передаём шаблоны LIKE параметрами: буквальный символ '%' внутри SQL-строки
     # конфликтует с плейсхолдерами некоторых DB-API драйверов (PostgreSQL/MySQL).
-    row = conn.execute(
-        """
-        SELECT 1
-        FROM images i
-        WHERE i.path LIKE ?
-           OR i.path LIKE ?
-           OR i.path LIKE ?
-           OR i.path LIKE ?
-        """,
-        (r"%:\%", "/%", "file:%", r"\\%"),
-    ).fetchone()
-    return row is not None
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM images i
+            WHERE i.path LIKE ?
+               OR i.path LIKE ?
+               OR i.path LIKE ?
+               OR i.path LIKE ?
+            """,
+            (r"%:\%", "/%", "file:%", r"\\%"),
+        ).fetchone()
+        return row is not None
+    finally:
+        # psycopg starts a transaction even for SELECT. This read-only probe is
+        # run during initialization on long-lived connections; close its
+        # transaction immediately so the session cannot remain idle in transaction.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
 
 
 def _migrate_crop_paths(conn: DatabaseConnection) -> int:
