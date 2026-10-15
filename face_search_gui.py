@@ -5539,12 +5539,15 @@ class FaceSearchGUI:
         label = getattr(self, "auto_workers_status_label", None)
         if label is None:
             return
-        is_auto_operation = (
+        # При ручном сканировании тот же блок показывает telemetry, но не
+        # меняет заданное пользователем количество потоков.
+        is_active_scan = self.operation == "scan" and self.scan_running
+        is_auto_crop_operation = (
             bool(self.auto_workers_var.get())
-            and self.operation in ("scan", "crop_repair")
+            and self.operation == "crop_repair"
             and self.scan_running
         )
-        if not is_auto_operation:
+        if not (is_active_scan or is_auto_crop_operation):
             self._hide_auto_workers_status()
             return
         self.auto_workers_status_var.set(str(message or ""))
@@ -5777,7 +5780,9 @@ class FaceSearchGUI:
         if auto_workers:
             self._set_auto_workers_status("Авто: запуск адаптивного контроллера...")
         else:
-            self._hide_auto_workers_status()
+            self._set_auto_workers_status(
+                f"Мониторинг: ручной режим, фиксировано {workers} поток(ов); сбор нагрузки включён"
+            )
 
         threading.Thread(
             target=self._scan_worker,
@@ -6024,24 +6029,25 @@ class FaceSearchGUI:
             # Для AUTO pool создаём только один раз с верхним пределом, а фактическое
             # количество одновременно работающих задач регулируем limiter-ом. Это
             # позволяет менять число потоков без пересоздания ThreadPoolExecutor.
-            controller = None
-            limiter = None
+            controller = AdaptiveWorkerController(
+                initial_workers=workers,
+                backend=actual_backend,
+                operation="scan",
+                input_paths=[directory],
+                output_path=CROP_DIR,
+                remote_db=remote_db,
+                auto_adjust=auto_workers,
+            )
+            limiter = AdaptiveConcurrencyLimiter(controller.current_workers)
             if auto_workers:
-                controller = AdaptiveWorkerController(
-                    initial_workers=workers,
-                    backend=actual_backend,
-                    operation="scan",
-                    input_paths=[directory],
-                    output_path=CROP_DIR,
-                    remote_db=remote_db,
-                )
-                limiter = AdaptiveConcurrencyLimiter(controller.current_workers)
-                self.events.put((
-                    "auto_workers_status",
+                initial_status = (
                     f"Авто: старт {controller.current_workers} из {controller.max_workers} потоков"
-                ))
+                )
             else:
-                limiter = AdaptiveConcurrencyLimiter(workers)
+                initial_status = (
+                    f"Мониторинг (ручной режим): фиксировано {workers} поток(ов)"
+                )
+            self.events.put(("auto_workers_status", initial_status))
 
             def adaptive_worker(path):
                 acquired = False
@@ -6230,9 +6236,14 @@ class FaceSearchGUI:
                 final_report = controller.observe(completed)
                 if final_report is not None:
                     self.events.put(("auto_workers_status", controller.status_text(final_report)))
+                final_prefix = "Авто: завершено" if auto_workers else "Мониторинг: завершено"
+                final_workers_text = (
+                    f"итоговая настройка {controller.current_workers} потоков"
+                    if auto_workers else f"ручная настройка сохранена: {workers} поток(ов)"
+                )
                 self.events.put((
                     "auto_workers_status",
-                    f"Авто: завершено, итоговая настройка {controller.current_workers} потоков"
+                    f"{final_prefix}, {final_workers_text}"
                 ))
             self.events.put((
                 "scan_done", total_faces, completed, total, stopped,
