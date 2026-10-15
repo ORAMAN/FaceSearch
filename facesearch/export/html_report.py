@@ -89,15 +89,15 @@ def _site_display_data(source_url: str | None) -> tuple[str, str, str]:
 
 
 def _display_face_id(result: dict[str, Any]) -> str:
-    """Возвращает ID записи лица из БД в фиксированном формате #00000000."""
+    """Возвращает ID записи лица из БД в фиксированном формате #000000000000."""
     try:
         face_id = int(result.get("face_id"))
     except (TypeError, ValueError):
         return "#ID неизвестен"
     if face_id < 0:
         return "#ID неизвестен"
-    # Ширина 11 цифр, включая ведущие нули. Более крупные ID не обрезаются.
-    return f"#{face_id:08d}"
+    # Ширина 12 цифр, включая ведущие нули. Более крупные ID не обрезаются.
+    return f"#{face_id:12d}"
 
 
 def generate_html_gallery(
