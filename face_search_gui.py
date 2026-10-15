@@ -1543,6 +1543,26 @@ def _prepare_source_crop_overwrite(
         )
 
 
+def _delete_processed_source_files(
+    image_path: Path, metadata_path: Path | None = None
+) -> bool:
+    """Удаляет исходное изображение и, если передан, JSON после успешной обработки.
+
+    Отсутствие найденных лиц не считается ошибкой обработки. Ошибки удаления
+    файлов фиксируются отдельно и не маскируют результат распознавания.
+    """
+    deleted = True
+    for path in (image_path, metadata_path):
+        if path is None:
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            deleted = False
+            print(f"[WARN] Не удалось удалить обработанный исходник {path}: {exc}")
+    return deleted
+
+
 def _cleanup_replaced_crop_files(
     rows: list[tuple[int, str]], preserve_paths: list[Path] | None = None
 ) -> None:
@@ -1719,7 +1739,10 @@ def import_image_bundle(
     valid_faces = _detect_faces_with_padding(app, image, padding_ratio=0.40)
 
     if not valid_faces:
-        return {"faces": 0, "deleted": False, "message": "лицо не найдено"}
+        # Распознавание завершилось штатно: отсутствие лиц — это результат,
+        # а не ошибка. При включённом чекбоксе удаляем и изображение, и JSON.
+        deleted = _delete_processed_source_files(image_path, json_path) if delete_source else False
+        return {"faces": 0, "deleted": deleted, "message": "лицо не найдено"}
 
     profile_id = _upsert_import_profile(conn, metadata)
     source_url = str(metadata.get("url_source") or "").strip() or None
@@ -1918,13 +1941,8 @@ def import_image_bundle(
         if created == 0:
             conn.rollback()
             _rollback_crop_file_writes(created_files, crop_file_backups)
-            if delete_source and not overwrite_existing_crops:
-                try:
-                    image_path.unlink()
-                    json_path.unlink()
-                    deleted = True
-                except OSError:
-                    deleted = False
+            if delete_source:
+                deleted = _delete_processed_source_files(image_path, json_path)
             else:
                 deleted = False
             message = "crop уже есть в БД"
@@ -2057,9 +2075,12 @@ def process_local_image(
     )
 
     if not valid_faces:
+        # Ноль обнаруженных лиц — штатный результат сканирования, не ошибка.
+        # Если включено удаление обработанных исходников, удаляем эту фотографию.
+        deleted = _delete_processed_source_files(image_path) if delete_source else False
         return {
             "faces": 0,
-            "deleted": False,
+            "deleted": deleted,
             "message": "лицо не найдено",
         }
 
@@ -2202,13 +2223,7 @@ def process_local_image(
 
             # Здесь лица были найдены, но все соответствующие crop уже есть
             # в БД. Такой файл всё равно считается обработанным.
-            deleted = False
-            if delete_source and not overwrite_existing_crops:
-                try:
-                    image_path.unlink()
-                    deleted = True
-                except OSError:
-                    deleted = False
+            deleted = _delete_processed_source_files(image_path) if delete_source else False
 
             return {
                 "faces": 0,
