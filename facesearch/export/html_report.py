@@ -88,6 +88,20 @@ def _site_display_data(source_url: str | None) -> tuple[str, str, str]:
         return value, value, ""
 
 
+def _display_face_id(result: dict[str, Any]) -> str:
+    """Возвращает ID записи лица в виде #00000000, без имени файла."""
+    value = result.get("face_id")
+    if value is None:
+        value = result.get("id")
+    try:
+        face_id = int(value)
+    except (TypeError, ValueError):
+        return "#ID неизвестен"
+    if face_id < 0:
+        return "#ID неизвестен"
+    return f"#{face_id:08d}"
+
+
 def generate_html_gallery(
     results,
     query_image: Path,
@@ -145,19 +159,11 @@ def generate_html_gallery(
         is_local = source_type == "local"
         is_import = source_type == "import"
 
-        filename_raw = str(result.get("filename") or "").strip()
-        filename = html.escape(filename_raw)
-        filename_path = Path(filename_raw.replace("\\", "/")).name
-        numeric_crop_filename = (
-            Path(filename_path).suffix.lower() in {".jpg", ".jpeg"}
-            and Path(filename_path).stem.isdigit()
-        )
-        # Имена вида 141414.jpg — технические имена CROP по ID записи,
-        # а не информативная подпись для пользователя.
+        # Под изображением показываем ID записи из БД, а не имя файла.
+        display_face_id = html.escape(_display_face_id(result), quote=True)
+        filename = display_face_id
         filename_html = (
-            f'<div class="filename">{filename}</div>'
-            if filename_raw and not numeric_crop_filename
-            else ""
+            f'<div class="filename" title="{display_face_id}">{display_face_id}</div>'
         )
 
         # URL строится из относительного images.path. Абсолютные старые пути
@@ -629,7 +635,8 @@ h1 {{
 
 .card {{
     position: relative;
-    background: {"#222222" if str(theme).lower() == "dark" else "#ffffff"};
+    background: {"#242424" if str(theme).lower() == "dark" else "#ffffff"};
+    border: 1px solid {"#383838" if str(theme).lower() == "dark" else "#c8cfd8"};
     border-radius: 12px;
     overflow: hidden;
     padding-bottom: 15px;
@@ -666,8 +673,10 @@ h1 {{
     left: 10px;
     z-index: 2;
     padding: 5px 9px;
-    background: rgba(0,0,0,.75);
+    color: #ffffff;
+    background: rgba(0,0,0,.82);
     border-radius: 6px;
+    text-shadow: 0 1px 2px rgba(0,0,0,.35);
 }}
 
 .score {{
@@ -676,17 +685,23 @@ h1 {{
     right: 10px;
     z-index: 2;
     padding: 6px 10px;
+    color: #ffffff;
     background: rgba(0,120,215,.90);
     border-radius: 6px;
     font-weight: bold;
 }}
 
 .filename {{
-    padding: 12px 15px 4px;
+    display: block;
+    min-height: 40px;
+    line-height: 20px;
+    padding: 9px 15px;
+    color: {"#f0f0f0" if str(theme).lower() == "dark" else "#171a1f"};
     font-weight: bold;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    border-bottom: 1px solid {"#353535" if str(theme).lower() == "dark" else "#c8cfd8"};
 }}
 
 .path {{
@@ -729,7 +744,8 @@ h1 {{
 .vk-info {{
     margin: 5px 15px 12px;
     padding: 10px;
-    background: {"#1b1b1b" if str(theme).lower() == "dark" else "#f0f1f3"};
+    background: {"#1e1e1e" if str(theme).lower() == "dark" else "#e9edf2"};
+    border: 1px solid {"#353535" if str(theme).lower() == "dark" else "#c4ccd5"};
     border-radius: 8px;
     line-height: 1.55;
     font-size: 13px;
@@ -755,6 +771,7 @@ h1 {{
     background: {"#333333" if str(theme).lower() == "dark" else "#e5e7eb"};
     color: {"#eeeeee" if str(theme).lower() == "dark" else "#202124"};
     text-decoration: none;
+    border: 1px solid {"#484848" if str(theme).lower() == "dark" else "#b7c0cb"};
     border-radius: 6px;
     font-size: 13px;
 }}
