@@ -5809,15 +5809,17 @@ class FaceSearchGUI:
         overwrite_existing_crops=False,
         remote_db=False,
     ):
-        """Высокопроизводительное HDD -> CPU -> единственная GPU model -> DB pipeline.
+        """Высокопроизводительный HDD -> CPU/GPU inference -> DB pipeline.
 
         Принципы:
-        1. Одна общая FaceAnalysis/ONNX Runtime model на GPU.
-        2. Несколько worker-потоков одновременно вызывают одну model, что
-           позволяет держать CUDA pipeline занятым.
-        3. SQLite connection переиспользуется каждым worker-потоком.
-        4. Тяжёлая очистка duplicate SHA выполняется только один раз до worker-ов.
-        5. В executor одновременно находится ограниченное число futures.
+        1. На GPU используется ограниченный пул FaceAnalysis/ONNX Runtime моделей:
+           ориентир — одна модель на два worker-потока, с лимитом по VRAM.
+        2. Если свободной видеопамяти недостаточно, потоки совместно используют
+           уже созданные модели вместо отказа сканирования.
+        3. На CPU остаётся один экземпляр модели, поскольку ONNX Runtime сам
+           распараллеливает CPU-инференс.
+        4. DB connection переиспользуется каждым worker-потоком.
+        5. Тяжёлая очистка duplicate SHA выполняется только один раз до worker-ов.
         """
         try:
             # Не выполнять полную проверку всех images и файлов на диске перед
@@ -5853,6 +5855,108 @@ class FaceSearchGUI:
             app = create_face_app(backend)
             self.app = app
             actual_backend = face_app_backend(app)
+            # Модель №1 уже загружена. Дополнительные сессии создаются только
+            # для GPU, лениво, когда подключаются новые worker-потоки.
+            model_pool = [app]
+            model_pool_lock = threading.RLock()
+            model_local = threading.local()
+            model_pool_state = {
+                "max_count": 1,
+                "assigned_threads": 0,
+                "capacity_exhausted": False,
+            }
+
+            def gpu_memory_info_mb():
+                """Текущая свободная/общая VRAM; None означает неизвестное значение."""
+                if actual_backend != BACKEND_GPU or torch is None:
+                    return None, None
+                try:
+                    if not torch.cuda.is_available():
+                        return None, None
+                    free_bytes, total_bytes = torch.cuda.mem_get_info(GPU_INDEX_DEVICE)
+                    return (
+                        float(free_bytes) / (1024 ** 2),
+                        float(total_bytes) / (1024 ** 2),
+                    )
+                except Exception:
+                    return None, None
+
+            def get_worker_app():
+                """Назначает потоку свою модель; если VRAM мало — делит имеющиеся."""
+                local_app = getattr(model_local, "app", None)
+                if local_app is not None:
+                    return local_app
+
+                with model_pool_lock:
+                    local_app = getattr(model_local, "app", None)
+                    if local_app is not None:
+                        return local_app
+
+                    slot = model_pool_state["assigned_threads"]
+                    model_pool_state["assigned_threads"] = slot + 1
+                    preferred_index = slot // 2
+
+                    while (
+                        preferred_index >= len(model_pool)
+                        and len(model_pool) < model_pool_state["max_count"]
+                        and not model_pool_state["capacity_exhausted"]
+                    ):
+                        free_mb, _total_mb = gpu_memory_info_mb()
+                        # До загрузки следующей CUDA-сессии оставляем запас 2 ГБ.
+                        if free_mb is None or free_mb < 2048:
+                            model_pool_state["capacity_exhausted"] = True
+                            if free_mb is None:
+                                print(
+                                    "[SCAN MODEL POOL] Свободная VRAM неизвестна; "
+                                    "оставляем одну/уже созданные модели."
+                                )
+                            else:
+                                print(
+                                    "[SCAN MODEL POOL] Дополнительная модель не "
+                                    f"создана: свободно VRAM {free_mb:.0f} MB."
+                                )
+                            break
+
+                        model_number = len(model_pool) + 1
+                        self.events.put((
+                            "scan_startup_status",
+                            f"Подготовка GPU-модели {model_number}/"
+                            f"{model_pool_state['max_count']}...",
+                        ))
+                        try:
+                            candidate = create_face_app(BACKEND_GPU)
+                        except Exception as exc:
+                            model_pool_state["capacity_exhausted"] = True
+                            print(
+                                "[SCAN MODEL POOL] Не удалось создать модель "
+                                f"{model_number}: {type(exc).__name__}: {exc}"
+                            )
+                            break
+
+                        if face_app_backend(candidate) != BACKEND_GPU:
+                            model_pool_state["capacity_exhausted"] = True
+                            print(
+                                "[SCAN MODEL POOL] Дополнительная модель не "
+                                "использовала CUDA; сохраняем текущий пул."
+                            )
+                            break
+
+                        model_pool.append(candidate)
+                        print(
+                            f"[SCAN MODEL POOL] GPU-модель {len(model_pool)}/"
+                            f"{model_pool_state['max_count']} готова."
+                        )
+
+                    if preferred_index < len(model_pool):
+                        selected_app = model_pool[preferred_index]
+                    else:
+                        # VRAM-лимит достигнут: распределяем потоки по готовым
+                        # моделям вместо прерывания сканирования.
+                        selected_app = model_pool[slot % len(model_pool)]
+
+                    model_local.app = selected_app
+                    return selected_app
+
             self.events.put(("backend_actual", actual_backend, backend))
 
             self.events.put(("scan_total", total))
@@ -5929,6 +6033,9 @@ class FaceSearchGUI:
                     }
 
                 try:
+                    # Сначала назначаем модель, поскольку создание ONNX-сессии
+                    # может занять время; в этот момент DB-соединение ещё не открыто.
+                    worker_app = get_worker_app()
                     conn = get_worker_conn()
 
                     # SQL Server может кратковременно вернуть deadlock/lock timeout,
@@ -5966,7 +6073,7 @@ class FaceSearchGUI:
                         if use_json_metadata and json_path.is_file():
                             result = import_image_bundle(
                                 conn,
-                                app,
+                                worker_app,
                                 path,
                                 json_path,
                                 delete_source=delete_processed,
@@ -5978,7 +6085,7 @@ class FaceSearchGUI:
 
                         result = process_local_image(
                             conn,
-                            app,
+                            worker_app,
                             path,
                             delete_source=delete_processed,
                             create_crop_files=create_crop_files,
@@ -6099,6 +6206,43 @@ class FaceSearchGUI:
                             )
 
             executor_max_workers = controller.max_workers if controller is not None else workers
+
+            # Верхний предел пула определяется количеством возможных worker-ов
+            # и объёмом VRAM. Модели создаются лениво, только когда нужны потоки.
+            if actual_backend == BACKEND_GPU:
+                _free_mb, total_vram_mb = gpu_memory_info_mb()
+                if total_vram_mb is None:
+                    metrics = _read_gpu_system_metrics(refresh=True)
+                    try:
+                        total_vram_mb = float(metrics.get("gpu_mem_total_mb") or 0.0)
+                    except (TypeError, ValueError):
+                        total_vram_mb = 0.0
+
+                if total_vram_mb >= 16384:
+                    vram_model_cap = 6
+                elif total_vram_mb >= 12288:
+                    vram_model_cap = 4
+                elif total_vram_mb >= 8192:
+                    vram_model_cap = 3
+                elif total_vram_mb >= 4096:
+                    vram_model_cap = 2
+                else:
+                    # Очень мало VRAM или неизвестная ёмкость — одна модель.
+                    vram_model_cap = 1
+
+                model_pool_state["max_count"] = max(
+                    1,
+                    min((executor_max_workers + 1) // 2, vram_model_cap),
+                )
+            else:
+                model_pool_state["max_count"] = 1
+
+            self.events.put((
+                "scan_startup_status",
+                f"Пул моделей: 1/{model_pool_state['max_count']}; "
+                "дополнительные модели будут загружаться по мере необходимости.",
+            ))
+
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=executor_max_workers,
                 thread_name_prefix="gpu-face",
