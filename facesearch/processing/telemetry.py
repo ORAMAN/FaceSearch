@@ -169,9 +169,8 @@ def _auto_worker_limits(
         except Exception:
             pass
 
-    storage = _storage_type_for_paths(
-        list(input_paths or []) + ([output_path] if output_path else [])
-    )
+    storage_paths = list(input_paths or []) + ([output_path] if output_path else [])
+    storage = _storage_type_for_paths(storage_paths) if storage_paths else "unknown"
     if storage == "hdd":
         # Механический диск быстро становится узким местом при случайном I/O.
         start = min(start, 4)
