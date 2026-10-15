@@ -3840,6 +3840,21 @@ class FaceSearchGUI:
     def _on_settings_variable_changed(self, *_args):
         self._schedule_settings_save()
 
+    def _on_stats_message_changed(self, *_args):
+        """Показывает строку состояния только при наличии текста."""
+        label = getattr(self, "stats_message_label", None)
+        table = getattr(self, "stats_table", None)
+        if label is None or table is None:
+            return
+        try:
+            if str(self.stats_var.get() or "").strip():
+                if not label.winfo_manager():
+                    label.pack(fill="x", anchor="w", before=table, pady=(0, 2))
+            elif label.winfo_manager():
+                label.pack_forget()
+        except tk.TclError:
+            pass
+
     def _update_stats_table_wraplength(self):
         """Подгоняет перенос длинных значений под ширину правой панели статистики."""
         try:
@@ -4809,7 +4824,7 @@ class FaceSearchGUI:
 
         self.root.option_add("*Font", ("Segoe UI", 9))
         self.status_var = tk.StringVar(value="Готово")
-        self.stats_var = tk.StringVar(value="Статистика базы будет показана после подключения.")
+        self.stats_var = tk.StringVar(value="")
 
         # Контейнер всей страницы — единые внешние отступы вместо разрозненных полей.
         self.page = ttk.Frame(self.root, style="App.TFrame", padding=(14, 10, 14, 8))
@@ -4941,29 +4956,30 @@ class FaceSearchGUI:
         # Табличная статистика БД: подписи в первом столбце, результаты —
         # во втором. Числовые значения выравниваются по правому краю.
         db_stats_frame = ttk.LabelFrame(
-            db_groups_row, text="Статистика БД", padding=(10, 8),
+            db_groups_row, text="Статистика БД", padding=(6, 4),
         )
-        db_stats_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        # Не растягиваем панель статистики по высоте левой панели БД:
+        # она занимает только столько места, сколько нужно содержимому.
+        db_stats_frame.grid(row=0, column=1, sticky="new", padx=(4, 0))
         db_stats_frame.columnconfigure(1, weight=1)
 
         self.stats_message_label = ttk.Label(
             db_stats_frame, textvariable=self.stats_var, justify="left",
             anchor="w", wraplength=460,
         )
-        self.stats_message_label.pack(fill="x", anchor="w", pady=(0, 4))
 
         self.stats_table = ttk.Frame(db_stats_frame)
-        self.stats_table.pack(fill="both", expand=True)
+        self.stats_table.pack(fill="x", anchor="nw")
         self.stats_table.columnconfigure(1, weight=1)
 
         ttk.Label(
             self.stats_table, text="Показатель", style="Muted.TLabel",
             anchor="w",
-        ).grid(row=0, column=0, sticky="ew", padx=(2, 12), pady=(0, 4))
+        ).grid(row=0, column=0, sticky="ew", padx=(1, 8), pady=(0, 1))
         ttk.Label(
             self.stats_table, text="Значение", style="Muted.TLabel",
             anchor="e",
-        ).grid(row=0, column=1, sticky="ew", padx=(4, 2), pady=(0, 4))
+        ).grid(row=0, column=1, sticky="ew", padx=(2, 1), pady=(0, 1))
         ttk.Separator(self.stats_table, orient="horizontal").grid(
             row=1, column=0, columnspan=2, sticky="ew", pady=(0, 3),
         )
@@ -4986,7 +5002,7 @@ class FaceSearchGUI:
                 self.stats_table, text=title, anchor="w",
             ).grid(
                 row=row_number, column=0, sticky="nw",
-                padx=(2, 12), pady=2,
+                padx=(1, 8), pady=0,
             )
             value_var = tk.StringVar(value="—")
             self.stats_value_vars[key] = value_var
@@ -4996,14 +5012,19 @@ class FaceSearchGUI:
             )
             value_label.grid(
                 row=row_number, column=1, sticky="new",
-                padx=(4, 2), pady=2,
+                padx=(2, 1), pady=0,
             )
             self.stats_value_labels[key] = value_label
             if row_index < len(stats_rows) - 1:
                 ttk.Separator(self.stats_table, orient="horizontal").grid(
                     row=row_number + 1, column=0, columnspan=2,
-                    sticky="ew", pady=1,
+                    sticky="ew", pady=0,
                 )
+
+        # Сообщение над таблицей занимает место только тогда, когда есть текст
+        # (ошибка/состояние); пустой Label полностью убирается из компоновки.
+        self.stats_var.trace_add("write", self._on_stats_message_changed)
+        self._on_stats_message_changed()
 
         # Одна строка: выбор и подключение слева, управление профилями справа.
         # Вертикальный разделитель и дополнительный отступ визуально отделяют
