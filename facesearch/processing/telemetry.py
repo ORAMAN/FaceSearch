@@ -30,14 +30,106 @@ from ..config import (
     GPU_INDEX_DEVICE,
 )
 
-def _auto_worker_limits() -> tuple[int, int, int]:
-    """Возвращает (min, start, max) для текущей машины.
+_STORAGE_TYPE_CACHE: dict[str, str] | None = None
+_STORAGE_TYPE_LOCK = threading.Lock()
 
-    Для i7-3770 (4C/8T) автоматически получаем примерно 2/6/16.
-    Верхний предел остаётся ограничен LOCAL_MAX_WORKERS.
+
+def _detect_storage_types() -> dict[str, str]:
+    """Определяет HDD/SSD для доступных томов; результат кэшируется на запуск."""
+    global _STORAGE_TYPE_CACHE
+    if _STORAGE_TYPE_CACHE is not None:
+        return _STORAGE_TYPE_CACHE
+
+    with _STORAGE_TYPE_LOCK:
+        if _STORAGE_TYPE_CACHE is not None:
+            return _STORAGE_TYPE_CACHE
+        result: dict[str, str] = {}
+        if os.name == "nt":
+            # MediaType иногда возвращает Unspecified для RAID/USB/NVMe bridge;
+            # в этом случае оставляем тип неизвестным и полагаемся на telemetry.
+            try:
+                command = (
+                    "Get-Partition | Where-Object { $_.DriveLetter } | "
+                    "ForEach-Object { $d = Get-Disk -Number $_.DiskNumber; "
+                    "'{0}|{1}' -f $_.DriveLetter, $d.MediaType }"
+                )
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                    capture_output=True, text=True, timeout=4.0,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    check=False,
+                )
+                for line in proc.stdout.splitlines():
+                    parts = [part.strip().lower() for part in line.split("|", 1)]
+                    if len(parts) != 2:
+                        continue
+                    media = parts[1]
+                    if media in {"hdd", "ssd"}:
+                        result[parts[0].rstrip(":").upper()] = media
+            except Exception:
+                pass
+        else:
+            # Linux: rotational=1 обычно означает HDD; 0 — SSD/NVMe.
+            try:
+                partitions = psutil.disk_partitions(all=True) if psutil is not None else []
+                for part in partitions:
+                    device = str(part.device or "").rsplit("/", 1)[-1]
+                    device = re.sub(r"\\d+$", "", device)
+                    rotational = Path("/sys/block") / device / "queue" / "rotational"
+                    if rotational.is_file():
+                        value = rotational.read_text(encoding="ascii", errors="ignore").strip()
+                        if value in {"0", "1"}:
+                            result[str(part.mountpoint)] = "hdd" if value == "1" else "ssd"
+            except Exception:
+                pass
+        _STORAGE_TYPE_CACHE = result
+        return result
+
+
+def _storage_type_for_paths(paths: list[Any] | tuple[Any, ...] | None) -> str:
+    """Возвращает hdd/ssd/mixed/unknown для заданных путей."""
+    types: set[str] = set()
+    mapping = _detect_storage_types()
+    for raw_path in paths or []:
+        value = str(raw_path or "").strip()
+        if not value:
+            continue
+        if os.name == "nt":
+            drive = _path_drive_letter(value)
+            detected = mapping.get(drive) if drive else None
+        else:
+            detected = None
+            try:
+                resolved = str(Path(value).resolve())
+                matches = [
+                    (len(mount), kind) for mount, kind in mapping.items()
+                    if resolved.startswith(str(mount))
+                ]
+                if matches:
+                    detected = max(matches)[1]
+            except Exception:
+                pass
+        if detected:
+            types.add(detected)
+    if len(types) > 1:
+        return "mixed"
+    return next(iter(types), "unknown")
+
+
+def _auto_worker_limits(
+    *,
+    backend: str | None = None,
+    input_paths: list[Any] | tuple[Any, ...] | None = None,
+    output_path: Any = None,
+    remote_db: bool = False,
+) -> tuple[int, int, int]:
+    """Возвращает (min, start, max) с учётом CPU, backend, накопителя и БД.
+
+    Начальное число потоков — лишь безопасная стартовая оценка. Во время
+    сканирования AdaptiveWorkerController уточняет его по фактической скорости
+    и загрузке CPU/GPU/RAM/диска/сети.
     """
-    logical = 0
-    physical = 0
+    logical = physical = 0
     if psutil is not None:
         try:
             logical = int(psutil.cpu_count(logical=True) or 0)
@@ -47,20 +139,51 @@ def _auto_worker_limits() -> tuple[int, int, int]:
             physical = int(psutil.cpu_count(logical=False) or 0)
         except Exception:
             pass
+    logical = logical if logical > 0 else 8
+    physical = physical if physical > 0 else max(2, logical // 2)
 
-    if logical <= 0:
-        logical = 8
-    if physical <= 0:
-        physical = max(2, logical // 2)
-
-    minimum = max(AUTO_WORKERS_MIN, min(4, physical))
+    minimum = max(1, min(AUTO_WORKERS_MIN, physical))
     start = max(minimum, min(8, physical + 2, logical))
-    maximum = min(
-        AUTO_WORKERS_MAX_HARD,
-        max(start + 2, logical * 2),
+    maximum = min(AUTO_WORKERS_MAX_HARD, max(start + 2, logical * 2))
+
+    if backend == BACKEND_CPU:
+        # ONNX Runtime на CPU сам распараллеливает ядра; слишком много внешних
+        # image workers часто лишь усиливает конкуренцию за одни и те же ядра.
+        start = min(start, max(2, physical))
+        maximum = min(maximum, max(start + 2, logical))
+
+    elif backend == BACKEND_GPU:
+        # Малый объём VRAM — повод начинать осторожнее. Дальше число worker-ов
+        # подбирается измерением throughput, а не по одному только объёму VRAM.
+        try:
+            gpu_metrics = _read_gpu_system_metrics(refresh=True)
+            total_vram = float(gpu_metrics.get("gpu_mem_total_mb") or 0.0)
+            if 0 < total_vram < 4096:
+                start = min(start, 3)
+                maximum = min(maximum, 8)
+            elif total_vram >= 8192:
+                start = min(maximum, max(start, min(8, logical)))
+        except Exception:
+            pass
+
+    storage = _storage_type_for_paths(
+        list(input_paths or []) + ([output_path] if output_path else [])
     )
-    if maximum < start:
-        maximum = start
+    if storage == "hdd":
+        # Механический диск быстро становится узким местом при случайном I/O.
+        start = min(start, 4)
+        maximum = min(maximum, max(start + 2, min(8, logical)))
+    elif storage == "ssd":
+        start = min(maximum, max(start, min(8, logical)))
+
+    if remote_db:
+        # Сетевые SQL-записи/commit-ы могут ограничивать скорость независимо
+        # от локальной мощности GPU. Начинаем умеренно и растём только по замерам.
+        start = min(start, 4)
+        maximum = min(maximum, max(start + 2, min(8, logical)))
+
+    start = max(minimum, min(start, maximum))
+    maximum = max(start, maximum)
     return minimum, start, maximum
 
 
@@ -488,6 +611,7 @@ class AdaptiveWorkerController:
         input_paths: list[Any] | tuple[Any, ...] | None = None,
         output_path: Any = None,
         input_is_network: bool = False,
+        remote_db: bool = False,
     ):
         self.enabled = True
         self.backend = backend
@@ -495,7 +619,13 @@ class AdaptiveWorkerController:
         self.input_paths = list(input_paths or [])
         self.output_path = output_path
         self.input_is_network = bool(input_is_network)
-        min_w, start_w, max_w = _auto_worker_limits()
+        self.remote_db = bool(remote_db)
+        min_w, start_w, max_w = _auto_worker_limits(
+            backend=self.backend,
+            input_paths=self.input_paths,
+            output_path=self.output_path,
+            remote_db=self.remote_db,
+        )
         self.min_workers = min_w
         self.max_workers = max_w
         self.current_workers = max(
