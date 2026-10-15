@@ -3861,11 +3861,11 @@ class FaceSearchGUI:
             width = int(self.stats_table.winfo_width())
             if width <= 1:
                 return
-            # Оставляем место под столбец показателей и промежутки между ячейками.
-            value_width = max(120, width - 150)
+            # Узкая левая панель: учитываем ширину столбца показателей.
+            value_width = max(70, width - 112)
             for label in self.stats_value_labels.values():
                 label.configure(wraplength=value_width)
-            self.stats_message_label.configure(wraplength=max(220, width - 12))
+            self.stats_message_label.configure(wraplength=max(120, width - 12))
         except (AttributeError, tk.TclError, TypeError, ValueError):
             pass
 
@@ -4945,86 +4945,12 @@ class FaceSearchGUI:
         # --------------------------------------------------------
         db_groups_row = ttk.Frame(self.page, style="App.TFrame")
         db_groups_row.pack(fill="x", pady=(0, 8))
-        db_groups_row.columnconfigure(0, weight=3, uniform="db_top_groups")
-        db_groups_row.columnconfigure(1, weight=2, uniform="db_top_groups")
+        db_groups_row.columnconfigure(0, weight=1)
 
         db_frame = ttk.LabelFrame(
             db_groups_row, text="База данных", padding=(10, 8),
         )
-        db_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
-
-        # Табличная статистика БД: подписи в первом столбце, результаты —
-        # во втором. Числовые значения выравниваются по правому краю.
-        db_stats_frame = ttk.LabelFrame(
-            db_groups_row, text="Статистика БД", padding=(6, 4),
-        )
-        # Не растягиваем панель статистики по высоте левой панели БД:
-        # она занимает только столько места, сколько нужно содержимому.
-        db_stats_frame.grid(row=0, column=1, sticky="new", padx=(4, 0))
-        db_stats_frame.columnconfigure(1, weight=1)
-
-        self.stats_message_label = ttk.Label(
-            db_stats_frame, textvariable=self.stats_var, justify="left",
-            anchor="w", wraplength=460,
-        )
-
-        self.stats_table = ttk.Frame(db_stats_frame)
-        self.stats_table.pack(fill="x", anchor="nw")
-        self.stats_table.columnconfigure(1, weight=1)
-
-        ttk.Label(
-            self.stats_table, text="Показатель", style="Muted.TLabel",
-            anchor="w",
-        ).grid(row=0, column=0, sticky="ew", padx=(1, 8), pady=(0, 1))
-        ttk.Label(
-            self.stats_table, text="Значение", style="Muted.TLabel",
-            anchor="e",
-        ).grid(row=0, column=1, sticky="ew", padx=(2, 1), pady=(0, 1))
-        ttk.Separator(self.stats_table, orient="horizontal").grid(
-            row=1, column=0, columnspan=2, sticky="ew", pady=0,
-        )
-
-        self.stats_value_vars = {}
-        self.stats_value_labels = {}
-        stats_rows = [
-            ("profiles", "Профилей", "e"),
-            ("images", "Изображений", "e"),
-            ("faces", "Лиц в БД", "e"),
-            ("backend", "СУБД", "w"),
-            ("profile", "Активный профиль", "w"),
-            ("faiss_size", "Размер FAISS", "w"),
-            ("faiss_state", "Состояние FAISS", "w"),
-            ("gpu", "GPU search", "w"),
-        ]
-        for row_index, (key, title, anchor) in enumerate(stats_rows):
-            row_number = 2 + row_index * 2
-            ttk.Label(
-                self.stats_table, text=title, anchor="w",
-            ).grid(
-                row=row_number, column=0, sticky="nw",
-                padx=(1, 8), pady=0,
-            )
-            value_var = tk.StringVar(value="—")
-            self.stats_value_vars[key] = value_var
-            value_label = ttk.Label(
-                self.stats_table, textvariable=value_var,
-                anchor=anchor, justify="left", wraplength=300,
-            )
-            value_label.grid(
-                row=row_number, column=1, sticky="new",
-                padx=(2, 1), pady=0,
-            )
-            self.stats_value_labels[key] = value_label
-            if row_index < len(stats_rows) - 1:
-                ttk.Separator(self.stats_table, orient="horizontal").grid(
-                    row=row_number + 1, column=0, columnspan=2,
-                    sticky="ew", pady=0,
-                )
-
-        # Сообщение над таблицей занимает место только тогда, когда есть текст
-        # (ошибка/состояние); пустой Label полностью убирается из компоновки.
-        self.stats_var.trace_add("write", self._on_stats_message_changed)
-        self._on_stats_message_changed()
+        db_frame.grid(row=0, column=0, columnspan=2, sticky="nsew")
 
         # Одна строка: выбор и подключение слева, управление профилями справа.
         # Вертикальный разделитель и дополнительный отступ визуально отделяют
@@ -5180,8 +5106,56 @@ class FaceSearchGUI:
         # --------------------------------------------------------
         self.paned = ttk.Panedwindow(self.page, orient="horizontal")
         self.paned.pack(fill="both", expand=True, pady=(4, 8))
+        # Компактная статистика вынесена в отдельную левую панель рядом с поиском.
+        db_stats_frame = ttk.LabelFrame(
+            self.paned, text="Статистика БД", padding=(6, 4), width=245,
+        )
+        # Фиксируем компактную ширину панели, но оставляем ей всю высоту рабочей области.
+        db_stats_frame.pack_propagate(False)
+        db_stats_frame.columnconfigure(1, weight=1)
+
+        self.stats_message_label = ttk.Label(
+            db_stats_frame, textvariable=self.stats_var, justify="left",
+            anchor="w", wraplength=220,
+        )
+        self.stats_table = ttk.Frame(db_stats_frame)
+        self.stats_table.pack(fill="x", anchor="nw")
+        self.stats_table.columnconfigure(1, weight=1)
+
+        self.stats_value_vars = {}
+        self.stats_value_labels = {}
+        stats_rows = [
+            ("profiles", "Профилей", "e"),
+            ("images", "Изображений", "e"),
+            ("faces", "Лиц в БД", "e"),
+            ("backend", "СУБД", "w"),
+            ("profile", "Активный профиль", "w"),
+            ("faiss_size", "Размер FAISS", "w"),
+            ("faiss_state", "Состояние FAISS", "w"),
+            ("gpu", "GPU search", "w"),
+        ]
+        for row_index, (key, title, anchor) in enumerate(stats_rows):
+            ttk.Label(
+                self.stats_table, text=title, anchor="w",
+            ).grid(row=row_index, column=0, sticky="nw", padx=(1, 6), pady=1)
+            value_var = tk.StringVar(value="—")
+            self.stats_value_vars[key] = value_var
+            value_label = ttk.Label(
+                self.stats_table, textvariable=value_var,
+                anchor=anchor, justify="left", wraplength=120,
+            )
+            value_label.grid(
+                row=row_index, column=1, sticky="new", padx=(1, 1), pady=1,
+            )
+            self.stats_value_labels[key] = value_label
+
+        # Строка состояния/ошибки отображается только при наличии сообщения.
+        self.stats_var.trace_add("write", self._on_stats_message_changed)
+        self._on_stats_message_changed()
+
         left = ttk.Frame(self.paned, style="Surface.TFrame", padding=(12, 10))
         right = ttk.Frame(self.paned, style="Surface.TFrame", padding=(12, 10))
+        self.paned.add(db_stats_frame, weight=0)
         self.paned.add(left, weight=1)
         self.paned.add(right, weight=2)
 
