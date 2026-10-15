@@ -141,7 +141,8 @@ def _identity_keys(row: dict) -> list[tuple]:
     return result
 
 
-def _copy_profiles(core, source, dest, source_backend: str, dest_backend: str, log) -> tuple[dict, dict]:
+def _copy_profiles(core, source, dest, source_backend: str, dest_backend: str, log, *,
+                   deduplicate_existing: bool = True, progress_callback=None) -> tuple[dict, dict]:
     source_cols = _table_columns(source, source_backend, "profiles")
     dest_cols = _table_columns(dest, dest_backend, "profiles")
     if "id" not in source_cols or "id" not in dest_cols:
@@ -151,7 +152,10 @@ def _copy_profiles(core, source, dest, source_backend: str, dest_backend: str, l
     # Не вытаскиваем raw_json всех целевых профилей в RAM: в больших базах
     # это поле может содержать десятки/сотни мегабайт данных.
     dst_cache_cols = [c for c in sorted(dest_cols) if c != "raw_json"]
-    dst_rows = dest.execute(f"SELECT {', '.join(dst_cache_cols)} FROM profiles").fetchall()
+    dst_rows = (
+        dest.execute(f"SELECT {', '.join(dst_cache_cols)} FROM profiles").fetchall()
+        if deduplicate_existing else []
+    )
     targets_by_key: dict[tuple, dict] = {}
     for raw in dst_rows:
         row = dict(zip(dst_cache_cols, raw))
@@ -162,6 +166,9 @@ def _copy_profiles(core, source, dest, source_backend: str, dest_backend: str, l
     stats = {"profiles_inserted": 0, "profiles_matched": 0}
     common = [c for c in src_select if c in dest_cols and c != "id"]
     fillable = [c for c in common if c not in {"raw_json"}]
+    total_row = source.execute("SELECT COUNT(*) FROM profiles").fetchone()
+    total_profiles = int(total_row[0] or 0) if total_row else 0
+    processed_profiles = 0
     stream = getattr(source, "execute_streaming", source.execute)
     cursor = stream(f"SELECT {', '.join(src_select)} FROM profiles ORDER BY id")
     try:
@@ -170,9 +177,13 @@ def _copy_profiles(core, source, dest, source_backend: str, dest_backend: str, l
             if not raw_batch:
                 break
             for raw in raw_batch:
+                processed_profiles += 1
                 row = dict(zip(src_select, raw))
                 source_id = int(row["id"])
-                matched = next((targets_by_key[k] for k in _identity_keys(row) if k in targets_by_key), None)
+                matched = (
+                    next((targets_by_key[k] for k in _identity_keys(row) if k in targets_by_key), None)
+                    if deduplicate_existing else None
+                )
                 if matched is not None:
                     dest_id = int(matched["id"])
                     source_to_dest[source_id] = dest_id
@@ -198,8 +209,11 @@ def _copy_profiles(core, source, dest, source_backend: str, dest_backend: str, l
                 inserted["id"] = dest_id
                 source_to_dest[source_id] = dest_id
                 stats["profiles_inserted"] += 1
-                for key in _identity_keys(inserted):
-                    targets_by_key.setdefault(key, inserted)
+                if deduplicate_existing:
+                    for key in _identity_keys(inserted):
+                        targets_by_key.setdefault(key, inserted)
+            if progress_callback and (processed_profiles % 500 == 0 or processed_profiles == total_profiles):
+                progress_callback(processed_profiles, total_profiles)
         dest.commit()
     finally:
         cursor.close()
@@ -336,6 +350,14 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
         if log_callback:
             log_callback(str(message))
 
+    def report_progress(percent, message, indeterminate=False):
+        if progress_callback:
+            try:
+                progress_callback(max(0.0, min(100.0, float(percent))), str(message), bool(indeterminate))
+            except Exception:
+                pass
+
+    report_progress(0, "Подключение к исходной БД...")
     source_profile = core._normalize_profile_storage_paths(dict(source_profile))
     target_profile = core._normalize_profile_storage_paths(dict(target_profile))
     if _db_key(source_profile, core) == _db_key(target_profile, core):
@@ -372,6 +394,7 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
     }
     created_profile = False
     try:
+        report_progress(1, "Подключение к исходной БД...")
         log("Подключение к исходной БД...")
         src = core.create_database_for_profile(
             source_profile, maintenance=False, create_if_missing=False,
@@ -384,12 +407,22 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
         )
         if not all(core._table_exists(src, table) for table in ("profiles", "images", "faces")):
             raise RuntimeError("В исходной БД отсутствует одна из таблиц profiles/images/faces.")
+        report_progress(3, "Проверка структуры целевой БД...")
         log("Проверка/создание структуры таблиц назначения...")
         core._initialize_schema(dst, maintenance=False)
         dst.commit()
 
-        source_to_dest_profile, profile_stats = _copy_profiles(core, src, dst, source_type, target_type, log)
+        report_progress(5, "Перенос профилей...")
+        source_to_dest_profile, profile_stats = _copy_profiles(
+            core, src, dst, source_type, target_type, log,
+            deduplicate_existing=not create_target,
+            progress_callback=lambda current, total: report_progress(
+                5 + 5 * (current / total if total else 1),
+                f"Профили: {current:,}/{total:,}"
+            ),
+        )
         stats.update(profile_stats)
+        report_progress(10, "Подготовка переноса изображений...")
 
         source_image_cols = _table_columns(src, source_type, "images")
         dest_image_cols = _table_columns(dst, target_type, "images")
@@ -422,6 +455,7 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
             f"SELECT {', '.join(src_image_columns)} FROM images ORDER BY id"
         )
         processed_images = 0
+        report_progress(10, f"Изображения: 0/{total_images:,}")
         try:
             while True:
                 raw_batch = img_cursor.fetchmany(BATCH_IMAGES)
@@ -588,14 +622,20 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
 
                 # Переносим только записи БД. Физические CROP-файлы не копируются.
                 processed_images += len(batch_rows)
+                report_progress(
+                    10 + 40 * (processed_images / total_images if total_images else 1),
+                    f"Изображения: {processed_images:,}/{total_images:,}"
+                )
                 if processed_images % (BATCH_IMAGES * 4) == 0 or processed_images == total_images:
                     log(f"Изображения: {processed_images:,}/{total_images:,}; новых {stats['images_inserted']:,}; дубликатов {stats['images_deduplicated']:,}.")
         finally:
             img_cursor.close()
         dst.commit()
+        report_progress(50, f"Изображения завершены: {processed_images:,}/{total_images:,}")
 
         total_faces_row = src.execute("SELECT COUNT(*) FROM faces").fetchone()
         total_faces = int(total_faces_row[0] or 0) if total_faces_row else 0
+        report_progress(50, f"Лица: 0/{total_faces:,}")
         log(f"Перенос лиц: {total_faces:,} строк, партиями по {BATCH_FACES}...")
         face_select = ["image_id", "x1", "y1", "x2", "y2", "det_score", "embedding", "embedding_dim"]
         face_cursor = getattr(src, "execute_streaming", src.execute)(
@@ -670,6 +710,10 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
                     )
                     temp_map.commit()
                 processed_faces += len(raw_batch)
+                report_progress(
+                    50 + 40 * (processed_faces / total_faces if total_faces else 1),
+                    f"Лица: {processed_faces:,}/{total_faces:,}"
+                )
                 if processed_faces % (BATCH_FACES * 4) == 0 or processed_faces == total_faces:
                     log(f"Лица: прочитано {processed_faces:,}/{total_faces:,}; перенесено {stats['faces_inserted']:,}.")
         finally:
@@ -682,16 +726,16 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
             stats["faces_inserted"] += len(pending_face_rows)
             dst.commit()
         log(f"Лица: добавлено {stats['faces_inserted']:,}; пропущено как дубликаты/без целевого изображения {stats['faces_skipped']:,}.")
+        report_progress(90, f"Лица завершены: {processed_faces:,}/{total_faces:,}")
 
         if rebuild_index:
+            report_progress(92, "Создание FAISS-индекса назначения (прогресс этой операции не измеряется)...", True)
             log("Создание нового FAISS-индекса назначения (CPU). Это может занять время и RAM...")
             old_index = core.INDEX_FILE
-            old_crop = core.CROP_DIR
             old_db_file = core.DB_FILE
             old_cleanup = core.cleanup_missing_images
             try:
                 core.INDEX_FILE = str(Path(str(target_profile["index_path"])).expanduser().resolve())
-                core.CROP_DIR = target_crop
                 core.DB_FILE = str(target_profile.get("path") or target_profile.get("database") or "")
                 # Индекс строим по всем перенесённым embedding. Отсутствующий локальный
                 # CROP не должен во время миграции удалять запись лица из целевой БД.
@@ -708,9 +752,9 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
             finally:
                 core.cleanup_missing_images = old_cleanup
                 core.INDEX_FILE = old_index
-                core.CROP_DIR = old_crop
                 core.DB_FILE = old_db_file
 
+        report_progress(99, "Завершение миграции и фиксация изменений...")
         return stats
     except Exception:
         if dst is not None:
@@ -841,8 +885,10 @@ class DatabaseMigrationWindow:
         action_frame.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(2, 6))
         self.start_button = ttk.Button(action_frame, text="Начать миграцию", command=self._start_migration)
         self.start_button.pack(side="left")
-        self.progress = ttk.Progressbar(action_frame, mode="indeterminate")
+        self.progress = ttk.Progressbar(action_frame, mode="determinate", maximum=100, value=0)
         self.progress.pack(side="left", fill="x", expand=True, padx=(12, 0))
+        self.progress_percent_var = tk.StringVar(value="0%")
+        ttk.Label(action_frame, textvariable=self.progress_percent_var, width=6, anchor="e").pack(side="left", padx=(8, 0))
 
         self.status_var = tk.StringVar(value="Выберите источник и назначение. Перенос выполняется в отдельном потоке.")
         ttk.Label(main, textvariable=self.status_var, wraplength=880).grid(row=7, column=0, columnspan=4, sticky="ew", pady=(4, 6))
@@ -882,6 +928,23 @@ class DatabaseMigrationWindow:
             self.server_fields.grid()
             self.sqlite_fields.grid_remove()
             self.port_var.set(str(DEFAULT_PORTS.get(backend, "")))
+
+    def _set_progress(self, percent: float, message: str, indeterminate: bool = False):
+        mode = str(self.progress.cget("mode"))
+        if indeterminate:
+            if mode != "indeterminate":
+                self.progress.stop()
+                self.progress.configure(mode="indeterminate")
+                self.progress.start(10)
+            self.progress_percent_var.set("…")
+        else:
+            if mode != "determinate":
+                self.progress.stop()
+                self.progress.configure(mode="determinate", maximum=100)
+            value = max(0.0, min(100.0, float(percent)))
+            self.progress.configure(value=value)
+            self.progress_percent_var.set(f"{value:.0f}%")
+        self.status_var.set(str(message)[:220])
 
     def _set_log(self, message: str):
         self.log_text.configure(state="normal")
@@ -942,7 +1005,9 @@ class DatabaseMigrationWindow:
 
         self.running = True
         self.start_button.configure(state="disabled")
-        self.progress.start(10)
+        self.progress.stop()
+        self.progress.configure(mode="determinate", maximum=100, value=0)
+        self.progress_percent_var.set("0%")
         self._set_log("Запуск миграции…")
         rebuild_index = bool(self.rebuild_index_var.get())
         save_profile = bool(self.save_profile_var.get()) if mode == "new" else False
@@ -979,6 +1044,9 @@ class DatabaseMigrationWindow:
                     core, actual_source, actual_target, create_target=create_target,
                     rebuild_index=rebuild_index,
                     log_callback=lambda message: self.events.put(("log", message)),
+                    progress_callback=lambda percent, message, indeterminate=False: self.events.put(
+                        ("progress", percent, message, indeterminate)
+                    ),
                 )
                 self.events.put(("done", report))
             except Exception as exc:
@@ -994,10 +1062,14 @@ class DatabaseMigrationWindow:
                 kind = event[0]
                 if kind == "log":
                     self._set_log(event[1])
+                elif kind == "progress":
+                    self._set_progress(event[1], event[2], event[3])
                 elif kind == "profiles_saved":
                     self._set_log("Новое подключение сохранено в database_profiles.json.")
                 elif kind == "done":
                     self.progress.stop()
+                    self.progress.configure(mode="determinate", maximum=100, value=100)
+                    self.progress_percent_var.set("100%")
                     self.running = False
                     self.start_button.configure(state="normal")
                     stats = event[1]
