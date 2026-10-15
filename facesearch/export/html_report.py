@@ -793,4 +793,48 @@ h1 {{
     )
 
     print(f"HTML-галерея: {output_path}")
+    return output_path<style>
+:root {
+    color-scheme: ${"dark" if str(theme).lower() == "dark" else "light"};
+    --page-bg: ${"#151515" if str(theme).lower() == "dark" else "#f4f5f7"};
+    --card-bg: ${"#222222" if str(theme).lower() == "dark" else "#ffffff"};
+    --panel-bg: ${"#1b1b1b" if str(theme).lower() == "dark" else "#f0f1f3"};
+    --image-bg: ${"#111111" if str(theme).lower() == "dark" else "#e9eaec"};
+    --text: ${"#eeeeee" if str(theme).lower() == "dark" else "#202124"};
+    --muted: ${"#888888" if str(theme).lower() == "dark" else "#62666b"};
+    --link: ${"#79bfff" if str(theme).lower() == "dark" else "#075eb5"};
+    --button-bg: ${"#333333" if str(theme).lower() == "dark" else "#e5e7eb"};
+    --button-hover: ${"#444444" if str(theme).lower() == "dark" else "#d1d5db"};
+}
+</style>
+</head>
+
+<body>
+<h1>Результаты поиска лиц</h1>
+
+<div class="info">
+    Найдено результатов: <b>{len(results)}</b>
+</div>
+
+<div class="query">
+    Запрос:
+    <a href="{html.escape(query_href)}">
+        {html.escape(str(query_path))}
+    </a>
+</div>
+
+<div class="gallery">
+{cards_html}
+</div>
+{retry_script}
+</body>
+</html>
+"""
+
+    output_path.write_text(
+        document,
+        encoding="utf-8",
+    )
+
+    print(f"HTML-галерея: {output_path}")
     return output_path
