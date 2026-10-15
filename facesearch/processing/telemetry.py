@@ -713,7 +713,7 @@ class AdaptiveWorkerController:
         )
         return (
             f"{mode_text} • "
-            f"{float(report['speed_ema']):.2f} изобр/с • "
+            f"{float(report['speed_ema']):.2f} ф/с • "
             f"CPU {float(report['cpu']):.0f}% • "
             f"GPU {gpu_text} • VRAM {vram_text} • "
             f"RAM {float(report['ram']):.0f}% • "
