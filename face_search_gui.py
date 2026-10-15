@@ -6084,6 +6084,13 @@ class FaceSearchGUI:
                             error_detail = f"{type(error).__name__}: {error_message}"
                             if not error_message:
                                 error_detail += " (исключение без текстового сообщения)"
+                            # Ошибки не должны теряться, когда следующее обновление
+                            # прогресса меняет строку состояния GUI.
+                            print(f"[SCAN ERROR] {result_path}: {error_detail}")
+                            if isinstance(error, BaseException) and error.__traceback__ is not None:
+                                traceback.print_exception(
+                                    type(error), error, error.__traceback__
+                                )
                             self.events.put((
                                 "scan_error",
                                 str(result_path),
