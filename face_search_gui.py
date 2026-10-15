@@ -5677,8 +5677,34 @@ class FaceSearchGUI:
 
         auto_workers = bool(self.auto_workers_var.get())
 
+        # Профиль среды определяем до запуска: это влияет только на стартовое
+        # число потоков. После запуска AUTO продолжает подстраиваться по telemetry.
+        selected_profile_name = str(self.db_profile_var.get() or self.connected_db_name or "")
+        scan_profile = next(
+            (
+                profile for profile in getattr(self, "db_profiles", [])
+                if str(profile.get("name") or "") == selected_profile_name
+            ),
+            None,
+        )
+        scan_profile = scan_profile or {}
+        scan_db_type = str(scan_profile.get("type") or DB_TYPE_SQLITE).lower()
+        scan_db_host = str(scan_profile.get("host") or "").strip().lower()
+        remote_db = (
+            scan_db_type != DB_TYPE_SQLITE
+            and scan_db_host not in {"", "localhost", "127.0.0.1", "::1"}
+        )
+        if scan_db_type == DB_TYPE_SQLITE:
+            sqlite_path = str(scan_profile.get("path") or "")
+            remote_db = sqlite_path.startswith(("\\\\", "//"))
+
         if auto_workers:
-            _auto_min, workers, _auto_max = _auto_worker_limits()
+            _auto_min, workers, _auto_max = _auto_worker_limits(
+                backend=str(self.backend_mode_var.get() or BACKEND_GPU),
+                input_paths=[self.selected_dir],
+                output_path=CROP_DIR,
+                remote_db=remote_db,
+            )
         else:
             try:
                 workers = int(self.local_workers_var.get())
@@ -5764,6 +5790,7 @@ class FaceSearchGUI:
                 auto_workers,
                 create_crop_files,
                 overwrite_existing_crops,
+                remote_db,
             ),
             daemon=True,
         ).start()
@@ -5778,6 +5805,7 @@ class FaceSearchGUI:
         auto_workers=False,
         create_crop_files=True,
         overwrite_existing_crops=False,
+        remote_db=False,
     ):
         """Высокопроизводительное HDD -> CPU -> единственная GPU model -> DB pipeline.
 
@@ -6005,6 +6033,7 @@ class FaceSearchGUI:
                     operation="scan",
                     input_paths=[directory],
                     output_path=CROP_DIR,
+                    remote_db=remote_db,
                 )
                 limiter = AdaptiveConcurrencyLimiter(controller.current_workers)
                 self.events.put((
