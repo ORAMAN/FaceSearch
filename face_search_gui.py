@@ -1237,18 +1237,45 @@ def _allocate_new_crop_path(conn: DatabaseConnection, image_id: int) -> Path:
 _IMPORT_PROFILE_LOCKS = tuple(threading.RLock() for _ in range(256))
 
 
-def _import_profile_lock_for_json(json_path: Path):
-    """Возвращает блокировку для url_source из JSON до начала DB-импорта."""
-    try:
-        metadata = json.loads(json_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+def _import_profile_lock_for_json(
+    json_path: Path, metadata: Any | None = None
+):
+    """Возвращает блокировку для url_source; использует уже прочитанный JSON."""
+    if metadata is None:
+        try:
+            metadata = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
     if not isinstance(metadata, dict):
         return None
     source_url = str(metadata.get("url_source") or "").strip()
     if not source_url:
         return None
     return _IMPORT_PROFILE_LOCKS[hash(source_url) % len(_IMPORT_PROFILE_LOCKS)]
+
+
+def _import_profile_metadata_key(metadata: dict[str, Any]) -> str:
+    """Сравнивает профильные метаданные без URL отдельной фотографии."""
+    profile_data = dict(metadata)
+    # url_image относится к конкретной записи images, а не к профилю.
+    # Если учитывать его, каждый файл альбома переписывает одну строку profiles.
+    profile_data.pop("url_image", None)
+    return json.dumps(
+        profile_data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _saved_import_profile_metadata_key(raw_json: Any) -> str | None:
+    try:
+        value = json.loads(str(raw_json or ""))
+    except Exception:
+        return None
+    if not isinstance(value, dict):
+        return None
+    return _import_profile_metadata_key(value)
 
 
 def _upsert_import_profile(conn: DatabaseConnection, metadata: dict[str, Any]) -> int:
@@ -1258,13 +1285,35 @@ def _upsert_import_profile(conn: DatabaseConnection, metadata: dict[str, Any]) -
     if not isinstance(info, dict):
         info = {}
 
+    bdate = str(info.get("БД")) if info.get("БД") is not None else None
+    city_title = str(info.get("Город")) if info.get("Город") is not None else None
+    status_text = str(info.get("Статус")) if info.get("Статус") is not None else None
+    raw_json = json.dumps(metadata, ensure_ascii=False)
+    profile_metadata_key = _import_profile_metadata_key(metadata)
+
     if source_url:
         row = conn.execute(
-            "SELECT id FROM profiles WHERE source = 'import' AND profile_url = ? LIMIT 1",
+            """SELECT id, first_name, bdate, city_title, status, raw_json
+               FROM profiles
+               WHERE source = 'import' AND profile_url = ? LIMIT 1""",
             (source_url,),
         ).fetchone()
         if row:
             profile_id = int(row[0])
+            # На каждый url_image в альбоме приходится своя строка images.
+            # Не обновляем одну и ту же profiles при обработке каждого кадра,
+            # если данные профиля не изменились: это устраняет лишние round-trip
+            # к удалённому MySQL и снижает конфликты параллельной записи (1020).
+            profile_unchanged = (
+                str(row[1] or "") == name
+                and row[2] == bdate
+                and row[3] == city_title
+                and row[4] == status_text
+                and _saved_import_profile_metadata_key(row[5]) == profile_metadata_key
+            )
+            if profile_unchanged:
+                return profile_id
+
             conn.execute(
                 """
                 UPDATE profiles
@@ -1275,10 +1324,10 @@ def _upsert_import_profile(conn: DatabaseConnection, metadata: dict[str, Any]) -
                 """,
                 (
                     name,
-                    str(info.get("БД")) if info.get("БД") is not None else None,
-                    str(info.get("Город")) if info.get("Город") is not None else None,
-                    str(info.get("Статус")) if info.get("Статус") is not None else None,
-                    json.dumps(metadata, ensure_ascii=False),
+                    bdate,
+                    city_title,
+                    status_text,
+                    raw_json,
                     time.strftime("%Y-%m-%d %H:%M:%S"),
                     profile_id,
                 ),
@@ -1306,26 +1355,37 @@ def _upsert_import_profile(conn: DatabaseConnection, metadata: dict[str, Any]) -
         (
             "import",
             name,
-            str(info.get("БД")) if info.get("БД") is not None else None,
+            bdate,
             str(info.get("Страна")) if info.get("Страна") is not None else None,
-            str(info.get("Статус")) if info.get("Статус") is not None else None,
-            str(info.get("Город")) if info.get("Город") is not None else None,
+            status_text,
+            city_title,
             source_url,
-            json.dumps(metadata, ensure_ascii=False),
+            raw_json,
             time.strftime("%Y-%m-%d %H:%M:%S"),
         ),
     )
     return int(cur.lastrowid)
 
 
-# Один общий объект InsightFace используется несколькими worker-потоками.
-# CUDA/cuDNN в некоторых сборках ONNX Runtime нестабилен при одновременных
-# вызовах, поэтому inference сериализован. При runtime-сбое CUDA автоматически
-# создаём CPU-модель и используем её для следующих изображений, не теряя задачи.
-_FACE_INFERENCE_SEMAPHORE = threading.BoundedSemaphore(value=1)
+# Каждый объект FaceAnalysis/ONNX Runtime защищается собственной блокировкой.
+# Один session не вызывается одновременно из нескольких worker-ов, но разные
+# GPU-сессии могут обрабатывать изображения параллельно. Ранее общий semaphore
+# сериализовал ВСЕ inference и сводил на нет пул из нескольких GPU-моделей.
+_FACE_INFERENCE_LOCKS: dict[int, threading.RLock] = {}
+_FACE_INFERENCE_LOCKS_GUARD = threading.Lock()
 _FACE_FALLBACK_LOCK = threading.RLock()
 _FACE_CPU_FALLBACK_APP = None
 _FACE_GPU_RUNTIME_DISABLED = False
+
+
+def _face_inference_lock(app):
+    key = id(app)
+    with _FACE_INFERENCE_LOCKS_GUARD:
+        lock = _FACE_INFERENCE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _FACE_INFERENCE_LOCKS[key] = lock
+        return lock
 
 
 def _get_cpu_fallback_app():
@@ -1338,35 +1398,43 @@ def _get_cpu_fallback_app():
 
 
 def _safe_face_app_get(app: FaceAnalysis, image: np.ndarray, *, stage: str):
-    """Безопасный inference: при сбое GPU повторяет кадр на CPU."""
+    """Безопасный inference; при сбое GPU повторяет кадр на CPU.
+
+    Вызовы одной ONNX-сессии сериализованы, но независимые сессии из пула
+    работают параллельно. Это повышает throughput, не создавая гонок внутри
+    одного FaceAnalysis.
+    """
     global _FACE_GPU_RUNTIME_DISABLED
-    with _FACE_INFERENCE_SEMAPHORE:
-        active_app = app
-        if _FACE_GPU_RUNTIME_DISABLED and face_app_backend(app) == BACKEND_GPU:
-            try:
-                active_app = _get_cpu_fallback_app()
-            except Exception as fallback_exc:
-                print(f"[FACE INFERENCE] Не удалось создать CPU fallback: {fallback_exc}")
-                return None
+    active_app = app
+    if _FACE_GPU_RUNTIME_DISABLED and face_app_backend(app) == BACKEND_GPU:
         try:
-            return active_app.get(image)
-        except Exception as exc:
-            text = str(exc).replace("\n", " ")
-            if len(text) > 500:
-                text = text[:497] + "..."
-            is_gpu = face_app_backend(active_app) == BACKEND_GPU
-            if is_gpu:
-                print(f"[FACE INFERENCE] Ошибка GPU на этапе {stage}; повтор на CPU: {text}")
-                try:
-                    _FACE_GPU_RUNTIME_DISABLED = True
-                    cpu_app = _get_cpu_fallback_app()
-                    return cpu_app.get(image)
-                except Exception as fallback_exc:
-                    fallback_text = str(fallback_exc).replace("\n", " ")[:500]
-                    print(f"[FACE INFERENCE] Ошибка CPU fallback ({stage}): {fallback_text}")
-            else:
-                print(f"[FACE INFERENCE] Пропуск изображения: ошибка {stage}: {text}")
+            active_app = _get_cpu_fallback_app()
+        except Exception as fallback_exc:
+            print(f"[FACE INFERENCE] Не удалось создать CPU fallback: {fallback_exc}")
             return None
+
+    try:
+        with _face_inference_lock(active_app):
+            return active_app.get(image)
+    except Exception as exc:
+        text = str(exc).replace("\n", " ")
+        if len(text) > 500:
+            text = text[:497] + "..."
+        is_gpu = face_app_backend(active_app) == BACKEND_GPU
+        if is_gpu:
+            print(f"[FACE INFERENCE] Ошибка GPU на этапе {stage}; повтор на CPU: {text}")
+            try:
+                with _FACE_FALLBACK_LOCK:
+                    _FACE_GPU_RUNTIME_DISABLED = True
+                cpu_app = _get_cpu_fallback_app()
+                with _face_inference_lock(cpu_app):
+                    return cpu_app.get(image)
+            except Exception as fallback_exc:
+                fallback_text = str(fallback_exc).replace("\n", " ")[:500]
+                print(f"[FACE INFERENCE] Ошибка CPU fallback ({stage}): {fallback_text}")
+        else:
+            print(f"[FACE INFERENCE] Пропуск изображения: ошибка {stage}: {text}")
+        return None
 
 
 def _detect_faces_with_padding(
@@ -1777,18 +1845,88 @@ def import_image_bundle(
     delete_source: bool = True,
     create_crop_files: bool = True,
     overwrite_existing_crops: bool = False,
+    metadata: Any | None = None,
 ) -> dict[str, int | bool | str]:
 
     delete_source = bool(delete_source)
+    create_crop_files = bool(create_crop_files)
     overwrite_existing_crops = bool(overwrite_existing_crops)
 
-    try:
-        metadata = json.loads(json_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise RuntimeError(f"Ошибка JSON {json_path.name}: {e}") from e
+    if metadata is None:
+        try:
+            metadata = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            raise RuntimeError(f"Ошибка JSON {json_path.name}: {e}") from e
 
     if not isinstance(metadata, dict):
         raise RuntimeError(f"JSON {json_path.name} должен содержать объект")
+
+    source_url = str(metadata.get("url_source") or "").strip() or None
+    metadata_image_url = str(metadata.get("url_image") or "").strip() or None
+    fallback_image_url = ""
+    try:
+        fallback_image_url = image_path.resolve().as_uri()
+    except (OSError, ValueError):
+        fallback_image_url = str(image_path.resolve())
+
+    # Повторное сканирование уже импортированных изображений не должно заново
+    # загружать картинку и запускать InsightFace, если исходник уже представлен
+    # в БД и все его CROP на месте. Это особенно важно для удалённого MySQL.
+    pre_profile_id = None
+    preexisting_source_rows: list[tuple[int, str]] = []
+    preflight_read_started = bool(source_url and not overwrite_existing_crops)
+    if preflight_read_started:
+        profile_row = conn.execute(
+            "SELECT id FROM profiles WHERE source = 'import' AND profile_url = ? LIMIT 1",
+            (source_url,),
+        ).fetchone()
+        if profile_row:
+            pre_profile_id = int(profile_row[0])
+            preexisting_source_rows = _find_existing_source_crop_rows(
+                conn,
+                source_type="import",
+                source_url=source_url,
+                profile_id=pre_profile_id,
+                url_image=metadata_image_url,
+                fallback_image_url=fallback_image_url,
+            )
+
+            if preexisting_source_rows:
+                missing_rows = []
+                if create_crop_files:
+                    missing_rows = [
+                        (image_id, stored_path)
+                        for image_id, stored_path in preexisting_source_rows
+                        if not _resolve_db_storage_path(stored_path).is_file()
+                    ]
+
+                if not create_crop_files or not missing_rows:
+                    # Обновляем метаданные профиля, как и раньше, но пропускаем
+                    # повторное чтение изображения, inference и проверку SHA crop.
+                    _upsert_import_profile(conn, metadata)
+                    conn.commit()
+                    deleted = (
+                        _delete_processed_source_files(image_path, json_path)
+                        if delete_source else False
+                    )
+                    return {
+                        "faces": 0,
+                        "deleted": deleted,
+                        "message": "метаданные уже есть в БД",
+                        "updated": 0,
+                        "added": 0,
+                        "removed": 0,
+                        "restored": 0,
+                    }
+
+    # Завершаем транзакцию чтения до длительной загрузки/распознавания кадра.
+    # Для удалённого MySQL это не позволяет держать старый read snapshot всё
+    # время inference и снижает вероятность конфликтов с параллельными UPDATE.
+    if preflight_read_started:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
 
     image = load_image(image_path)
     if image is None:
@@ -1803,13 +1941,7 @@ def import_image_bundle(
         return {"faces": 0, "deleted": deleted, "message": "лицо не найдено"}
 
     profile_id = _upsert_import_profile(conn, metadata)
-    source_url = str(metadata.get("url_source") or "").strip() or None
-    metadata_image_url = str(metadata.get("url_image") or "").strip() or None
     image_url = metadata_image_url
-    try:
-        fallback_image_url = image_path.resolve().as_uri()
-    except (OSError, ValueError):
-        fallback_image_url = str(image_path.resolve())
     if not image_url and not create_crop_files:
         # Для последующего восстановления сохраняем локальный исходник как
         # file:// URL, не затирая source_url (ссылка на профиль/страницу).
@@ -1821,14 +1953,17 @@ def import_image_bundle(
     created = 0
     created_files: list[Path] = []
     crop_file_backups: dict[Path, bytes] = {}
-    existing_source_rows = _find_existing_source_crop_rows(
-        conn,
-        source_type="import",
-        source_url=source_url,
-        profile_id=profile_id,
-        url_image=metadata_image_url,
-        fallback_image_url=fallback_image_url,
-    )
+    if pre_profile_id == profile_id:
+        existing_source_rows = preexisting_source_rows
+    else:
+        existing_source_rows = _find_existing_source_crop_rows(
+            conn,
+            source_type="import",
+            source_url=source_url,
+            profile_id=profile_id,
+            url_image=metadata_image_url,
+            fallback_image_url=fallback_image_url,
+        )
     restored_missing_crops = 0
     if create_crop_files and not overwrite_existing_crops and existing_source_rows:
         restored_missing_crops = _restore_missing_source_crops(
@@ -6192,7 +6327,15 @@ class FaceSearchGUI:
                         json_path = path.with_suffix(".json")
 
                         if use_json_metadata and json_path.is_file():
-                            profile_lock = _import_profile_lock_for_json(json_path)
+                            try:
+                                metadata = json.loads(json_path.read_text(encoding="utf-8"))
+                            except Exception:
+                                # import_image_bundle сформирует штатную ошибку JSON;
+                                # здесь не скрываем детали парсинга.
+                                metadata = None
+                            profile_lock = _import_profile_lock_for_json(
+                                json_path, metadata=metadata
+                            )
                             if profile_lock is None:
                                 result = import_image_bundle(
                                     conn,
@@ -6202,10 +6345,11 @@ class FaceSearchGUI:
                                     delete_source=delete_processed,
                                     create_crop_files=create_crop_files,
                                     overwrite_existing_crops=overwrite_existing_crops,
+                                    metadata=metadata,
                                 )
                             else:
                                 # Удерживаем блокировку до завершения транзакции импорта,
-                                # а не только вокруг UPDATE profiles.
+                                # чтобы одинаковый url_source не создавался одновременно.
                                 with profile_lock:
                                     try:
                                         result = import_image_bundle(
@@ -6216,6 +6360,7 @@ class FaceSearchGUI:
                                             delete_source=delete_processed,
                                             create_crop_files=create_crop_files,
                                             overwrite_existing_crops=overwrite_existing_crops,
+                                            metadata=metadata,
                                         )
                                     except Exception:
                                         # Откатываем транзакцию до освобождения lock:
