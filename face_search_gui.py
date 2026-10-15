@@ -7892,7 +7892,7 @@ def _migrate_crop_paths(conn: DatabaseConnection) -> int:
            OR i.path LIKE ?
            OR i.path LIKE ?
         """,
-        (r"%:\%", "/%", "file:%", r"\\%"),
+        (r"%:\\%", "/%", "file:%", r"\\\\%"),
     ).fetchall()
 
     changed = 0
@@ -7928,6 +7928,12 @@ def _migrate_crop_paths(conn: DatabaseConnection) -> int:
 
     if changed:
         conn.commit()
+    else:
+        # SELECT starts a transaction in psycopg even when no path needs changing.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
     return changed
 
 
