@@ -88,65 +88,16 @@ def _site_display_data(source_url: str | None) -> tuple[str, str, str]:
         return value, value, ""
 
 
-def _filename_candidate(value: Any) -> str:
-    """Возвращает короткое имя файла или пустую строку для технического CROP-ID."""
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-
+def _display_face_id(result: dict[str, Any]) -> str:
+    """Возвращает ID записи лица из БД в фиксированном формате #00000000."""
     try:
-        parsed = urlparse(raw)
-        if parsed.scheme.lower() in {"http", "https", "file"}:
-            value_path = unquote(parsed.path or "")
-        else:
-            value_path = unquote(raw)
-        basename = value_path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].strip()
-    except Exception:
-        basename = raw.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].strip()
-
-    if not basename or basename in {".", ".."}:
-        return ""
-
-    suffix = Path(basename).suffix.lower()
-    stem = Path(basename).stem
-    image_suffixes = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
-    # Числовые имена вида 12345.jpg — технические имена сохранённого CROP.
-    if suffix in image_suffixes and stem.isdigit():
-        return ""
-    return basename
-
-
-def _display_filename(result: dict[str, Any], rank: Any, resolved_path: Path, is_import: bool) -> str:
-    """Готовит непустую и единообразную подпись под каждым результатом."""
-    candidates: list[Any] = [result.get("filename")]
-
-    # У импортированных записей реальное имя изображения часто есть только в URL.
-    raw_json = result.get("raw_json") or ""
-    remote_image_url = str(result.get("url_image") or "").strip()
-    if is_import and not remote_image_url:
-        try:
-            metadata = json.loads(raw_json)
-            if isinstance(metadata, dict):
-                remote_image_url = str(metadata.get("url_image") or "").strip()
-        except (TypeError, ValueError, json.JSONDecodeError):
-            pass
-    if remote_image_url:
-        candidates.append(remote_image_url)
-
-    # Для локальных исходников используем исходный путь, но не ссылку на страницу профиля.
-    if not is_import:
-        candidates.extend((result.get("source_url"), resolved_path.name))
-
-    for candidate in candidates:
-        label = _filename_candidate(candidate)
-        if label:
-            return label
-
-    try:
-        rank_label = int(rank)
+        face_id = int(result.get("face_id"))
     except (TypeError, ValueError):
-        rank_label = 0
-    return f"Изображение №{rank_label}" if rank_label > 0 else "Изображение без имени"
+        return "#ID неизвестен"
+    if face_id < 0:
+        return "#ID неизвестен"
+    # Ширина 11 цифр, включая ведущие нули. Более крупные ID не обрезаются.
+    return f"#{face_id:08d}"
 
 
 def generate_html_gallery(
@@ -206,18 +157,12 @@ def generate_html_gallery(
         is_local = source_type == "local"
         is_import = source_type == "import"
 
-        filename_raw = str(result.get("filename") or "").strip()
-        filename = html.escape(filename_raw, quote=True)
-        display_filename_raw = _display_filename(
-            result, result.get("rank"), path, is_import,
-        )
-        display_filename = html.escape(display_filename_raw, quote=True)
-        # Подпись используется и как alt-текст изображения.
-        filename = display_filename
-        # Строка подписи присутствует у каждой карточки: если исходное имя
-        # неизвестно или в БД хранится только числовое имя CROP, используем номер результата.
+        # Под изображением показываем ID именно записи faces в БД,
+        # а не имя файла, ID CROP или позицию результата в ранжированном списке.
+        display_face_id = html.escape(_display_face_id(result), quote=True)
+        filename = display_face_id  # также используется как alt-текст изображения
         filename_html = (
-            f'<div class="filename" title="{display_filename}">{display_filename}</div>'
+            f'<div class="filename" title="{display_face_id}">{display_face_id}</div>'
         )
 
         # URL строится из относительного images.path. Абсолютные старые пути
