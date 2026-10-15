@@ -4140,7 +4140,8 @@ class FaceSearchGUI:
         win = tk.Toplevel(self.root)
         win.configure(background=getattr(self, "theme_colors", {}).get("window", "#f0f0f0"))
         win.title("Новая база данных" if is_new else "Настройка базы данных")
-        win.geometry("800x550")
+        # Размер диалога будет рассчитан по фактической высоте полей ниже,
+        # чтобы не оставлять большое пустое пространство под кнопками.
         win.transient(self.root)
         win.grab_set()
 
@@ -4373,6 +4374,24 @@ class FaceSearchGUI:
         ttk.Button(buttons, text="Отмена", command=win.destroy).pack(side="left", padx=4)
 
         frame.columnconfigure(1, weight=1)
+
+        # После создания всех строк подгоняем высоту окна под содержимое.
+        # Небольшой запас оставляет аккуратный отступ снизу и учитывает DPI.
+        win.update_idletasks()
+        requested_height = frame.winfo_reqheight() + 8
+        screen_height = win.winfo_screenheight()
+        available_height = max(420, screen_height - 100)
+        dialog_height = min(max(requested_height, 420), min(520, available_height))
+        win.geometry(f"800x{dialog_height}")
+
+        # Центрируем диалог относительно главного окна.
+        try:
+            self.root.update_idletasks()
+            x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - 800) // 2)
+            y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - dialog_height) // 2)
+            win.geometry(f"800x{dialog_height}+{x}+{y}")
+        except tk.TclError:
+            pass
 
     def new_database_profile(self):
         if getattr(self, "startup_db_pending", False) and not getattr(self, "startup_db_failed", False):
@@ -4838,6 +4857,13 @@ class FaceSearchGUI:
             command=self.stop_scan, state="disabled",
         )
         self.stop_scan_btn.pack(side="left")
+        # Кнопка HTML остаётся в постоянно видимой верхней панели действий,
+        # а не внутри ограниченной по высоте панели поиска.
+        self.open_results_btn = ttk.Button(
+            action_row, text="↗  Открыть последний HTML", command=self.open_last_html,
+            state="normal" if os.path.exists(os.path.join(os.getcwd(), "face_search_results_gui.html")) else "disabled",
+        )
+        self.open_results_btn.pack(side="right", padx=(10, 0))
 
         self.scan_control_status_var = tk.StringVar(value="")
         self.scan_control_status_label = ttk.Label(
@@ -4858,11 +4884,30 @@ class FaceSearchGUI:
         # --------------------------------------------------------
         # Профиль базы данных: выбор/подключение отдельно от управления профилями
         # --------------------------------------------------------
-        db_frame = ttk.LabelFrame(
-            self.page, text="База данных", padding=(10, 8),
-        )
-        db_frame.pack(fill="x", pady=(0, 8))
+        db_groups_row = ttk.Frame(self.page, style="App.TFrame")
+        db_groups_row.pack(fill="x", pady=(0, 8))
+        db_groups_row.columnconfigure(0, weight=3, uniform="db_top_groups")
+        db_groups_row.columnconfigure(1, weight=2, uniform="db_top_groups")
 
+        db_frame = ttk.LabelFrame(
+            db_groups_row, text="База данных", padding=(10, 8),
+        )
+        db_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+
+        # Статистика размещена рядом с настройками БД, а не внизу панели
+        # предпросмотра, где она могла обрезаться при небольшой высоте окна.
+        db_stats_frame = ttk.LabelFrame(
+            db_groups_row, text="Статистика БД", padding=(10, 8),
+        )
+        db_stats_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        ttk.Label(
+            db_stats_frame, textvariable=self.stats_var, justify="left", anchor="nw",
+            wraplength=520,
+        ).pack(fill="both", expand=True, anchor="nw")
+
+        # Одна строка: выбор и подключение слева, управление профилями справа.
+        # Вертикальный разделитель и дополнительный отступ визуально отделяют
+        # опасные/административные действия от обычного подключения.
         db_select_row = ttk.Frame(db_frame)
         db_select_row.pack(fill="x")
         ttk.Label(db_select_row, text="Активный профиль:", style="Muted.TLabel").pack(side="left", padx=(0, 8))
@@ -4878,24 +4923,25 @@ class FaceSearchGUI:
         self.refresh_db_btn = ttk.Button(
             db_select_row, text="↻  Обновить", command=self.refresh_database_info,
         )
-        self.refresh_db_btn.pack(side="left")
+        self.refresh_db_btn.pack(side="left", padx=(0, 0))
 
-        db_manage_row = ttk.Frame(db_frame, padding=(0, 8, 0, 2))
-        db_manage_row.pack(fill="x")
+        ttk.Separator(db_select_row, orient="vertical").pack(
+            side="left", fill="y", padx=(14, 12), pady=3,
+        )
         self.new_db_btn = ttk.Button(
-            db_manage_row, text="＋ Новая БД", command=self.new_database_profile,
+            db_select_row, text="＋ Новая БД", command=self.new_database_profile,
         )
         self.new_db_btn.pack(side="left", padx=(0, 6))
         self.edit_db_btn = ttk.Button(
-            db_manage_row, text="Настроить", command=self.edit_database_profile,
+            db_select_row, text="Настроить", command=self.edit_database_profile,
         )
         self.edit_db_btn.pack(side="left", padx=(0, 6))
         self.delete_db_btn = ttk.Button(
-            db_manage_row, text="Удалить профиль", command=self.delete_database_profile,
+            db_select_row, text="Удалить профиль", command=self.delete_database_profile,
         )
         self.delete_db_btn.pack(side="left", padx=(0, 6))
         self.migrate_db_btn = ttk.Button(
-            db_manage_row, text="⇄  Миграция БД", command=self.open_database_migration,
+            db_select_row, text="⇄  Миграция БД", command=self.open_database_migration,
         )
         self.migrate_db_btn.pack(side="left")
 
@@ -4980,7 +5026,36 @@ class FaceSearchGUI:
         self.overwrite_existing_crops_check.grid(row=1, column=1, sticky="w", padx=(0, 10), pady=2)
 
         # --------------------------------------------------------
-        # Область поиска и просмотра
+        # Нижняя полоса состояния закреплена у нижнего края окна.
+        # Её нужно упаковать ДО растягиваемой области поиска/просмотра,
+        # иначе Panedwindow может занять весь остаток и вытеснить футер.
+        # --------------------------------------------------------
+        status_frame = ttk.Frame(self.page, style="Header.TFrame", padding=(8, 3))
+        status_frame.pack(side="bottom", fill="x")
+        self.status_label = ttk.Label(
+            status_frame, textvariable=self.status_var, style="Status.TLabel",
+            anchor="w", justify="left", wraplength=1050,
+        )
+        self.status_label.pack(fill="x", expand=True)
+
+        hardware_status_frame = ttk.Frame(status_frame, style="Header.TFrame")
+        hardware_status_frame.pack(fill="x")
+        self.cpu_status_label = ttk.Label(
+            hardware_status_frame, textvariable=self.cpu_status_var,
+            style="Status.TLabel", anchor="w",
+        )
+        self.cpu_status_label.pack(side="left", padx=(0, 6))
+        self.gpu_status_label = ttk.Label(
+            hardware_status_frame, textvariable=self.gpu_status_var,
+            style="Status.TLabel", anchor="w",
+        )
+        self.gpu_status_label.pack(side="left", padx=(0, 6))
+
+        self.progress = ttk.Progressbar(self.page, mode="determinate", style="TProgressbar")
+        self.progress.pack(side="bottom", fill="x", pady=(0, 5))
+
+        # --------------------------------------------------------
+        # Область поиска и просмотра занимает только пространство НАД футером.
         # --------------------------------------------------------
         self.paned = ttk.Panedwindow(self.page, orient="horizontal")
         self.paned.pack(fill="both", expand=True, pady=(4, 8))
@@ -4989,68 +5064,74 @@ class FaceSearchGUI:
         self.paned.add(left, weight=1)
         self.paned.add(right, weight=2)
 
-        ttk.Label(left, text="Поиск по лицу", style="Section.TLabel").pack(anchor="w")
-        ttk.Label(
-            left, text="Выберите фотографию и лицо для поиска похожих изображений.",
-            style="SurfaceMuted.TLabel", wraplength=320, justify="left",
-        ).pack(anchor="w", pady=(2, 8))
-        self.choose_query_btn = ttk.Button(
-            left, text="▧  Выбрать фотографию", style="Primary.TButton", command=self.choose_query,
+        # Элементы управления поиском закреплены внизу левой панели, чтобы
+        # не обрезаться при небольшой высоте окна. Сначала упаковываем нижние
+        # элементы: Tkinter резервирует для них место до растягиваемого списка.
+        self.search_btn = ttk.Button(
+            left, text="⌕  Искать выбранное лицо", style="Primary.TButton", command=self.start_search,
         )
-        self.choose_query_btn.pack(fill="x", pady=(0, 8))
-
-        saved_query = str(self.gui_settings.get("query_image") or "").strip()
-        self.query_var = tk.StringVar(value=saved_query or "Файл не выбран")
-        self.query_path_entry = ttk.Entry(
-            left, textvariable=self.query_var, state="readonly", width=42,
-        )
-        self.query_path_entry.pack(fill="x", pady=(0, 10))
-        self.root.after_idle(self._show_query_path_tail)
-
-        ttk.Label(left, text="Найденные лица", style="Section.TLabel").pack(anchor="w")
-        self.face_list = tk.Listbox(
-            left, height=7, exportselection=False, activestyle="none",
-            selectmode="browse", relief="flat", borderwidth=0, highlightthickness=1,
-        )
-        self.face_list.pack(fill="x", pady=(5, 10))
-        self.face_list.bind("<<ListboxSelect>>", self.on_face_list_select)
+        self.search_btn.pack(side="bottom", fill="x", pady=(6, 0))
 
         controls = ttk.Frame(left, style="Surface.TFrame")
-        controls.pack(fill="x", pady=(0, 10))
-        ttk.Label(controls, text="Результатов:", style="SurfaceMuted.TLabel").pack(side="left")
+        controls.pack(side="bottom", fill="x", pady=(0, 8))
+        controls.columnconfigure(0, weight=1, uniform="search_controls")
+        controls.columnconfigure(1, weight=1, uniform="search_controls")
+
+        topk_control = ttk.Frame(controls, style="Surface.TFrame")
+        topk_control.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        ttk.Label(
+            topk_control, text="Количество результатов", style="SurfaceMuted.TLabel",
+        ).pack(anchor="w", pady=(0, 3))
         self.topk_var = tk.IntVar(
             value=max(1, min(500, int(self.gui_settings.get("top_k", DEFAULT_TOP_K))))
         )
         self.topk_spinbox = ttk.Spinbox(
-            controls, from_=1, to=500, textvariable=self.topk_var, width=6,
+            topk_control, from_=1, to=500, textvariable=self.topk_var, width=12,
         )
-        self.topk_spinbox.pack(side="left", padx=(5, 12))
-        ttk.Label(controls, text="Мин. сходство, %:", style="SurfaceMuted.TLabel").pack(side="left")
+        self.topk_spinbox.pack(fill="x")
+
+        similarity_control = ttk.Frame(controls, style="Surface.TFrame")
+        similarity_control.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        ttk.Label(
+            similarity_control, text="Минимальное сходство, %", style="SurfaceMuted.TLabel",
+        ).pack(anchor="w", pady=(0, 3))
         self.min_similarity_var = tk.DoubleVar(
             value=max(0.0, min(100.0, float(self.gui_settings.get("min_similarity", 43.0))))
         )
         self.min_similarity_spinbox = ttk.Spinbox(
-            controls, from_=0, to=100, increment=1,
-            textvariable=self.min_similarity_var, width=6,
+            similarity_control, from_=0, to=100, increment=1,
+            textvariable=self.min_similarity_var, width=12,
         )
-        self.min_similarity_spinbox.pack(side="left", padx=(5, 0))
+        self.min_similarity_spinbox.pack(fill="x")
 
-        self.search_btn = ttk.Button(
-            left, text="⌕  Искать выбранное лицо", style="Primary.TButton", command=self.start_search,
-        )
-        self.search_btn.pack(fill="x", pady=(0, 7))
-        self.open_results_btn = ttk.Button(
-            left, text="↗  Открыть последний HTML", command=self.open_last_html,
-            state="normal" if os.path.exists(os.path.join(os.getcwd(), "face_search_results_gui.html")) else "disabled",
-        )
-        self.open_results_btn.pack(fill="x")
-
-        ttk.Separator(left).pack(fill="x", pady=12)
-        ttk.Label(left, text="Статистика базы", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(left, text="Поиск по лицу", style="Section.TLabel").pack(anchor="w")
         ttk.Label(
-            left, textvariable=self.stats_var, justify="left", anchor="nw",
-            wraplength=370, font=("Consolas", 9),
-        ).pack(anchor="nw", fill="x", pady=(5, 0))
+            left, text="Выберите фотографию и лицо для поиска похожих изображений.",
+            style="SurfaceMuted.TLabel", wraplength=520, justify="left",
+        ).pack(anchor="w", pady=(2, 6))
+
+        query_row = ttk.Frame(left, style="Surface.TFrame")
+        query_row.pack(fill="x", pady=(0, 6))
+        self.choose_query_btn = ttk.Button(
+            query_row, text="▧  Выбрать фотографию", style="Primary.TButton", command=self.choose_query,
+        )
+        self.choose_query_btn.pack(side="left", padx=(0, 8))
+
+        saved_query = str(self.gui_settings.get("query_image") or "").strip()
+        self.query_var = tk.StringVar(value=saved_query or "Файл не выбран")
+        self.query_path_entry = ttk.Entry(
+            query_row, textvariable=self.query_var, state="readonly", width=42,
+        )
+        self.query_path_entry.pack(side="left", fill="x", expand=True)
+        self.root.after_idle(self._show_query_path_tail)
+
+        ttk.Label(left, text="Найденные лица", style="Section.TLabel").pack(anchor="w")
+        self.face_list = tk.Listbox(
+            left, height=3, exportselection=False, activestyle="none",
+            selectmode="browse", relief="flat", borderwidth=0, highlightthickness=1,
+        )
+        self.face_list.pack(fill="both", expand=True, pady=(4, 4))
+        self.face_list.bind("<<ListboxSelect>>", self.on_face_list_select)
 
         ttk.Label(right, text="Предпросмотр изображения", style="Section.TLabel").pack(anchor="w")
         ttk.Label(
@@ -5065,26 +5146,6 @@ class FaceSearchGUI:
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Button-1>", self.on_canvas_click)
         self.canvas.bind("<Configure>", self._redraw_preview)
-
-        # --------------------------------------------------------
-        # Нижняя полоса состояния
-        # --------------------------------------------------------
-        self.progress = ttk.Progressbar(self.page, mode="determinate", style="TProgressbar")
-        self.progress.pack(fill="x", pady=(0, 5))
-        status_frame = ttk.Frame(self.page, style="Header.TFrame", padding=(8, 3))
-        status_frame.pack(fill="x")
-        self.cpu_status_label = ttk.Label(
-            status_frame, textvariable=self.cpu_status_var, style="Status.TLabel", anchor="w",
-        )
-        self.cpu_status_label.pack(side="left", padx=(0, 6))
-        self.gpu_status_label = ttk.Label(
-            status_frame, textvariable=self.gpu_status_var, style="Status.TLabel", anchor="w",
-        )
-        self.gpu_status_label.pack(side="left", padx=(0, 6))
-        self.status_label = ttk.Label(
-            status_frame, textvariable=self.status_var, style="Status.TLabel", anchor="w",
-        )
-        self.status_label.pack(side="left", fill="x", expand=True)
 
         self._update_backend_ui()
 
