@@ -1194,6 +1194,42 @@ def _relative_crop_db_path(path: Path) -> str:
         return path.name
 
 
+def _allocate_new_crop_path(conn: DatabaseConnection, image_id: int) -> Path:
+    """Выбирает свободный относительный путь для новой CROP-записи.
+
+    После миграции БД images.id может отличаться от ID, зашитого в сохранённом
+    пути CROP: миграция сохраняет путь/файл без переименования. Поэтому нельзя
+    предполагать, что CROP_DIR/<bucket>/<new image_id>.jpg всегда свободен.
+    """
+    image_id = int(image_id)
+    bucket = ((image_id - 1) // 1000 + 1) * 1000
+    crop_dir = CROP_DIR / str(bucket)
+
+    # Обычно сохраняем компактную схему bucket/id.jpg. Если этот путь остался
+    # от записи, перенесённой из другой БД, выбираем уникальное альтернативное
+    # имя в том же каталоге и не затрагиваем существующий файл или DB-row.
+    for attempt in range(100):
+        if attempt == 0:
+            candidate = crop_dir / f"{image_id}.jpg"
+        else:
+            candidate = crop_dir / (
+                f"{image_id}_{threading.get_ident()}_{time.time_ns()}_{attempt}.jpg"
+            )
+
+        relative_path = _relative_crop_db_path(candidate)
+        existing = conn.execute(
+            "SELECT id FROM images WHERE path = ? LIMIT 1",
+            (relative_path,),
+        ).fetchone()
+        if existing is not None or candidate.exists():
+            continue
+        return candidate
+
+    raise RuntimeError(
+        f"Не удалось подобрать свободный путь CROP для image_id={image_id}"
+    )
+
+
 def _upsert_import_profile(conn: DatabaseConnection, metadata: dict[str, Any]) -> int:
     source_url = str(metadata.get("url_source") or "").strip() or None
     name = str(metadata.get("name") or "").strip()
@@ -1887,9 +1923,8 @@ def import_image_bundle(
                     ),
                 )
                 image_id = int(cur.lastrowid)
-                bucket = ((image_id - 1) // 1000 + 1) * 1000
-                crop_dir = CROP_DIR / str(bucket)
-                crop_path = crop_dir / f"{image_id}.jpg"
+                crop_path = _allocate_new_crop_path(conn, image_id)
+                crop_dir = crop_path.parent
                 conn.execute(
                     "UPDATE images SET path = ?, filename = ?, processed = 1 WHERE id = ?",
                     (_relative_crop_db_path(crop_path), crop_path.name, image_id),
@@ -2160,9 +2195,8 @@ def process_local_image(
                     ),
                 )
                 image_id = int(cur.lastrowid)
-                bucket = ((image_id - 1) // 1000 + 1) * 1000
-                crop_dir = CROP_DIR / str(bucket)
-                crop_path = crop_dir / f"{image_id}.jpg"
+                crop_path = _allocate_new_crop_path(conn, image_id)
+                crop_dir = crop_path.parent
                 conn.execute(
                     "UPDATE images SET path = ?, filename = ?, processed = 1 WHERE id = ?",
                     (_relative_crop_db_path(crop_path), crop_path.name, image_id),
