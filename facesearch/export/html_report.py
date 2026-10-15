@@ -650,6 +650,7 @@ h1 {{
 .face {{
     width: 100%;
     height: 270px;
+    padding: 4px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -661,6 +662,7 @@ h1 {{
     width: 100%;
     height: 100%;
     object-fit: contain;
+    border-radius: 3px;
 }}
 
 .no-image {{
