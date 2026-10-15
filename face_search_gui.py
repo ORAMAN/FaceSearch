@@ -4532,20 +4532,22 @@ class FaceSearchGUI:
     def _apply_theme(self):
         """Применяет согласованную светлую/тёмную палитру ко всему главному окну."""
         dark = self.theme_mode == "dark"
+        # Тёмная тема использует нейтральную графитовую палитру без синих акцентов.
+        # Светлая тема и семантический цвет опасных действий оставлены без изменений.
         colors = {
-            "window": "#141820" if dark else "#f3f3f3",
-            "surface": "#1d232d" if dark else "#ffffff",
-            "panel": "#252d39" if dark else "#e7e7e7",
-            "field": "#151a22" if dark else "#ffffff",
-            "foreground": "#e9edf4" if dark else "#202020",
-            "muted": "#a6b0c0" if dark else "#555555",
-            "border": "#354052" if dark else "#bdbdbd",
-            "button": "#293342" if dark else "#ffffff",
-            "button_active": "#36455a" if dark else "#e2e2e2",
-            "selection": "#245b91" if dark else "#cccccc",
-            "accent": "#3584f5" if dark else "#444444",
-            "accent_active": "#4a93fa" if dark else "#303030",
-            "canvas": "#151a22" if dark else "#e0e0e0",
+            "window": "#1c1c1c" if dark else "#f3f3f3",
+            "surface": "#242424" if dark else "#ffffff",
+            "panel": "#2c2c2c" if dark else "#e7e7e7",
+            "field": "#191919" if dark else "#ffffff",
+            "foreground": "#eeeeee" if dark else "#202020",
+            "muted": "#b0b0b0" if dark else "#555555",
+            "border": "#444444" if dark else "#bdbdbd",
+            "button": "#303030" if dark else "#ffffff",
+            "button_active": "#3d3d3d" if dark else "#e2e2e2",
+            "selection": "#555555" if dark else "#cccccc",
+            "accent": "#686868" if dark else "#444444",
+            "accent_active": "#7a7a7a" if dark else "#303030",
+            "canvas": "#202020" if dark else "#e0e0e0",
             "danger": "#a9333f" if dark else "#c43d4b",
         }
         self.theme_colors = colors
@@ -5058,7 +5060,7 @@ class FaceSearchGUI:
         canvas_frame = ttk.Frame(right, style="Surface.TFrame")
         canvas_frame.pack(fill="both", expand=True)
         self.canvas = tk.Canvas(
-            canvas_frame, background="#151a22", highlightthickness=0, cursor="crosshair",
+            canvas_frame, background="#202020", highlightthickness=0, cursor="crosshair",
         )
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Button-1>", self.on_canvas_click)
