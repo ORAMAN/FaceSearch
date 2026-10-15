@@ -74,7 +74,10 @@ def _detect_storage_types() -> dict[str, str]:
                 partitions = psutil.disk_partitions(all=True) if psutil is not None else []
                 for part in partitions:
                     device = str(part.device or "").rsplit("/", 1)[-1]
-                    device = re.sub(r"p?\\d+$", "", device)
+                    if device.startswith(("nvme", "mmcblk")):
+                        device = re.sub(r"p\d+$", "", device)
+                    else:
+                        device = re.sub(r"\d+$", "", device)
                     rotational = Path("/sys/block") / device / "queue" / "rotational"
                     if rotational.is_file():
                         value = rotational.read_text(encoding="ascii", errors="ignore").strip()
@@ -622,13 +625,13 @@ class AdaptiveWorkerController:
         self.input_is_network = bool(input_is_network)
         self.remote_db = bool(remote_db)
         self.auto_adjust = bool(auto_adjust)
-        min_w, start_w, max_w = _auto_worker_limits(
-            backend=self.backend,
-            input_paths=self.input_paths,
-            output_path=self.output_path,
-            remote_db=self.remote_db,
-        )
         if self.auto_adjust:
+            min_w, start_w, max_w = _auto_worker_limits(
+                backend=self.backend,
+                input_paths=self.input_paths,
+                output_path=self.output_path,
+                remote_db=self.remote_db,
+            )
             self.min_workers = min_w
             self.max_workers = max_w
             self.current_workers = max(
@@ -636,8 +639,8 @@ class AdaptiveWorkerController:
                 min(self.max_workers, int(initial_workers or start_w)),
             )
         else:
-            # В ручном режиме число worker-ов фиксировано; контроллер только
-            # измеряет скорость и нагрузку, не меняя заданное пользователем число.
+            # В ручном режиме не запускаем подбор профиля среды и не меняем
+            # число worker-ов: только снимаем telemetry с уже выбранной нагрузкой.
             fixed_workers = max(1, int(initial_workers or 1))
             self.min_workers = fixed_workers
             self.max_workers = fixed_workers
