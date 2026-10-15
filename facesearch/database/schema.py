@@ -243,26 +243,56 @@ def initialize_schema(
         ensure_columns(conn, "images", IMAGE_COLUMNS)
         backfill_import_image_urls(conn)
 
-    index_sql = [
-        ("idx_faces_image_id", "faces(image_id)"),
-        ("idx_images_profile_id", "images(profile_id)"),
-        ("idx_images_source_type", "images(source_type)"),
-        ("idx_profiles_vk_user_id", "profiles(vk_user_id)"),
-        ("idx_profiles_city", "profiles(city_title)"),
+    # Имена столбцов и таблиц в этом списке заданы самим приложением.
+    # Для MySQL CREATE INDEX IF NOT EXISTS не является переносимым синтаксисом:
+    # запрос завершался ошибкой, которая подавлялась обработчиком ниже, и
+    # индексы фактически не создавались. На больших удалённых БД это превращало
+    # проверки дубликатов/профиля в полные сканирования таблиц.
+    index_definitions = [
+        ("idx_faces_image_id", "faces", "image_id"),
+        ("idx_images_profile_id", "images", "profile_id"),
+        ("idx_images_source_type", "images", "source_type"),
+        ("idx_profiles_vk_user_id", "profiles", "vk_user_id"),
+        ("idx_profiles_city", "profiles", "city_title"),
     ]
-    for name, columns in index_sql:
+
+    if backend == DB_TYPE_MYSQL:
+        # Хеш crop участвует в запросе на каждый найденный face.
+        index_definitions.extend([
+            ("idx_images_sha256", "images", "sha256(64)"),
+            # Для потенциально LONGTEXT/VARCHAR(700) URL используем индексный
+            # префикс. MySQL затем проверяет полное равенство по строке-кандидату.
+            ("idx_profiles_source_profile_url", "profiles", "source(16), profile_url(150)"),
+            ("idx_images_local_source_url", "images", "source_type(16), source_url(150)"),
+            ("idx_images_import_profile_url", "images", "source_type(16), profile_id, url_image(150)"),
+            ("idx_images_import_profile_source", "images", "source_type(16), profile_id, source_url(150)"),
+        ])
+
+    for name, table, columns in index_definitions:
         try:
             if backend == DB_TYPE_MSSQL:
-                table = columns.split("(")[0]
                 exists = conn.execute(
                     "SELECT 1 FROM sys.indexes "
                     "WHERE name = ? AND object_id = OBJECT_ID(?)",
                     (name, table),
                 ).fetchone()
                 if not exists:
-                    conn.execute(f"CREATE INDEX {name} ON {columns}")
+                    conn.execute(f"CREATE INDEX {name} ON {table} ({columns})")
+            elif backend == DB_TYPE_MYSQL:
+                exists = conn.execute(
+                    "SELECT 1 FROM information_schema.statistics "
+                    "WHERE table_schema = DATABASE() "
+                    "AND table_name = ? AND index_name = ? LIMIT 1",
+                    (table, name),
+                ).fetchone()
+                if not exists:
+                    conn.execute(
+                        f"CREATE INDEX `{name}` ON `{table}` ({columns})"
+                    )
             else:
-                conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {columns}")
+                conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({columns})"
+                )
         except Exception as exc:
             print(f"Предупреждение создания индекса {name}: {exc}")
 
