@@ -331,7 +331,7 @@ def _target_file_for_path(raw_path: str, target_profile: dict, core) -> Path | N
 
 def migrate_database_data(core, source_profile: dict, target_profile: dict, *, create_target: bool,
                           rebuild_index: bool, log_callback=None) -> dict:
-    """Мигрирует profiles/images/faces порциями; повторный запуск безопасно пропускает дубли."""
+    """Копирует записи profiles/images/faces. CROP-файлы не копируются, images.path сохраняется без изменений."""
     def log(message):
         if log_callback:
             log_callback(str(message))
@@ -368,7 +368,6 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
         "profiles_inserted": 0, "profiles_matched": 0,
         "images_inserted": 0, "images_deduplicated": 0,
         "image_path_conflicts": 0, "faces_inserted": 0, "faces_skipped": 0,
-        "crop_files_copied": 0, "crop_files_missing": 0,
         "index_built": False,
     }
     created_profile = False
@@ -404,9 +403,6 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
             raise RuntimeError("В таблице faces отсутствуют обязательные столбцы embedding/координат.")
 
         src_image_columns = sorted(source_image_cols)
-        target_crop = Path(str(target_profile.get("crop_path") or core.CROP_DIR)).expanduser().resolve()
-        target_crop.mkdir(parents=True, exist_ok=True)
-        source_stamp = hashlib.sha1(json.dumps(_db_key(source_profile, core), ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
 
         temp_file = tempfile.NamedTemporaryFile(prefix="face_migration_", suffix=".sqlite", delete=False)
         mapping_path = Path(temp_file.name)
@@ -438,25 +434,27 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
                 for row in batch_rows:
                     src_id = int(row["id"])
                     raw_path = str(row.get("path") or "")
-                    image_file = _source_file_for_image(raw_path, source_profile, core)
-                    sha = str(row.get("sha256") or "").strip()
-                    if not sha and image_file:
-                        sha = _hash_file(image_file) or ""
-                    row["_effective_sha"] = sha
-                    row["_source_file"] = str(image_file) if image_file else ""
-                    hash_piece = sha[:14] if sha else hashlib.sha1(raw_path.encode("utf-8", "replace")).hexdigest()[:14]
-                    row["_migration_path"] = f"migration/{source_stamp}_{src_id}_{hash_piece}.jpg"
-                    generated_paths.append(row["_migration_path"])
+                    # Сохраняем исходный относительный путь как есть. Не вычисляем
+                    # физический путь к CROP и не добавляем служебный префикс migration/.
+                    row["_effective_sha"] = str(row.get("sha256") or "").strip()
+                    row["_migration_path"] = raw_path
+                    generated_paths.append(raw_path)
                     if raw_path:
                         raw_paths.append(raw_path)
-                    if sha:
-                        hash_values.append(sha)
+                    if row["_effective_sha"]:
+                        hash_values.append(row["_effective_sha"])
 
-                found_paths = _get_target_images_by_values(dst, target_type, dest_image_cols, "path", generated_paths)
-                by_migration_path = {str(r.get("path")): r for r in found_paths}
-                found_hashes = _get_hash_candidates(
-                    dst, target_type, dest_image_cols, batch_rows, source_to_dest_profile
-                )
+                # Новая БД: копируем все записи без поиска дублей. Слияние:
+                # оставляем сопоставление существующих изображений по пути/SHA.
+                if create_target:
+                    by_migration_path = {}
+                    found_hashes = []
+                else:
+                    found_paths = _get_target_images_by_values(dst, target_type, dest_image_cols, "path", generated_paths)
+                    by_migration_path = {str(r.get("path")): r for r in found_paths}
+                    found_hashes = _get_hash_candidates(
+                        dst, target_type, dest_image_cols, batch_rows, source_to_dest_profile
+                    )
                 existing_ids = [int(r["id"]) for r in found_paths + found_hashes]
                 counts = _face_counts(dst, existing_ids)
                 by_sha: dict[str, list[dict]] = {}
@@ -475,9 +473,9 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
                     source_profile_id = row.get("profile_id")
                     mapped_profile_id = source_to_dest_profile.get(int(source_profile_id)) if source_profile_id not in (None, "") and int(source_profile_id) in source_to_dest_profile else None
                     generated_path = row["_migration_path"]
-                    found = by_migration_path.get(generated_path)
+                    found = None if create_target else by_migration_path.get(generated_path)
 
-                    if found is None and sha:
+                    if not create_target and found is None and sha:
                         candidates = by_sha.get(sha, [])
                         for candidate in candidates:
                             c_kind = str(candidate.get("source_type") or "local").strip().lower()
@@ -495,19 +493,6 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
                         dst_id = int(found["id"])
                         found_path = str(found.get("path") or "")
                         copy_faces = 1 if counts.get(dst_id, 0) == 0 else 0
-                        # Если изображение уже есть в БД, но сам CROP-файл потерян,
-                        # попробуем восстановить файл из исходной базы без перезаписи
-                        # существующего файла. Это не создаёт вторую запись images.
-                        source_file_text = row.get("_source_file") or ""
-                        if source_file_text and found_path and not Path(found_path).is_absolute():
-                            target_file = _target_file_for_path(found_path, target_profile, core)
-                            if target_file is not None and not target_file.exists():
-                                try:
-                                    target_file.parent.mkdir(parents=True, exist_ok=True)
-                                    shutil.copy2(source_file_text, target_file)
-                                    stats["crop_files_copied"] += 1
-                                except OSError as exc:
-                                    log(f"Предупреждение: не удалось восстановить существующий CROP {found_path}: {exc}")
                         mapping_actions.append((src_id, dst_id, copy_faces, found_path, 0))
                         stats["images_deduplicated"] += 1
                         continue
@@ -515,7 +500,7 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
                     # Защищаемся от повторов hash внутри текущей партии, в том числе
                     # для разных source image.id, которые ссылаются на один и тот же файл.
                     key = None
-                    if sha:
+                    if not create_target and sha:
                         key = ("vk", mapped_profile_id, sha) if source_kind == "vk" else ("nonvk", sha)
                     if key is not None and key in pending_by_key:
                         mapping_actions.append((src_id, pending_by_key[key]["_migration_path"], 1,
@@ -600,23 +585,7 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
                 )
                 temp_map.commit()
 
-                # Копируем физические CROP-файлы только для новых строк. Сама БД
-                # остаётся валидной и без файла, если у import-записи есть url_image.
-                if pending:
-                    for row in pending:
-                        target_file = _target_file_for_path(row["_migration_path"], target_profile, core)
-                        source_file_text = row.get("_source_file") or ""
-                        if target_file and source_file_text:
-                            try:
-                                target_file.parent.mkdir(parents=True, exist_ok=True)
-                                if not target_file.exists():
-                                    shutil.copy2(source_file_text, target_file)
-                                    stats["crop_files_copied"] += 1
-                            except OSError as exc:
-                                stats["crop_files_missing"] += 1
-                                log(f"Предупреждение: не удалось скопировать CROP {source_file_text}: {exc}")
-                        else:
-                            stats["crop_files_missing"] += 1
+                # Переносим только записи БД. Физические CROP-файлы не копируются.
                 processed_images += len(batch_rows)
                 if processed_images % (BATCH_IMAGES * 4) == 0 or processed_images == total_images:
                     log(f"Изображения: {processed_images:,}/{total_images:,}; новых {stats['images_inserted']:,}; дубликатов {stats['images_deduplicated']:,}.")
@@ -865,7 +834,7 @@ class DatabaseMigrationWindow:
 
         self.rebuild_index_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(main, text="После переноса пересоздать FAISS-индекс назначения (рекомендуется; может потребовать много RAM)", variable=self.rebuild_index_var).grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 4))
-        ttk.Label(main, text="Дубликаты: изображения сопоставляются по SHA-256; VK-фото дополнительно по профилю. Лица у уже заполненного изображения повторно не вставляются.", wraplength=880).grid(row=5, column=0, columnspan=4, sticky="w", pady=(3, 8))
+        ttk.Label(main, text="При слиянии существующих БД изображения сопоставляются по SHA-256; при создании новой БД записи копируются без дедупликации. Файлы CROP не копируются, относительный путь Images.path сохраняется.", wraplength=880).grid(row=5, column=0, columnspan=4, sticky="w", pady=(3, 8))
 
         action_frame = ttk.Frame(main)
         action_frame.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(2, 6))
@@ -966,7 +935,9 @@ class DatabaseMigrationWindow:
             if backend == "sqlite" and Path(target_profile["path"]).exists():
                 if not messagebox.askyesno("Файл уже существует", "Файл SQLite уже существует. Выполнить слияние с данными внутри него?", parent=self.root):
                     return
-            create_target = True
+                create_target = False
+            else:
+                create_target = True
 
         self.running = True
         self.start_button.configure(state="disabled")
@@ -1034,7 +1005,6 @@ class DatabaseMigrationWindow:
                         f"Профили добавлено/сопоставлено: {stats['profiles_inserted']}/{stats['profiles_matched']}\n"
                         f"Изображения добавлено/дубликатов: {stats['images_inserted']}/{stats['images_deduplicated']}\n"
                         f"Лиц добавлено/пропущено: {stats['faces_inserted']}/{stats['faces_skipped']}\n"
-                        f"CROP скопировано/недоступно: {stats['crop_files_copied']}/{stats['crop_files_missing']}\n"
                         f"FAISS индекс создан: {'да' if stats['index_built'] else 'нет'}"
                     )
                     self._set_log(summary.replace("\n", " | "))
