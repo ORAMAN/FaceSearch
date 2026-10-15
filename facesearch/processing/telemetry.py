@@ -488,6 +488,8 @@ class AdaptiveWorkerController:
         input_paths: list[Any] | tuple[Any, ...] | None = None,
         output_path: Any = None,
         input_is_network: bool = False,
+        remote_db: bool = False,
+        auto_adjust: bool = True,
     ):
         self.enabled = True
         self.backend = backend
@@ -495,13 +497,28 @@ class AdaptiveWorkerController:
         self.input_paths = list(input_paths or [])
         self.output_path = output_path
         self.input_is_network = bool(input_is_network)
+        # GUI may monitor resources while the user has selected a fixed worker
+        # count. In that mode the controller reports telemetry but never changes
+        # the requested concurrency.
+        self.auto_adjust = bool(auto_adjust)
+        # The caller may use a server database over the network. This flag is
+        # diagnostic only: traffic is still measured from system network counters.
+        self.remote_db = bool(remote_db)
         min_w, start_w, max_w = _auto_worker_limits()
-        self.min_workers = min_w
-        self.max_workers = max_w
-        self.current_workers = max(
-            self.min_workers,
-            min(self.max_workers, int(initial_workers or start_w)),
-        )
+        if self.auto_adjust:
+            self.min_workers = min_w
+            self.max_workers = max_w
+            requested_workers = int(initial_workers or start_w)
+            self.current_workers = max(
+                self.min_workers,
+                min(self.max_workers, requested_workers),
+            )
+        else:
+            # Preserve even a manual setting below the AUTO minimum (e.g. 1).
+            requested_workers = max(1, int(initial_workers or 1))
+            self.min_workers = 1
+            self.max_workers = requested_workers
+            self.current_workers = requested_workers
         self.last_report = time.monotonic()
         self.last_change = self.last_report
         self.last_completed = 0
@@ -585,7 +602,9 @@ class AdaptiveWorkerController:
             elif crop_disk_busy is None and crop_disk_rate >= AUTO_WORKERS_DISK_HIGH_MBPS:
                 saturated.append("пропускная способность записи CROP")
         if net_util is not None and net_util >= AUTO_WORKERS_NET_SATURATION:
-            saturated.append("сеть")
+            saturated.append(
+                "сеть / удалённая БД" if self.remote_db else "сеть"
+            )
 
         regression = False
         if self.baseline_after_change is not None and speed > 0:
@@ -610,7 +629,9 @@ class AdaptiveWorkerController:
             )
         )
 
-        if enough_time:
+        if not self.auto_adjust:
+            reason = "ручной режим, число потоков не меняется"
+        elif enough_time:
             if severe or regression:
                 if old_workers > self.min_workers:
                     new_workers = old_workers - 1
@@ -685,8 +706,13 @@ class AdaptiveWorkerController:
         vram_text = f"{float(vram):.0f}%" if vram is not None else "н/д"
         gpu = report.get("gpu")
         gpu_text = f"{float(gpu):.0f}%" if gpu is not None else "н/д"
+        mode_text = (
+            f"Авто: {int(report['workers'])} поток(ов)"
+            if self.auto_adjust
+            else f"Мониторинг (ручной режим): фиксировано {int(report['workers'])} поток(ов)"
+        )
         return (
-            f"Авто: {int(report['workers'])} поток(ов) • "
+            f"{mode_text} • "
             f"{float(report['speed_ema']):.2f} изобр/с • "
             f"CPU {float(report['cpu']):.0f}% • "
             f"GPU {gpu_text} • VRAM {vram_text} • "
