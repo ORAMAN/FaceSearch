@@ -5851,7 +5851,8 @@ class FaceSearchGUI:
                 f"Найдено изображений: {total}. Подготовка модели распознавания...",
             ))
 
-            # Одна и только одна модель InsightFace выбранного backend.
+            # Сначала создаём базовую модель выбранного backend; дополнительные
+            # GPU-модели при необходимости будут добавлены в ограниченный пул.
             app = create_face_app(backend)
             self.app = app
             actual_backend = face_app_backend(app)
