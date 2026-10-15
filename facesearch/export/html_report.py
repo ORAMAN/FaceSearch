@@ -88,18 +88,6 @@ def _site_display_data(source_url: str | None) -> tuple[str, str, str]:
         return value, value, ""
 
 
-def _display_face_id(result: dict[str, Any]) -> str:
-    """Возвращает ID записи лица из БД в фиксированном формате #000000000000."""
-    try:
-        face_id = int(result.get("face_id"))
-    except (TypeError, ValueError):
-        return "#ID неизвестен"
-    if face_id < 0:
-        return "#ID неизвестен"
-    # Ширина 12 цифр, включая ведущие нули. Более крупные ID не обрезаются.
-    return f"#{face_id:12d}"
-
-
 def generate_html_gallery(
     results,
     query_image: Path,
@@ -112,9 +100,9 @@ def generate_html_gallery(
     load_image_fn=None,
     cv2_module=None,
     theme: str = "dark",
+    retry_missing_crops: bool = False,
 ):
     APP_DIR = Path(app_dir).resolve() if app_dir else DEFAULT_APP_DIR
-    theme_mode = "light" if str(theme or "").strip().lower() == "light" else "dark"
     CROP_DIR = Path(crop_dir).resolve() if crop_dir else (APP_DIR / "face_images")
     crop_url_base = str(crop_url or "").strip().rstrip("/")
     if crop_url_base:
@@ -157,41 +145,61 @@ def generate_html_gallery(
         is_local = source_type == "local"
         is_import = source_type == "import"
 
-        # Под изображением показываем ID именно записи faces в БД,
-        # а не имя файла, ID CROP или позицию результата в ранжированном списке.
-        display_face_id = html.escape(_display_face_id(result), quote=True)
-        filename = display_face_id  # также используется как alt-текст изображения
+        filename_raw = str(result.get("filename") or "").strip()
+        filename = html.escape(filename_raw)
+        filename_path = Path(filename_raw.replace("\\", "/")).name
+        numeric_crop_filename = (
+            Path(filename_path).suffix.lower() in {".jpg", ".jpeg"}
+            and Path(filename_path).stem.isdigit()
+        )
+        # Имена вида 141414.jpg — технические имена CROP по ID записи,
+        # а не информативная подпись для пользователя.
         filename_html = (
-            f'<div class="filename" title="{display_face_id}">{display_face_id}</div>'
+            f'<div class="filename">{filename}</div>'
+            if filename_raw and not numeric_crop_filename
+            else ""
         )
 
         # URL строится из относительного images.path. Абсолютные старые пути
         # разрешены только если они действительно находятся внутри CROP_DIR.
         # Так исходные изображения случайно не подменяются URL-каталогом CROP.
         remote_crop_href = ""
-        if use_local_crops and crop_url_base:
-            crop_relative = None
-            normalized_db_path = raw_result_path.replace("\\", "/").strip()
-            if normalized_db_path:
-                candidate_posix = Path(normalized_db_path)
-                if not candidate_posix.is_absolute() and not re.match(r"^[A-Za-z]:/", normalized_db_path):
-                    normalized_parts = [part for part in normalized_db_path.split("/") if part not in ("", ".")]
-                    if normalized_parts and ".." not in normalized_parts:
-                        # Для отсутствующей локальной копии принимаем основной
-                        # формат CROP: <bucket>/<image_id>.jpg.
-                        if (
-                            len(normalized_parts) >= 2
-                            and normalized_parts[-2].isdigit()
-                            and Path(normalized_parts[-1]).stem.isdigit()
-                            and Path(normalized_parts[-1]).suffix.lower() in {".jpg", ".jpeg"}
-                        ):
-                            crop_relative = "/".join(normalized_parts)
-                elif path.is_absolute():
-                    try:
-                        crop_relative = path.resolve().relative_to(CROP_DIR.resolve()).as_posix()
-                    except (OSError, ValueError):
-                        crop_relative = None
+        future_local_crop_href = ""
+        future_local_crop_path = None
+        crop_relative = None
+        normalized_db_path = raw_result_path.replace("\\", "/").strip()
+        if use_local_crops and normalized_db_path:
+            candidate_posix = Path(normalized_db_path)
+            if not candidate_posix.is_absolute() and not re.match(r"^[A-Za-z]:/", normalized_db_path):
+                normalized_parts = [part for part in normalized_db_path.split("/") if part not in ("", ".")]
+                if normalized_parts and ".." not in normalized_parts:
+                    # Основной формат CROP: <bucket>/<image_id>.jpg.
+                    if (
+                        len(normalized_parts) >= 2
+                        and normalized_parts[-2].isdigit()
+                        and Path(normalized_parts[-1]).stem.isdigit()
+                        and Path(normalized_parts[-1]).suffix.lower() in {".jpg", ".jpeg"}
+                    ):
+                        crop_relative = "/".join(normalized_parts)
+            elif path.is_absolute():
+                try:
+                    crop_relative = path.resolve().relative_to(CROP_DIR.resolve()).as_posix()
+                except (OSError, ValueError):
+                    crop_relative = None
+
             if crop_relative:
+                try:
+                    future_local_crop_path = (CROP_DIR / Path(crop_relative)).resolve()
+                    future_local_crop_path.relative_to(CROP_DIR.resolve())
+                    if not future_local_crop_path.is_file():
+                        future_local_crop_href = _local_file_href_for_html(
+                            future_local_crop_path, output_path
+                        )
+                except (OSError, ValueError):
+                    future_local_crop_path = None
+                    future_local_crop_href = ""
+
+            if crop_url_base and crop_relative:
                 remote_crop_href = (
                     crop_url_base + "/" + quote(crop_relative, safe="/._~-")
                 )
@@ -339,7 +347,34 @@ def generate_html_gallery(
                     local_source_path = None
                     local_source_href = ""
 
-        if remote_crop_href:
+        pending_crop = bool(
+            retry_missing_crops
+            and use_local_crops
+            and future_local_crop_href
+            and future_local_crop_path is not None
+            and not future_local_crop_path.is_file()
+        )
+
+        if pending_crop:
+            # Если задан сетевой URL, сначала пробуем его, а после ошибки
+            # переключаемся на локальный путь CROP и периодически повторяем
+            # загрузку до появления файла. Это позволяет уже открытому HTML
+            # показать файл, созданный фоновым восстановлением.
+            pending_src = remote_crop_href or future_local_crop_href
+            local_retry_href = future_local_crop_href if remote_crop_href else ""
+            final_fallback_href = local_source_href or remote_image_url
+            retry_attrs = (
+                'data-crop-retry="true" '
+                f'data-crop-local-href="{html.escape(local_retry_href, quote=True)}" '
+                f'data-crop-final-fallback="{html.escape(final_fallback_href, quote=True)}"'
+            )
+            image_html = f"""
+                <img src="{html.escape(pending_src, quote=True)}"
+                    loading="lazy"
+                    alt="{filename}"
+                    {retry_attrs}>
+            """
+        elif remote_crop_href:
             if crop_href:
                 remote_crop_onerror = (
                     f"this.onerror=null;this.src='{html.escape(crop_href, quote=True)}';"
@@ -491,6 +526,58 @@ def generate_html_gallery(
     cards_html = "\n".join(cards)
     query_href = _safe_file_href(query_path)
 
+    retry_script = ""
+    if retry_missing_crops:
+        retry_script = """<script>
+(function () {
+    function cropLoadFailed(img) {
+        if (img.dataset.cropRetry !== "true") return;
+
+        const localHref = img.dataset.cropLocalHref || "";
+        if (localHref && img.dataset.cropLocalTried !== "true") {
+            img.dataset.cropLocalTried = "true";
+            img.src = localHref;
+            return;
+        }
+
+        const retries = Number(img.dataset.cropRetryCount || "0");
+        if (retries < 180) {
+            img.dataset.cropRetryCount = String(retries + 1);
+            if (img._cropRetryTimer) clearTimeout(img._cropRetryTimer);
+            img._cropRetryTimer = setTimeout(function () {
+                if (img.dataset.cropRetry !== "true") return;
+                const current = img.getAttribute("src") || "";
+                const clean = current.split("?")[0];
+                img.src = clean + (clean.includes("?") ? "&" : "?") + "crop_retry=" + Date.now();
+            }, 1500);
+            return;
+        }
+
+        img.dataset.cropRetry = "false";
+        const fallback = img.dataset.cropFinalFallback || "";
+        if (fallback && img.src !== new URL(fallback, document.baseURI).href) {
+            img.onerror = null;
+            img.src = fallback;
+        } else {
+            const placeholder = document.createElement("div");
+            placeholder.className = "no-image";
+            placeholder.textContent = "Изображение недоступно";
+            img.replaceWith(placeholder);
+        }
+    }
+
+    document.addEventListener("error", function (event) {
+        if (event.target && event.target.tagName === "IMG") cropLoadFailed(event.target);
+    }, true);
+    document.addEventListener("load", function (event) {
+        const img = event.target;
+        if (img && img.tagName === "IMG" && img.dataset.cropRetry === "true") {
+            img.dataset.cropRetry = "false";
+            if (img._cropRetryTimer) clearTimeout(img._cropRetryTimer);
+        }
+    }, true);
+})();
+</script>"""
     document = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -504,8 +591,8 @@ def generate_html_gallery(
 body {{
     margin: 0;
     padding: 30px;
-    background: #191919;
-    color: #f0f0f0;
+    background: #151515;
+    color: #eeeeee;
     font-family: Arial, Helvetica, sans-serif;
 }}
 
@@ -542,8 +629,7 @@ h1 {{
 
 .card {{
     position: relative;
-    background: #242424;
-    border: 1px solid #383838;
+    background: #222222;
     border-radius: 12px;
     overflow: hidden;
     padding-bottom: 15px;
@@ -560,7 +646,7 @@ h1 {{
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #171717;
+    background: #111111;
     overflow: hidden;
 }}
 
@@ -580,10 +666,8 @@ h1 {{
     left: 10px;
     z-index: 2;
     padding: 5px 9px;
-    color: #ffffff;
-    background: rgba(0,0,0,.82);
+    background: rgba(0,0,0,.75);
     border-radius: 6px;
-    text-shadow: 0 1px 2px rgba(0,0,0,.35);
 }}
 
 .score {{
@@ -592,23 +676,17 @@ h1 {{
     right: 10px;
     z-index: 2;
     padding: 6px 10px;
-    color: #ffffff;
     background: rgba(0,120,215,.90);
     border-radius: 6px;
     font-weight: bold;
 }}
 
 .filename {{
-    display: block;
-    min-height: 40px;
-    line-height: 20px;
-    padding: 9px 15px;
-    color: #f0f0f0;
+    padding: 12px 15px 4px;
     font-weight: bold;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    border-bottom: 1px solid #353535;
 }}
 
 .path {{
@@ -651,8 +729,7 @@ h1 {{
 .vk-info {{
     margin: 5px 15px 12px;
     padding: 10px;
-    background: #1e1e1e;
-    border: 1px solid #353535;
+    background: #1b1b1b;
     border-radius: 8px;
     line-height: 1.55;
     font-size: 13px;
@@ -675,10 +752,9 @@ h1 {{
 .button {{
     display: inline-block;
     padding: 8px 12px;
-    background: #343434;
-    color: #f0f0f0;
+    background: #333333;
+    color: #eeeeee;
     text-decoration: none;
-    border: 1px solid #484848;
     border-radius: 6px;
     font-size: 13px;
 }}
@@ -686,32 +762,10 @@ h1 {{
 .button:hover {{
     background: #444444;
 }}
-
-body[data-theme="light"] {{
-    background: #f1f3f5;
-    color: #171a1f;
-}}
-body[data-theme="light"] .info {{ color: #414b57; }}
-body[data-theme="light"] .query {{ background: #ffffff; border: 1px solid #c1c8d0; box-shadow: 0 2px 8px rgba(20, 25, 30, .08); }}
-body[data-theme="light"] .query a {{ color: #064f9e; }}
-body[data-theme="light"] .card {{
-    background: #ffffff;
-    border: 1px solid #c8cfd8;
-    box-shadow: 0 4px 15px rgba(20, 25, 30, .13);
-}}
-body[data-theme="light"] .face {{ background: #e1e5ea; }}
-body[data-theme="light"] .no-image {{ color: #4b5563; }}
-body[data-theme="light"] .filename {{ color: #171a1f; border-bottom-color: #c8cfd8; }}
-body[data-theme="light"] .path {{ color: #4b5563; }}
-body[data-theme="light"] .source-site a {{ color: #064f9e; }}
-body[data-theme="light"] .vk-info {{ background: #e9edf2; border-color: #c4ccd5; }}
-body[data-theme="light"] .vk-name {{ color: #064f9e; }}
-body[data-theme="light"] .button {{ background: #e2e7ed; color: #171a1f; border-color: #b7c0cb; }}
-body[data-theme="light"] .button:hover {{ background: #d0d9e3; }}
 </style>
 </head>
 
-<body data-theme="{theme_mode}">
+<body>
 <h1>Результаты поиска лиц</h1>
 
 <div class="info">
@@ -728,6 +782,7 @@ body[data-theme="light"] .button:hover {{ background: #d0d9e3; }}
 <div class="gallery">
 {cards_html}
 </div>
+{retry_script}
 </body>
 </html>
 """
