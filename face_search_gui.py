@@ -3575,6 +3575,9 @@ class FaceSearchGUI:
         self._settings_ready = True
         self._update_backend_ui()  # не проверяет CUDA, использует пока неизвестный cached state
         self.root.bind("<Configure>", self._on_window_configure, add="+")
+        # Нижняя строка статуса должна переноситься по реальной ширине окна,
+        # а не по фиксированным 1050 px: иначе длинный счётчик/имя файла обрезается.
+        self._update_status_wraplength()
         # Sash можно восстановить только после расчёта реальной ширины окна.
         self.paned.bind("<ButtonRelease-1>", self._on_paned_sash_release, add="+")
         self.root.after(100, self._restore_paned_sash_position)
@@ -3830,7 +3833,26 @@ class FaceSearchGUI:
     def _on_settings_variable_changed(self, *_args):
         self._schedule_settings_save()
 
+    def _update_status_wraplength(self):
+        """Подгоняет перенос нижнего статуса под доступную ширину окна."""
+        label = getattr(self, "status_label", None)
+        if label is None:
+            return
+        try:
+            window_width = int(self.root.winfo_width())
+            if window_width <= 1:
+                return
+            # Учитываем внешние отступы страницы и внутренние отступы футера.
+            wraplength = max(320, window_width - 52)
+            if int(label.cget("wraplength")) != wraplength:
+                label.configure(wraplength=wraplength)
+        except (tk.TclError, TypeError, ValueError):
+            pass
+
     def _on_window_configure(self, _event=None):
+        # Обновляем ширину строки при разворачивании, восстановлении и
+        # ручном изменении размеров окна; сам статус продолжает занимать всю ширину.
+        self._update_status_wraplength()
         if self._settings_ready:
             self._schedule_settings_save()
 
