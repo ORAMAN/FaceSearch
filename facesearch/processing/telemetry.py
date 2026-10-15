@@ -114,9 +114,13 @@ def _storage_type_for_paths(paths: list[Any] | tuple[Any, ...] | None) -> str:
                 pass
         if detected:
             types.add(detected)
-    if len(types) > 1:
-        return "mixed"
-    return next(iter(types), "unknown")
+    # Если исходники и CROP лежат на разных типах накопителей, выбираем
+    # более консервативный профиль: HDD обычно первым ограничивает конвейер.
+    if "hdd" in types:
+        return "hdd"
+    if "ssd" in types:
+        return "ssd"
+    return "unknown"
 
 
 def _auto_worker_limits(
