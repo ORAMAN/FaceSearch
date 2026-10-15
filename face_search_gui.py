@@ -5117,6 +5117,13 @@ class FaceSearchGUI:
         )
         self.choose_query_btn.pack(side="left", padx=(0, 8))
 
+        # Открывает повторно последний выбранный файл без диалога выбора.
+        # Кнопка активируется только если путь задан и файл доступен.
+        self.open_query_btn = ttk.Button(
+            query_row, text="Открыть", command=self.open_query, state="disabled",
+        )
+        self.open_query_btn.pack(side="right", padx=(8, 0))
+
         saved_query = str(self.gui_settings.get("query_image") or "").strip()
         self.query_var = tk.StringVar(value=saved_query or "Файл не выбран")
         self.query_path_entry = ttk.Entry(
@@ -5124,6 +5131,9 @@ class FaceSearchGUI:
         )
         self.query_path_entry.pack(side="left", fill="x", expand=True)
         self.root.after_idle(self._show_query_path_tail)
+        # Проверяем сохранённый путь уже при построении формы: отсутствующий
+        # или недоступный файл не должен оставлять кнопку активной.
+        self._update_open_query_button_state()
 
         ttk.Label(left, text="Найденные лица", style="Section.TLabel").pack(anchor="w")
         self.face_list = tk.Listbox(
@@ -5991,6 +6001,43 @@ class FaceSearchGUI:
         except tk.TclError:
             pass
 
+    def _query_file_is_available(self) -> bool:
+        """Проверяет, что последний выбранный путь ведёт к доступному файлу."""
+        path = getattr(self, "query_path", None)
+        if path is None:
+            return False
+        try:
+            return path.is_file() and os.access(str(path), os.R_OK)
+        except (OSError, TypeError, ValueError):
+            return False
+
+    def _update_open_query_button_state(self):
+        """Синхронизирует доступность кнопки «Открыть» с состоянием файла."""
+        button = getattr(self, "open_query_btn", None)
+        if button is None:
+            return
+        try:
+            button.configure(
+                state="normal" if self._query_file_is_available() else "disabled"
+            )
+        except tk.TclError:
+            pass
+
+    def open_query(self):
+        """Повторно загружает последний выбранный файл и распознаёт лица без диалога."""
+        if not self._startup_ready_or_warn("открытие выбранного изображения"):
+            return
+
+        if not self._query_file_is_available():
+            self._update_open_query_button_state()
+            self.status_var.set("Файл выбранного изображения отсутствует или недоступен.")
+            return
+
+        # Не вызываем filedialog.askopenfilename: используем сохранённый путь.
+        self.query_var.set(str(self.query_path))
+        self.root.after_idle(self._show_query_path_tail)
+        self._detect_query_faces()
+
     def choose_query(self):
         if not self._startup_ready_or_warn("выбор изображения"):
             return
@@ -6015,6 +6062,7 @@ class FaceSearchGUI:
         self.query_path = Path(path)
         self.query_var.set(str(self.query_path))
         self.root.after_idle(self._show_query_path_tail)
+        self._update_open_query_button_state()
         self._schedule_settings_save()
         self._detect_query_faces()
 
