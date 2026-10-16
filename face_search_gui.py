@@ -1109,19 +1109,18 @@ def cleanup_duplicate_images(conn: DatabaseConnection) -> int:
     return removed
 
 
-def cleanup_missing_images(conn: DatabaseConnection) -> int:
-    """Удаляет только записи images без CROP и без доступного исходного URL.
-
-    Читаем изображения потоково, чтобы не материализовать всю таблицу.
-    Если запись гарантированно сохраняется по url_image или локальному source_url,
-    не делаем ненужный stat() по CROP-пути.
-    """
+def cleanup_missing_images(
+    conn: DatabaseConnection,
+    progress_callback=None,
+) -> int:
+    """Удаляет записи images без CROP/доступного исходника и сообщает о ходе проверки."""
     stream_execute = getattr(conn, "execute_streaming", conn.execute)
     cursor = stream_execute(
         "SELECT id, path, source_type, url_image, source_url FROM images"
     )
     missing: list[int] = []
     batch_size = max(1024, int(FAISS_BUILD_BATCH_ROWS))
+    checked = 0
 
     try:
         while True:
@@ -1148,6 +1147,13 @@ def cleanup_missing_images(conn: DatabaseConnection) -> int:
 
                 if not exists:
                     missing.append(int(image_id))
+
+            checked += len(rows)
+            if progress_callback is not None:
+                try:
+                    progress_callback(checked, len(missing))
+                except Exception as exc:
+                    print(f"[FAISS PROGRESS CALLBACK ERROR] {exc}")
     finally:
         cursor.close()
 
@@ -3433,14 +3439,49 @@ def build_faiss_index(
     conn: DatabaseConnection,
     *,
     use_gpu_index: bool = True,
+    progress_callback=None,
 ):
-    """Создаёт индекс пакетно и печатает тайминги всех основных этапов."""
+    """Создаёт индекс пакетно, печатает тайминги и сообщает прогресс GUI."""
     build_started = time.perf_counter()
     _ensure_runtime_dependencies(need_numpy=True, need_faiss=True)
 
+    def report_progress(
+        stage: str,
+        message: str,
+        processed=None,
+        total=None,
+        percent=None,
+    ):
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(stage, message, processed, total, percent)
+        except Exception as exc:
+            # Проблема интерфейса не должна прерывать построение индекса.
+            print(f"[FAISS PROGRESS CALLBACK ERROR] {exc}")
+
+    report_progress("cleanup", "Проверка таблицы images перед созданием индекса...")
     cleanup_started = time.perf_counter()
-    removed = cleanup_missing_images(conn)
+
+    def cleanup_progress(checked, missing_count):
+        report_progress(
+            "cleanup",
+            f"Проверка images: просмотрено {checked:,} записей; "
+            f"отсутствующих CROP/исходников: {missing_count:,}",
+            processed=checked,
+            total=None,
+            percent=None,
+        )
+
+    removed = cleanup_missing_images(conn, progress_callback=cleanup_progress)
     cleanup_seconds = time.perf_counter() - cleanup_started
+    report_progress(
+        "cleanup",
+        f"Проверка images завершена за {cleanup_seconds:.1f} с; удалено строк: {removed:,}",
+        processed=None,
+        total=None,
+        percent=5,
+    )
     if removed:
         print(f"Удалено записей отсутствующих файлов: {removed}")
     print(
@@ -3453,6 +3494,7 @@ def build_faiss_index(
     _clear_gpu_search_index(release_cuda_memory=True)
     _clear_cpu_faiss_cache()
 
+    report_progress("count", "Подсчёт количества лиц в базе данных...", percent=5)
     count_started = time.perf_counter()
     total_expected = int(conn.execute("SELECT COUNT(*) FROM faces").fetchone()[0] or 0)
     count_seconds = time.perf_counter() - count_started
@@ -3460,7 +3502,15 @@ def build_faiss_index(
     if total_expected <= 0:
         print("В базе нет лиц.")
         print(f"[FAISS TIMING] Полное время: {time.perf_counter() - build_started:.2f} с")
+        report_progress("done", "В базе нет лиц; построение индекса не требуется.", 0, 0, 100)
         return
+    report_progress(
+        "count",
+        f"В базе {total_expected:,} лиц. Подготовка CPU FAISS...",
+        processed=0,
+        total=total_expected,
+        percent=6,
+    )
 
     index_path = Path(INDEX_FILE).expanduser().resolve()
     index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3469,6 +3519,13 @@ def build_faiss_index(
     print(
         f"Создание CPU FAISS индекса пакетами по {FAISS_BUILD_BATCH_ROWS:,} embeddings "
         f"(в базе ожидается {total_expected:,} лиц)..."
+    )
+    report_progress(
+        "build",
+        f"Создание CPU FAISS: 0 / ~{total_expected:,} лиц (6%)",
+        processed=0,
+        total=total_expected,
+        percent=6,
     )
     read_build_started = time.perf_counter()
     stream_execute = getattr(conn, "execute_streaming", conn.execute)
@@ -3486,6 +3543,7 @@ def build_faiss_index(
     if not first_batch:
         cursor.close()
         print("В базе больше нет лиц для индекса.")
+        report_progress("done", "В базе больше нет лиц для индекса.", 0, 0, 100)
         return
 
     dimension = int(first_batch[0][2])
@@ -3525,6 +3583,19 @@ def build_faiss_index(
 
             if processed % (FAISS_BUILD_BATCH_ROWS * 10) < FAISS_BUILD_BATCH_ROWS:
                 print(f"FAISS: добавлено {processed:,} / ~{total_expected:,} лиц")
+
+            build_percent = 6.0 + 76.0 * min(1.0, processed / max(1, total_expected))
+            report_progress(
+                "build",
+                f"Создание CPU FAISS: {processed:,} / ~{total_expected:,} лиц "
+                f"({build_percent:.0f}%)",
+                processed=processed,
+                total=total_expected,
+                percent=build_percent,
+            )
+            # Явно уступаем планировщику после каждого пакета, чтобы GUI
+            # получал время на обработку очереди событий даже при CPU-нагрузке.
+            time.sleep(0)
             batch = cursor.fetchmany(FAISS_BUILD_BATCH_ROWS)
 
         cursor.close()
@@ -3536,6 +3607,13 @@ def build_faiss_index(
         print(
             f"[FAISS TIMING] SQL-чтение + декодирование + CPU FAISS: "
             f"{read_build_seconds:.2f} с; скорость {read_rate:,.0f} лиц/с"
+        )
+        report_progress(
+            "write",
+            f"CPU FAISS построен: {processed:,} лиц. Запись файла индекса...",
+            processed=processed,
+            total=processed,
+            percent=83,
         )
 
         print(f"Запись временного FAISS-файла: {temp_path.name}")
@@ -3549,8 +3627,15 @@ def build_faiss_index(
         os.replace(temp_path, index_path)
         write_seconds = time.perf_counter() - write_started
         print(f"[FAISS TIMING] Запись CPU-индекса: {write_seconds:.2f} с")
-
         stat = index_path.stat()
+        report_progress(
+            "write",
+            f"Файл CPU FAISS записан ({stat.st_size / (1024 ** 3):.2f} GB); "
+            "подготовка поискового индекса...",
+            processed=processed,
+            total=processed,
+            percent=89,
+        )
         with _FAISS_META_LOCK:
             global _FAISS_META_PATH, _FAISS_META_MTIME_NS
             global _FAISS_META_COUNT, _FAISS_META_DIM, _FAISS_META_ERROR
@@ -3567,6 +3652,13 @@ def build_faiss_index(
         print(f"Файл: {index_path} ({stat.st_size / (1024 ** 3):.2f} GB)")
 
         if use_gpu_index:
+            report_progress(
+                "gpu",
+                "Загрузка GPU search index в видеопамять...",
+                processed=processed,
+                total=processed,
+                percent=90,
+            )
             gpu_started = time.perf_counter()
             gpu_ok = _build_gpu_search_index_from_cpu_index(
                 cpu_index, face_ids, dimension, processed
@@ -3586,18 +3678,47 @@ def build_faiss_index(
                 _set_cpu_faiss_cache(cpu_index, index_path)
             elif get_gpu_search_status().get("mode") == "full":
                 _clear_cpu_faiss_cache()
+            gpu_status = get_gpu_search_status()
             print(
                 f"[FAISS TIMING] Перенос search index на GPU: "
                 f"{time.perf_counter() - gpu_started:.2f} с; "
-                f"режим={get_gpu_search_status().get('mode')}"
+                f"режим={gpu_status.get('mode')}"
+            )
+            gpu_message = (
+                f"GPU search index готов: {processed:,} лиц "
+                f"({gpu_status.get('mode', 'CPU fallback')})."
+                if gpu_status.get("loaded")
+                else "CPU FAISS готов; GPU search недоступен, используется CPU fallback."
+            )
+            report_progress(
+                "gpu",
+                gpu_message,
+                processed=processed,
+                total=processed,
+                percent=99,
             )
         else:
             _clear_gpu_search_index(release_cuda_memory=True)
             _set_cpu_faiss_cache(cpu_index, index_path)
             print("GPU search отключён: выбран режим CPU-only.")
+            report_progress(
+                "gpu",
+                "CPU FAISS готов; выбран режим CPU-only.",
+                processed=processed,
+                total=processed,
+                percent=99,
+            )
 
         gc.collect()
-        print(f"[FAISS TIMING] Полное время: {time.perf_counter() - build_started:.2f} с")
+        total_seconds = time.perf_counter() - build_started
+        print(f"[FAISS TIMING] Полное время: {total_seconds:.2f} с")
+        report_progress(
+            "done",
+            f"Построение FAISS завершено: {processed:,} лиц за {total_seconds:.1f} с.",
+            processed=processed,
+            total=processed,
+            percent=100,
+        )
     except Exception:
         try:
             cursor.close()
@@ -8198,14 +8319,17 @@ class FaceSearchGUI:
         self.operation = "index"
         self._set_busy(True)
 
+        self.progress.stop()
         self.progress.config(
-            mode="indeterminate"
+            mode="indeterminate",
+            maximum=100,
+            value=0,
         )
         self.progress.start(10)
 
         if self.backend_mode_var.get() == BACKEND_GPU:
             self.status_var.set(
-                "Создание CPU FAISS + загрузка GPU-индекса в VRAM..."
+                "Подготовка: проверка images, создание CPU FAISS и загрузка GPU-индекса..."
             )
         else:
             self.status_var.set(
@@ -8482,6 +8606,17 @@ class FaceSearchGUI:
             self.events.put(("fatal", str(exc)))
 
     def _index_worker(self, backend=BACKEND_GPU):
+        def progress(stage, message, processed=None, total=None, percent=None):
+            # Tkinter нельзя вызывать из worker-а: передаём прогресс GUI через очередь.
+            self.events.put((
+                "index_progress",
+                stage,
+                str(message),
+                processed,
+                total,
+                percent,
+            ))
+
         try:
             conn = create_database()
 
@@ -8489,6 +8624,7 @@ class FaceSearchGUI:
                 build_faiss_index(
                     conn,
                     use_gpu_index=(backend == BACKEND_GPU),
+                    progress_callback=progress,
                 )
             finally:
                 conn.close()
@@ -9323,10 +9459,32 @@ class FaceSearchGUI:
                     )
                     self._update_search_state()
 
+                elif kind == "index_progress":
+                    stage = str(event[1])
+                    message = str(event[2])
+                    percent = event[5] if len(event) > 5 else None
+                    if self.operation == "index":
+                        if percent is None:
+                            # На этапе проверки images точное общее число строк
+                            # не вычисляется: оставляем анимированный индикатор.
+                            if str(self.progress.cget("mode")) != "indeterminate":
+                                self.progress.stop()
+                                self.progress.config(mode="indeterminate")
+                                self.progress.start(10)
+                        else:
+                            if str(self.progress.cget("mode")) != "determinate":
+                                self.progress.stop()
+                                self.progress.config(mode="determinate", maximum=100)
+                            self.progress.config(
+                                maximum=100,
+                                value=max(0.0, min(100.0, float(percent))),
+                            )
+                        self.status_var.set(message)
+
                 elif kind == "index_done":
                     self.progress.stop()
                     self.progress.config(
-                        value=0
+                        value=100
                     )
 
                     status = event[1] if len(event) > 1 else get_gpu_search_status()
