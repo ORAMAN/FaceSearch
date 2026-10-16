@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 from .connection import DatabaseConnection
+from ..metadata import (
+    is_standard_metadata_document,
+    normalize_legacy_metadata_document,
+)
 from ..config import (
     DB_TYPE_SQLITE, DB_TYPE_POSTGRESQL, DB_TYPE_MYSQL, DB_TYPE_MSSQL,
     PROFILE_COLUMNS, IMAGE_COLUMNS,
@@ -121,6 +128,133 @@ def table_exists(conn: DatabaseConnection, table: str) -> bool:
         "WHERE TABLE_NAME = ?",
         (table,),
     ).fetchone() is not None
+
+
+def _local_source_has_sidecar_json(source_url: str | None) -> bool:
+    """Checks whether the local source has a same-name JSON sidecar."""
+    value = str(source_url or "").strip()
+    if not value:
+        return False
+    try:
+        parsed = urlparse(value)
+        if parsed.scheme.lower() == "file":
+            source_path = Path(url2pathname(unquote(parsed.path)))
+            if parsed.netloc and parsed.netloc.lower() not in {"", "localhost"}:
+                source_path = Path(f"//{parsed.netloc}{source_path}")
+        elif not parsed.scheme:
+            source_path = Path(value)
+        else:
+            return False
+        return source_path.with_suffix(".json").is_file()
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _apply_metadata_json_updates(conn: DatabaseConnection, updates) -> None:
+    """Applies a bounded batch of id -> JSON/NULL changes with one SQL statement."""
+    if not updates:
+        return
+    # Three parameters per row (CASE id WHEN id THEN value, plus WHERE id IN id).
+    # 250 rows stays safely below SQL Server's 2100-parameter limit.
+    for offset in range(0, len(updates), 250):
+        batch = updates[offset:offset + 250]
+        case_sql = " ".join("WHEN ? THEN ?" for _ in batch)
+        where_sql = ",".join("?" for _ in batch)
+        params = []
+        for image_id, value in batch:
+            params.extend((int(image_id), value))
+        params.extend(int(image_id) for image_id, _value in batch)
+        conn.execute(
+            f"UPDATE images SET metadata_json = CASE id {case_sql} "
+            f"ELSE metadata_json END WHERE id IN ({where_sql})",
+            tuple(params),
+        )
+
+
+def _migrate_metadata_json_to_strict_envelope(conn: DatabaseConnection) -> None:
+    """One-time migration of legacy flat EXIF JSON values.
+
+    Local files without JSON get wrapped as {url_source, name, url_image, info}.
+    Imported records and local files with a JSON sidecar have metadata_json cleared:
+    their real metadata belongs in the original profile JSON, not the EXIF column.
+    """
+    migration_key = "metadata_json_strict_envelope_v2"
+    if not table_exists(conn, "face_search_migrations"):
+        try:
+            conn.execute(
+                "CREATE TABLE face_search_migrations ("
+                "migration_key VARCHAR(128) NOT NULL PRIMARY KEY, "
+                "applied_at VARCHAR(40))"
+            )
+            conn.commit()
+        except Exception:
+            # Another process may have created the table concurrently.
+            if not table_exists(conn, "face_search_migrations"):
+                raise
+
+    done = conn.execute(
+        "SELECT migration_key FROM face_search_migrations WHERE migration_key = ?",
+        (migration_key,),
+    ).fetchone()
+    if done:
+        return
+
+    last_id = -1
+    while True:
+        if conn.backend == DB_TYPE_MSSQL:
+            sql = (
+                "SELECT TOP 250 id, source_type, source_url, metadata_json "
+                "FROM images WHERE id > ? AND metadata_json IS NOT NULL "
+                "ORDER BY id"
+            )
+        else:
+            sql = (
+                "SELECT id, source_type, source_url, metadata_json "
+                "FROM images WHERE id > ? AND metadata_json IS NOT NULL "
+                "ORDER BY id LIMIT 250"
+            )
+        rows = conn.execute(sql, (last_id,)).fetchall()
+        if not rows:
+            break
+
+        updates = []
+        for image_id, source_type, source_url, raw_json in rows:
+            last_id = max(last_id, int(image_id))
+            if str(source_type or "local").lower() != "local":
+                # Older builds accidentally stored flat EXIF objects for imports.
+                updates.append((int(image_id), None))
+                continue
+
+            if _local_source_has_sidecar_json(source_url):
+                # A JSON sidecar is authoritative; do not retain EXIF-derived data.
+                updates.append((int(image_id), None))
+                continue
+
+            try:
+                value = json.loads(str(raw_json or ""))
+            except Exception:
+                value = None
+
+            if is_standard_metadata_document(value):
+                continue
+
+            if isinstance(value, dict):
+                normalized = normalize_legacy_metadata_document(value, source_url)
+                encoded = json.dumps(
+                    normalized, ensure_ascii=False, separators=(",", ":")
+                )
+            else:
+                encoded = None
+            updates.append((int(image_id), encoded))
+
+        _apply_metadata_json_updates(conn, updates)
+        conn.commit()
+
+    conn.execute(
+        "INSERT INTO face_search_migrations (migration_key, applied_at) VALUES (?, ?)",
+        (migration_key, __import__("datetime").datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
 
 
 def initialize_schema(
@@ -246,6 +380,10 @@ def initialize_schema(
 
     # Метаданные изображения добавляются и в уже существующие базы всех СУБД.
     ensure_columns(conn, "images", {"metadata_json": json_type})
+
+    # Приводим ранее записанные плоские EXIF-объекты к единой оболочке JSON.
+    # Миграция помечается как выполненная и не повторяется при каждом запуске.
+    _migrate_metadata_json_to_strict_envelope(conn)
 
     # Имена столбцов и таблиц в этом списке заданы самим приложением.
     # Для MySQL CREATE INDEX IF NOT EXISTS не является переносимым синтаксисом:
