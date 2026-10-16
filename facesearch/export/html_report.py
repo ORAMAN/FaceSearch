@@ -478,12 +478,10 @@ def generate_html_gallery(
                 'target="_blank" rel="noopener noreferrer">Открыть изображение</a>'
                 if remote_image_url else ""
             )
-            crop_button_href = remote_crop_href or (_safe_file_href(path) if local_image_exists else "")
             buttons = f"""
                 <div class="buttons">
                     {f'<a class="button" href="{html.escape(source_href, quote=True)}" target="_blank" rel="noopener noreferrer">Источник</a>' if source_href else ''}
                     {original_image_button}
-                    {f'<a class="button" href="{html.escape(crop_button_href, quote=True)}" target="_blank" rel="noopener noreferrer">Crop</a>' if use_local_crops and crop_button_href else ''}
                 </div>
             """
 
@@ -930,12 +928,17 @@ h1 {{
 .buttons {{
     padding: 0 15px;
     display: flex;
-    flex-wrap: wrap;
     gap: 6px;
 }}
 
 .button {{
-    display: inline-block;
+    display: flex;
+    flex: 1 1 0;
+    min-width: 0;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    overflow-wrap: anywhere;
     padding: 8px 12px;
     background: {"#333333" if str(theme).lower() == "dark" else "#e5e7eb"};
     color: {"#eeeeee" if str(theme).lower() == "dark" else "#202124"};
