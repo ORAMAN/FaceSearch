@@ -89,18 +89,28 @@ def _site_display_data(source_url: str | None) -> tuple[str, str, str]:
 
 
 def _local_metadata_html(metadata_value: Any, source_path: Path | None = None) -> str:
-    """Формирует блок метаданных локального исходника; пустые поля не выводятся."""
+    """Рендерит локальные метаданные только из стандартной оболочки JSON."""
     metadata: dict[str, Any] = {}
+    metadata_title = ""
     try:
         parsed = json.loads(str(metadata_value or ""))
         if isinstance(parsed, dict):
-            metadata = parsed
+            # Новый формат: ровно url_source/name/url_image/info.
+            if (
+                set(parsed.keys()) == {"url_source", "name", "url_image", "info"}
+                and isinstance(parsed.get("info"), dict)
+            ):
+                metadata = parsed["info"]
+                metadata_title = str(parsed.get("name") or "")
+            else:
+                # Совместимость со старыми записями, пока они не мигрированы.
+                metadata = parsed
+                metadata_title = str(parsed.get("filename") or "")
     except Exception:
         pass
 
-    # При наличии одноимённого JSON EXIF не читаем даже при генерации
-    # HTML. Для локальных файлов без JSON сохраняем fallback для старых записей,
-    # у которых metadata_json ещё не был заполнен при сканировании.
+    # При наличии одноимённого JSON EXIF не читаем даже при генерации HTML.
+    # Для старых локальных записей без метаданных оставляем fallback.
     has_sidecar_json = bool(
         source_path is not None
         and source_path.with_suffix(".json").is_file()
@@ -112,8 +122,10 @@ def _local_metadata_html(metadata_value: Any, source_path: Path | None = None) -
         and not has_sidecar_json
     ):
         try:
-            from ..metadata import extract_image_metadata
-            metadata = extract_image_metadata(source_path)
+            from ..metadata import image_metadata_document
+            document = image_metadata_document(source_path)
+            metadata = document["info"]
+            metadata_title = document["name"]
         except Exception:
             metadata = {}
 
@@ -173,7 +185,7 @@ def _local_metadata_html(metadata_value: Any, source_path: Path | None = None) -
 
     if not rows:
         return ""
-    title = html.escape(str(metadata.get("filename") or "Метаданные файла"))
+    title = html.escape(str(metadata_title or metadata.get("filename") or "Метаданные файла"))
     return f'<div class="vk-info local-metadata"><div class="vk-name">{title}</div>{"".join(rows)}</div>'
 
 
