@@ -9,3 +9,4 @@ opencv-python>=4.10
 Pillow>=10.0
 psutil>=6.0
 certifi>=2024.2.2
+tkinterdnd2>=0.4.2
