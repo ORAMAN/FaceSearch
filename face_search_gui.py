@@ -9058,12 +9058,21 @@ class FaceSearchGUI:
                     self._hide_scan_control_status()
 
                     if was_html_crop_repair:
+                        # HTML уже открыт, а retry_missing_crops=True включает в нём
+                        # автоматические повторные запросы изображений. Поэтому не
+                        # создаём HTML повторно и не открываем новую вкладку: браузер
+                        # сам подхватит появившиеся CROP-файлы по существующим ссылкам.
+                        self._html_crop_rebuild_context = None
                         if stopped:
-                            self._html_crop_rebuild_context = None
+                            self.status_var.set(
+                                "Создание CROP после HTML остановлено. "
+                                "Открытая галерея останется доступна."
+                            )
                         else:
-                            # После завершения CROP повторно создаём HTML из тех же
-                            # результатов, чтобы ссылки и карточки соответствовали диску.
-                            self._start_html_regeneration_after_crop()
+                            self.status_var.set(
+                                "CROP проверены/восстановлены. Открытая HTML-галерея "
+                                "обновит изображения автоматически."
+                            )
 
                 elif kind == "html_regenerated":
                     html_file, count = event[1:3]
