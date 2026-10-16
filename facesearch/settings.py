@@ -43,6 +43,7 @@ def _load_gui_settings() -> dict[str, Any]:
         "window_maximized": True,
         "theme": "light",
         "paned_sash_position": 0,
+        "paned_stats_hidden": False,
         "paned_preview_sash_position": 0,
         "selected_db_profile": "",
         "selected_folder": "",
@@ -83,6 +84,10 @@ def _load_gui_settings() -> dict[str, Any]:
                 settings["theme"] = "dark" if value.strip().lower() == "dark" else "light"
             settings["paned_sash_position"] = max(
                 0, _xml_int(node.findtext("paned_sash_position"), 0)
+            )
+            settings["paned_stats_hidden"] = _xml_bool(
+                node.findtext("paned_stats_hidden"),
+                settings["paned_stats_hidden"],
             )
             settings["paned_preview_sash_position"] = max(
                 0, _xml_int(node.findtext("paned_preview_sash_position"), 0)
@@ -195,6 +200,9 @@ def _save_gui_settings_data(settings: dict[str, Any]) -> None:
     ET.SubElement(node, "theme").text = "dark" if theme == "dark" else "light"
     ET.SubElement(node, "paned_sash_position").text = str(
         max(0, _xml_int(settings.get("paned_sash_position"), 0))
+    )
+    ET.SubElement(node, "paned_stats_hidden").text = (
+        "true" if bool(settings.get("paned_stats_hidden", False)) else "false"
     )
     ET.SubElement(node, "paned_preview_sash_position").text = str(
         max(0, _xml_int(settings.get("paned_preview_sash_position"), 0))
