@@ -3792,7 +3792,8 @@ class FaceSearchGUI:
         saved_folder = str(self.gui_settings.get("selected_folder") or "").strip()
         self.selected_dir = Path(saved_folder) if saved_folder else None
         saved_query = str(self.gui_settings.get("query_image") or "").strip()
-        self.query_path = Path(saved_query) if saved_query else None
+        self.query_source_url = saved_query if urlparse(saved_query).scheme.lower() in ("http", "https") else ""
+        self.query_path = Path(saved_query) if saved_query and not self.query_source_url else None
         self.query_image = None
         self.query_faces = []
         self.selected_face_index = None
@@ -4330,9 +4331,8 @@ class FaceSearchGUI:
                     else ""
                 ),
                 "query_image": (
-                    str(self.query_path)
-                    if self.query_path is not None
-                    else ""
+                    self.query_source_url
+                    or (str(self.query_path) if self.query_path is not None else "")
                 ),
                 "backend": str(self.backend_mode_var.get()),
                 "workers": int(self.local_workers_var.get()),
@@ -5692,7 +5692,7 @@ class FaceSearchGUI:
         saved_query = str(self.gui_settings.get("query_image") or "").strip()
         self.query_var = tk.StringVar(value=saved_query or "Файл не выбран")
         self.query_path_entry = ttk.Entry(
-            query_row, textvariable=self.query_var, state="readonly", width=42,
+            query_row, textvariable=self.query_var, width=42,
         )
         self.query_path_entry.pack(side="left", fill="x", expand=True)
         self.root.after_idle(self._show_query_path_tail)
@@ -7033,11 +7033,15 @@ class FaceSearchGUI:
             pass
 
     def _query_file_is_available(self) -> bool:
-        """Проверяет, что последний выбранный путь ведёт к доступному файлу."""
-        path = getattr(self, "query_path", None)
-        if path is None:
+        """Проверяет введённый локальный путь или прямой HTTP(S)-адрес."""
+        value = str(self.query_var.get() or "").strip() if hasattr(self, "query_var") else ""
+        parsed = urlparse(value)
+        if parsed.scheme.lower() in ("http", "https") and parsed.netloc:
+            return True
+        if not value or value == "Файл не выбран":
             return False
         try:
+            path = Path(value).expanduser()
             return path.is_file() and os.access(str(path), os.R_OK)
         except (OSError, TypeError, ValueError):
             return False
@@ -7055,18 +7059,51 @@ class FaceSearchGUI:
             pass
 
     def open_query(self):
-        """Повторно загружает последний выбранный файл и распознаёт лица без диалога."""
+        """Открывает локальное изображение или загружает изображение по HTTP(S)-URL."""
         if not self._startup_ready_or_warn("открытие выбранного изображения"):
             return
 
-        if not self._query_file_is_available():
-            self._update_open_query_button_state()
-            self.status_var.set("Файл выбранного изображения отсутствует или недоступен.")
+        value = str(self.query_var.get() or "").strip()
+        if not value or value == "Файл не выбран":
+            self.status_var.set("Укажите путь к файлу или HTTP(S)-адрес изображения.")
             return
 
-        # Не вызываем filedialog.askopenfilename: используем сохранённый путь.
-        self.query_var.set(str(self.query_path))
-        self.root.after_idle(self._show_query_path_tail)
+        parsed = urlparse(value)
+        if parsed.scheme.lower() in ("http", "https") and parsed.netloc:
+            try:
+                request = Request(value, headers={"User-Agent": "FaceSearch/1.0"})
+                with urlopen(request, timeout=25) as response:
+                    content_type = str(response.headers.get("Content-Type", "")).lower()
+                    data = response.read(25 * 1024 * 1024 + 1)
+                if len(data) > 25 * 1024 * 1024:
+                    raise RuntimeError("Размер изображения превышает лимит 25 МБ.")
+                if content_type and not content_type.startswith("image/"):
+                    raise RuntimeError(f"Ссылка вернула не изображение (Content-Type: {content_type}).")
+                from io import BytesIO
+                with Image.open(BytesIO(data)) as source_image:
+                    source_image.load()
+                    image = source_image.convert("RGB")
+                cache_dir = APP_DIR / "query_cache"
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                cache_name = hashlib.sha256(value.encode("utf-8")).hexdigest() + ".jpg"
+                cached_path = cache_dir / cache_name
+                image.save(cached_path, format="JPEG", quality=95)
+                self.query_source_url = value
+                self.query_path = cached_path
+            except Exception as exc:
+                messagebox.showerror("Ошибка загрузки изображения", f"Не удалось загрузить изображение по ссылке:\n{exc}")
+                self.status_var.set("Не удалось загрузить изображение по URL.")
+                return
+        else:
+            path = Path(value).expanduser()
+            if not path.is_file() or not os.access(str(path), os.R_OK):
+                self.status_var.set("Указанный файл отсутствует или недоступен.")
+                self._update_open_query_button_state()
+                return
+            self.query_path = path
+            self.query_source_url = ""
+
+        self._schedule_settings_save()
         self._detect_query_faces()
 
     def choose_query(self):
@@ -7091,6 +7128,7 @@ class FaceSearchGUI:
             return
 
         self.query_path = Path(path)
+        self.query_source_url = ""
         self.query_var.set(str(self.query_path))
         self.root.after_idle(self._show_query_path_tail)
         self._update_open_query_button_state()
