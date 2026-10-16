@@ -175,6 +175,8 @@ from facesearch.metadata import (
     metadata_json as _image_metadata_json,
     is_standard_metadata_document as _is_standard_metadata_document,
 )
+from facesearch.indexing.cleanup import image_record_has_recoverable_source
+from facesearch.indexing.embeddings import embedding_blob_to_view
 from facesearch.database.schema import (
     ensure_columns as _ensure_columns,
     backfill_import_image_urls as _backfill_import_image_urls,
@@ -1033,12 +1035,13 @@ def embedding_to_blob(embedding: np.ndarray) -> bytes:
 
 
 def blob_to_embedding(blob: bytes, dimension: int) -> np.ndarray:
-    _ensure_runtime_dependencies(need_numpy=True)
-    return np.frombuffer(
-        blob,
-        dtype=np.float32,
-        count=dimension,
-    ).copy()
+    # The scanner/build loop calls this once per face. NumPy is already loaded
+    # by the caller in hot paths, so avoid taking the runtime-import lock for
+    # every single embedding. The returned array is a read-only view over BLOB
+    # bytes; consumers that mutate it must explicitly call .copy().
+    if np is None:
+        _ensure_runtime_dependencies(need_numpy=True)
+    return embedding_blob_to_view(blob, dimension, numpy_module=np)
 
 
 # ============================================================
@@ -1106,35 +1109,46 @@ def cleanup_duplicate_images(conn: DatabaseConnection) -> int:
 
 
 def cleanup_missing_images(conn: DatabaseConnection) -> int:
-    rows = conn.execute(
+    """Удаляет только записи images без CROP и без доступного исходного URL.
+
+    Читаем изображения потоково, чтобы не материализовать всю таблицу.
+    Если запись гарантированно сохраняется по url_image или локальному source_url,
+    не делаем ненужный stat() по CROP-пути.
+    """
+    stream_execute = getattr(conn, "execute_streaming", conn.execute)
+    cursor = stream_execute(
         "SELECT id, path, source_type, url_image, source_url FROM images"
-    ).fetchall()
-    missing = []
+    )
+    missing: list[int] = []
+    batch_size = max(1024, int(FAISS_BUILD_BATCH_ROWS))
 
-    for image_id, path, source_type, url_image, source_url in rows:
-        try:
-            # Пути CROP в БД хранятся относительно активного CROP_DIR,
-            # а исходные локальные изображения — относительно APP_DIR.
-            # Используем общий resolver, иначе CROP-путь ошибочно проверяется
-            # только внутри APP_DIR и валидные записи удаляются из БД.
-            exists = _resolve_db_storage_path(path).is_file()
-        except Exception:
-            exists = False
+    try:
+        while True:
+            rows = cursor.fetchmany(batch_size)
+            if not rows:
+                break
 
-        # Импортированные JSON-изображения можно восстановить прямо в HTML
-        # по сохранённому url_image, поэтому запись и face/embedding сохраняем.
-        has_remote_fallback = (
-            str(source_type or "") == "import"
-            and bool(str(url_image or "").strip())
-        )
-        # Записи, у которых CROP намеренно отложен, должны переживать обычную
-        # очистку при открытии БД, пока исходная локальная фотография доступна.
-        try:
-            has_local_source = _source_url_to_local_path(source_url) is not None
-        except Exception:
-            has_local_source = False
-        if not exists and not has_remote_fallback and not has_local_source:
-            missing.append(int(image_id))
+            for image_id, path, source_type, url_image, source_url in rows:
+                # Эти строки сохранялись и раньше независимо от наличия CROP.
+                # Проверяем это до файловой системы, особенно полезно для
+                # удалённой БД и больших коллекций с импортированными URL.
+                if image_record_has_recoverable_source(
+                    source_type,
+                    url_image,
+                    source_url,
+                    _source_url_to_local_path,
+                ):
+                    continue
+
+                try:
+                    exists = _resolve_db_storage_path(path).is_file()
+                except Exception:
+                    exists = False
+
+                if not exists:
+                    missing.append(int(image_id))
+    finally:
+        cursor.close()
 
     if not missing:
         return 0
