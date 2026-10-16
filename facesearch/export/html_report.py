@@ -510,9 +510,22 @@ def generate_html_gallery(
             else ""
         )
 
+        # URL оригинала для полноэкранного просмотра. Для локальных
+        # записей это исходный файл, для импортированных — images.url_image.
+        # Если оригинал недоступен, JS откроет изображение самой карточки.
+        if is_local:
+            original_view_href = local_source_href or (
+                _safe_file_href(path) if local_image_exists else ""
+            )
+        else:
+            original_view_href = remote_image_url or (
+                _safe_file_href(path) if local_image_exists else ""
+            )
+        original_view_href_html = html.escape(original_view_href, quote=True)
+
         cards.append(
             f"""
-            <div class="card">
+            <div class="card" data-original-src="{original_view_href_html}">
                 <div class="rank">#{result["rank"]}</div>
                 <div class="score">{score * 100:.2f}%</div>
 
@@ -584,6 +597,93 @@ def generate_html_gallery(
     }, true);
 })();
 </script>"""
+    lightbox_script = """<script>
+(function () {
+    const overlay = document.getElementById("image-lightbox");
+    const preview = document.getElementById("lightbox-image");
+    const closeButton = document.getElementById("lightbox-close");
+    let opener = null;
+
+    function openLightbox(image) {
+        const card = image.closest(".card");
+        const original = card ? (card.dataset.originalSrc || "") : "";
+        const source = original || image.currentSrc || image.src;
+        if (!source) return;
+
+        opener = image;
+        preview.dataset.fallbackTried = "false";
+        preview.referrerPolicy = "no-referrer";
+        preview.alt = image.alt || "Оригинал фотографии";
+        preview.src = source;
+
+        overlay.classList.add("open");
+        overlay.setAttribute("aria-hidden", "false");
+        document.body.classList.add("lightbox-open");
+        closeButton.focus({ preventScroll: true });
+    }
+
+    function closeLightbox() {
+        if (!overlay.classList.contains("open")) return;
+
+        overlay.classList.remove("open");
+        overlay.setAttribute("aria-hidden", "true");
+        document.body.classList.remove("lightbox-open");
+        preview.removeAttribute("src");
+
+        const previousOpener = opener;
+        opener = null;
+        if (previousOpener && typeof previousOpener.focus === "function") {
+            previousOpener.focus({ preventScroll: true });
+        }
+    }
+
+    document.addEventListener("click", function (event) {
+        const target = event.target;
+        const image = target && target.closest
+            ? target.closest(".face img")
+            : null;
+        if (image) {
+            event.preventDefault();
+            openLightbox(image);
+        }
+    });
+
+    closeButton.addEventListener("click", function (event) {
+        event.stopPropagation();
+        closeLightbox();
+    });
+
+    overlay.addEventListener("click", function (event) {
+        if (event.target === overlay) closeLightbox();
+    });
+
+    preview.addEventListener("error", function () {
+        if (!opener) return;
+
+        const fallback = opener.currentSrc || opener.src;
+        if (
+            fallback &&
+            preview.dataset.fallbackTried !== "true" &&
+            fallback !== preview.src
+        ) {
+            preview.dataset.fallbackTried = "true";
+            preview.src = fallback;
+        } else {
+            preview.alt = "Не удалось загрузить оригинал фотографии";
+        }
+    });
+
+    document.addEventListener("keydown", function (event) {
+        if (
+            event.key === "Escape" &&
+            overlay.classList.contains("open")
+        ) {
+            closeLightbox();
+        }
+    });
+})();
+</script>"""
+
     document = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -663,6 +763,7 @@ h1 {{
     height: 100%;
     object-fit: contain;
     border-radius: 3px;
+    cursor: zoom-in;
 }}
 
 .no-image {{
@@ -781,6 +882,72 @@ h1 {{
 .button:hover {{
     background: {"#444444" if str(theme).lower() == "dark" else "#d1d5db"};
 }}
+.lightbox {{
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 24px;
+    background: rgba(0, 0, 0, .94);
+    backdrop-filter: blur(3px);
+    cursor: zoom-out;
+}}
+
+.lightbox.open {{
+    display: flex;
+}}
+
+.lightbox img {{
+    display: block;
+    max-width: 96vw;
+    max-height: 88vh;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    border-radius: 4px;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, .55);
+    cursor: default;
+}}
+
+.lightbox-close {{
+    position: fixed;
+    top: 14px;
+    right: 20px;
+    z-index: 1;
+    width: 48px;
+    height: 48px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, .3);
+    border-radius: 50%;
+    color: #fff;
+    background: rgba(35, 35, 35, .85);
+    font-size: 34px;
+    line-height: 42px;
+    text-align: center;
+    cursor: pointer;
+}}
+
+.lightbox-close:hover {{
+    background: rgba(85, 85, 85, .95);
+}}
+
+.lightbox-hint {{
+    position: fixed;
+    right: 12px;
+    bottom: 14px;
+    left: 12px;
+    color: rgba(255, 255, 255, .72);
+    font-size: 12px;
+    text-align: center;
+    pointer-events: none;
+}}
+
+body.lightbox-open {{
+    overflow: hidden;
+}}
+
 </style>
 </head>
 
@@ -801,7 +968,18 @@ h1 {{
 <div class="gallery">
 {cards_html}
 </div>
+
+<div id="image-lightbox" class="lightbox"
+     role="dialog" aria-modal="true" aria-hidden="true"
+     aria-label="Полноэкранный просмотр фотографии">
+    <button type="button" id="lightbox-close" class="lightbox-close"
+            aria-label="Закрыть просмотр">×</button>
+    <img id="lightbox-image" alt="">
+    <div class="lightbox-hint">Esc — закрыть · Нажмите за пределами фотографии, чтобы закрыть</div>
+</div>
+
 {retry_script}
+{lightbox_script}
 </body>
 </html>
 """
