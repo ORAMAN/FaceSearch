@@ -602,24 +602,73 @@ def generate_html_gallery(
     const overlay = document.getElementById("image-lightbox");
     const preview = document.getElementById("lightbox-image");
     const closeButton = document.getElementById("lightbox-close");
+    const previousButton = document.getElementById("lightbox-previous");
+    const nextButton = document.getElementById("lightbox-next");
+    const counter = document.getElementById("lightbox-counter");
     let opener = null;
+    let galleryImages = [];
+    let currentIndex = -1;
 
-    function openLightbox(image) {
-        const card = image.closest(".card");
+    function collectGalleryImages() {
+        return Array.from(document.querySelectorAll(".gallery .face img"))
+            .filter(function (image) {
+                return image.getAttribute("src") &&
+                    image.style.display !== "none" &&
+                    image.isConnected;
+            });
+    }
+
+    function refreshControls() {
+        const count = galleryImages.length;
+        counter.textContent = count > 0
+            ? (currentIndex + 1) + " / " + count
+            : "0 / 0";
+        const showNavigation = count > 1;
+        previousButton.hidden = !showNavigation;
+        nextButton.hidden = !showNavigation;
+    }
+
+    function displayCurrentImage() {
+        if (currentIndex < 0 || currentIndex >= galleryImages.length) return;
+
+        opener = galleryImages[currentIndex];
+        const card = opener.closest(".card");
         const original = card ? (card.dataset.originalSrc || "") : "";
-        const source = original || image.currentSrc || image.src;
+        const source = original || opener.currentSrc || opener.src;
         if (!source) return;
 
-        opener = image;
         preview.dataset.fallbackTried = "false";
         preview.referrerPolicy = "no-referrer";
-        preview.alt = image.alt || "Оригинал фотографии";
+        preview.alt = opener.alt || "Оригинал фотографии";
         preview.src = source;
+        refreshControls();
+    }
 
+    function openLightbox(image) {
+        galleryImages = collectGalleryImages();
+        currentIndex = galleryImages.indexOf(image);
+        if (currentIndex < 0) {
+            galleryImages.push(image);
+            currentIndex = galleryImages.length - 1;
+        }
+
+        displayCurrentImage();
         overlay.classList.add("open");
         overlay.setAttribute("aria-hidden", "false");
         document.body.classList.add("lightbox-open");
         closeButton.focus({ preventScroll: true });
+    }
+
+    function moveImage(direction) {
+        galleryImages = collectGalleryImages();
+        if (!galleryImages.length) return;
+
+        let index = galleryImages.indexOf(opener);
+        if (index < 0) index = currentIndex;
+        if (index < 0) index = 0;
+
+        currentIndex = (index + direction + galleryImages.length) % galleryImages.length;
+        displayCurrentImage();
     }
 
     function closeLightbox() {
@@ -632,6 +681,8 @@ def generate_html_gallery(
 
         const previousOpener = opener;
         opener = null;
+        currentIndex = -1;
+        galleryImages = [];
         if (previousOpener && typeof previousOpener.focus === "function") {
             previousOpener.focus({ preventScroll: true });
         }
@@ -651,6 +702,16 @@ def generate_html_gallery(
     closeButton.addEventListener("click", function (event) {
         event.stopPropagation();
         closeLightbox();
+    });
+
+    previousButton.addEventListener("click", function (event) {
+        event.stopPropagation();
+        moveImage(-1);
+    });
+
+    nextButton.addEventListener("click", function (event) {
+        event.stopPropagation();
+        moveImage(1);
     });
 
     overlay.addEventListener("click", function (event) {
@@ -674,11 +735,16 @@ def generate_html_gallery(
     });
 
     document.addEventListener("keydown", function (event) {
-        if (
-            event.key === "Escape" &&
-            overlay.classList.contains("open")
-        ) {
+        if (!overlay.classList.contains("open")) return;
+
+        if (event.key === "Escape") {
             closeLightbox();
+        } else if (event.key === "ArrowLeft") {
+            event.preventDefault();
+            moveImage(-1);
+        } else if (event.key === "ArrowRight") {
+            event.preventDefault();
+            moveImage(1);
         }
     });
 })();
@@ -933,6 +999,58 @@ h1 {{
     background: rgba(85, 85, 85, .95);
 }}
 
+.lightbox-nav {{
+    position: fixed;
+    top: 50%;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 52px;
+    height: 68px;
+    padding: 0;
+    transform: translateY(-50%);
+    border: 1px solid rgba(255, 255, 255, .22);
+    border-radius: 12px;
+    color: #fff;
+    background: rgba(35, 35, 35, .72);
+    font-size: 44px;
+    line-height: 1;
+    cursor: pointer;
+    user-select: none;
+}}
+
+.lightbox-nav:hover {{
+    background: rgba(85, 85, 85, .92);
+}}
+
+.lightbox-nav[hidden] {{
+    display: none;
+}}
+
+.lightbox-previous {{
+    left: 18px;
+}}
+
+.lightbox-next {{
+    right: 18px;
+}}
+
+.lightbox-counter {{
+    position: fixed;
+    bottom: 38px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 12px;
+    border: 1px solid rgba(255, 255, 255, .2);
+    border-radius: 20px;
+    color: #fff;
+    background: rgba(30, 30, 30, .8);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+}}
+
 .lightbox-hint {{
     position: fixed;
     right: 12px;
@@ -946,6 +1064,27 @@ h1 {{
 
 body.lightbox-open {{
     overflow: hidden;
+}}
+
+@media (max-width: 640px) {{
+    .lightbox {{
+        padding: 58px 8px;
+    }}
+
+    .lightbox-nav {{
+        width: 40px;
+        height: 54px;
+        font-size: 34px;
+        border-radius: 8px;
+    }}
+
+    .lightbox-previous {{
+        left: 6px;
+    }}
+
+    .lightbox-next {{
+        right: 6px;
+    }}
 }}
 
 </style>
@@ -974,8 +1113,15 @@ body.lightbox-open {{
      aria-label="Полноэкранный просмотр фотографии">
     <button type="button" id="lightbox-close" class="lightbox-close"
             aria-label="Закрыть просмотр">×</button>
+    <button type="button" id="lightbox-previous"
+            class="lightbox-nav lightbox-previous"
+            aria-label="Предыдущее изображение" title="Предыдущее изображение">‹</button>
     <img id="lightbox-image" alt="">
-    <div class="lightbox-hint">Esc — закрыть · Нажмите за пределами фотографии, чтобы закрыть</div>
+    <button type="button" id="lightbox-next"
+            class="lightbox-nav lightbox-next"
+            aria-label="Следующее изображение" title="Следующее изображение">›</button>
+    <div id="lightbox-counter" class="lightbox-counter" aria-live="polite">1 / 1</div>
+    <div class="lightbox-hint">← / → — переключение · Esc — закрыть · Нажмите на затемнённый фон, чтобы закрыть</div>
 </div>
 
 {retry_script}
