@@ -90,6 +90,15 @@ def _site_display_data(source_url: str | None) -> tuple[str, str, str]:
 
 def _local_metadata_html(metadata_value: Any, source_path: Path | None = None) -> str:
     """Рендерит локальные метаданные только из стандартной оболочки JSON."""
+    # Sidecar JSON имеет приоритет: для этого исходника не читаем, не показываем
+    # и не подставляем EXIF, даже если в старой записи БД остались такие данные.
+    has_sidecar_json = bool(
+        source_path is not None
+        and source_path.with_suffix(".json").is_file()
+    )
+    if has_sidecar_json:
+        return ""
+
     metadata: dict[str, Any] = {}
     metadata_title = ""
     try:
@@ -109,12 +118,7 @@ def _local_metadata_html(metadata_value: Any, source_path: Path | None = None) -
     except Exception:
         pass
 
-    # При наличии одноимённого JSON EXIF не читаем даже при генерации HTML.
     # Для старых локальных записей без метаданных оставляем fallback.
-    has_sidecar_json = bool(
-        source_path is not None
-        and source_path.with_suffix(".json").is_file()
-    )
     if (
         not metadata
         and source_path is not None
