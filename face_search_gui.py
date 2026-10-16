@@ -3570,6 +3570,10 @@ def build_faiss_index(
                     )
                 vectors[i] = blob_to_embedding(blob, dimension)
                 ids[i] = int(face_id)
+                # Не удерживаем GIL на весь большой пакет: даём Tkinter
+                # регулярно обрабатывать оконные события и очередь прогресса.
+                if (i + 1) % 1024 == 0:
+                    time.sleep(0)
 
             required = processed + batch_count
             if required > face_ids.size:
