@@ -1686,14 +1686,16 @@ def _find_existing_source_crop_rows(
     profile_id: int | None = None,
     url_image: str | None = None,
     fallback_image_url: str | None = None,
-) -> list[tuple[int, str]]:
-    """Находит CROP-записи, относящиеся к тому же исходному изображению."""
+    include_metadata: bool = False,
+) -> list[tuple]:
+    """Находит CROP-записи; для локального fast-path может вернуть metadata_json."""
     if source_type == "local":
         if not source_url:
             return []
+        selected_columns = "id, path, metadata_json" if include_metadata else "id, path"
         rows = conn.execute(
-            """
-            SELECT id, path
+            f"""
+            SELECT {selected_columns}
             FROM images
             WHERE source_type = 'local' AND source_url = ?
             ORDER BY id
@@ -1733,6 +1735,11 @@ def _find_existing_source_crop_rows(
                 (int(profile_id), fallback_image_url),
             ).fetchall()
 
+    if source_type == "local" and include_metadata:
+        return [
+            (int(row[0]), str(row[1] or ""), row[2])
+            for row in rows
+        ]
     return [(int(row[0]), str(row[1] or "")) for row in rows]
 
 
@@ -2342,33 +2349,43 @@ def process_local_image(
     except (OSError, ValueError):
         source_url = str(image_path)
 
-    file_metadata_json = _image_metadata_json(image_path) if store_metadata else None
-
-    # Если этот исходник уже был обработан в режиме "без JSON",
-    # не создаём новые дубли при повторном сканировании.
-    existing_rows = _find_existing_source_crop_rows(
+    # Быстрый путь повторного сканирования: сначала проверяем БД. Не читаем
+    # файл через Pillow и не пишем в БД, если строгие метаданные уже на месте.
+    metadata_rows = _find_existing_source_crop_rows(
         conn,
         source_type="local",
         source_url=source_url,
+        include_metadata=bool(store_metadata and not overwrite_existing_crops),
     )
+    if store_metadata and not overwrite_existing_crops:
+        existing_rows = [(int(row[0]), str(row[1] or "")) for row in metadata_rows]
+        metadata_needs_refresh = any(
+            not _is_standard_metadata_document(_parse_metadata_json_value(row[2]))
+            for row in metadata_rows
+        )
+    else:
+        existing_rows = [(int(row[0]), str(row[1] or "")) for row in metadata_rows]
+        metadata_needs_refresh = False
+
+    file_metadata_json = None
 
     if existing_rows and not overwrite_existing_crops:
-        # Для локального файла без JSON приводим существующие записи к новой
-        # строгой оболочке даже если там остался старый плоский EXIF-объект.
-        # При наличии JSON метаданные не читаются и не записываются; старый
-        # некорректный EXIF-объект только очищается.
-        for existing_image_id, _existing_path in existing_rows:
-            if store_metadata:
-                conn.execute(
-                    "UPDATE images SET metadata_json = ? WHERE id = ?",
-                    (file_metadata_json, int(existing_image_id)),
-                )
-            elif clear_metadata:
-                conn.execute(
-                    "UPDATE images SET metadata_json = NULL WHERE id = ? "
-                    "AND metadata_json IS NOT NULL",
-                    (int(existing_image_id),),
-                )
+        if clear_metadata:
+            # Одно групповое обновление вместо UPDATE на каждое лицо/CROP.
+            conn.execute(
+                "UPDATE images SET metadata_json = NULL "
+                "WHERE source_type = 'local' AND source_url = ? "
+                "AND metadata_json IS NOT NULL",
+                (source_url,),
+            )
+        elif store_metadata and metadata_needs_refresh:
+            file_metadata_json = _image_metadata_json(image_path)
+            # Исправление старых/пустых значений одной операцией на исходник.
+            conn.execute(
+                "UPDATE images SET metadata_json = ? "
+                "WHERE source_type = 'local' AND source_url = ?",
+                (file_metadata_json, source_url),
+            )
         conn.commit()
         missing_existing_rows = [
             (image_id, stored_path)
@@ -2425,6 +2442,10 @@ def process_local_image(
             "detected_faces": 0,
         }
 
+    # EXIF/статистику файла извлекаем только после проверки дублей и только
+    # для реально обрабатываемого изображения, а не для каждого пропуска.
+    file_metadata_json = _image_metadata_json(image_path) if store_metadata else None
+
     created = 0
     created_files: list[Path] = []
     crop_file_backups: dict[Path, bytes] = {}
@@ -2478,13 +2499,15 @@ def process_local_image(
                     UPDATE images
                     SET path = ?, filename = ?, sha256 = ?, width = ?, height = ?,
                         processed = 1, source_type = 'local', source_url = ?,
-                        url_image = NULL, profile_id = NULL, source_updated_at = ?
+                        url_image = NULL, profile_id = NULL, source_updated_at = ?,
+                        metadata_json = ?
                     WHERE id = ?
                     """,
                     (
                         _relative_crop_db_path(crop_path), crop_path.name, sha256,
                         int(crop.shape[1]), int(crop.shape[0]), source_url,
-                        timestamp, image_id,
+                        timestamp, file_metadata_json if store_metadata else None,
+                        image_id,
                     ),
                 )
             else:
@@ -2494,13 +2517,15 @@ def process_local_image(
                     """
                     INSERT INTO images (
                         path, filename, sha256, width, height, processed,
-                        source_type, source_url, profile_id, source_updated_at
+                        source_type, source_url, profile_id, source_updated_at,
+                        metadata_json
                     )
-                    VALUES (?, ?, ?, ?, ?, 0, 'local', ?, NULL, ?)
+                    VALUES (?, ?, ?, ?, ?, 0, 'local', ?, NULL, ?, ?)
                     """,
                     (
                         temp_name, temp_name, sha256, int(crop.shape[1]),
                         int(crop.shape[0]), source_url, timestamp,
+                        file_metadata_json if store_metadata else None,
                     ),
                 )
                 image_id = int(cur.lastrowid)
@@ -2509,18 +2534,6 @@ def process_local_image(
                 conn.execute(
                     "UPDATE images SET path = ?, filename = ?, processed = 1 WHERE id = ?",
                     (_relative_crop_db_path(crop_path), crop_path.name, image_id),
-                )
-
-            if store_metadata:
-                conn.execute(
-                    "UPDATE images SET metadata_json = ? WHERE id = ?",
-                    (file_metadata_json, int(image_id)),
-                )
-            elif clear_metadata:
-                conn.execute(
-                    "UPDATE images SET metadata_json = NULL WHERE id = ? "
-                    "AND metadata_json IS NOT NULL",
-                    (int(image_id),),
                 )
 
             if create_crop_files:
