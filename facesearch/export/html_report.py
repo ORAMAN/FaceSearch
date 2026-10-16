@@ -98,7 +98,19 @@ def _local_metadata_html(metadata_value: Any, source_path: Path | None = None) -
     except Exception:
         pass
 
-    if not metadata and source_path is not None and source_path.is_file():
+    # При наличии одноимённого JSON EXIF не читаем даже при генерации
+    # HTML. Для локальных файлов без JSON сохраняем fallback для старых записей,
+    # у которых metadata_json ещё не был заполнен при сканировании.
+    has_sidecar_json = bool(
+        source_path is not None
+        and source_path.with_suffix(".json").is_file()
+    )
+    if (
+        not metadata
+        and source_path is not None
+        and source_path.is_file()
+        and not has_sidecar_json
+    ):
         try:
             from ..metadata import extract_image_metadata
             metadata = extract_image_metadata(source_path)
