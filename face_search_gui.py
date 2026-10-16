@@ -2026,7 +2026,6 @@ def import_image_bundle(
     if image is None:
         raise RuntimeError(f"Не удалось открыть изображение: {image_path}")
 
-    file_metadata_json = _image_metadata_json(image_path)
     valid_faces = _detect_faces_with_padding(app, image, padding_ratio=0.40)
 
     if not valid_faces:
@@ -2060,15 +2059,6 @@ def import_image_bundle(
             url_image=metadata_image_url,
             fallback_image_url=fallback_image_url,
         )
-    # Метаданные относятся к конкретному файлу, а не к общему профилю.
-    # При обычном сканировании заполняем только отсутствующие; принудительное
-    # обновление обновляет их вместе с CROP, не меняя JSON профиля.
-    for existing_image_id, _existing_path in existing_source_rows:
-        if overwrite_existing_crops:
-            conn.execute("UPDATE images SET metadata_json = ? WHERE id = ?", (file_metadata_json, int(existing_image_id)))
-        else:
-            conn.execute("UPDATE images SET metadata_json = ? WHERE id = ? AND (metadata_json IS NULL OR TRIM(metadata_json) = '')", (file_metadata_json, int(existing_image_id)))
-
     restored_missing_crops = 0
     if create_crop_files and not overwrite_existing_crops and existing_source_rows:
         restored_missing_crops = _restore_missing_source_crops(
@@ -2195,8 +2185,6 @@ def import_image_bundle(
                     (_relative_crop_db_path(crop_path), crop_path.name, image_id),
                 )
 
-            conn.execute("UPDATE images SET metadata_json = ? WHERE id = ?", (file_metadata_json, int(image_id)))
-
             if create_crop_files:
                 crop_dir.mkdir(parents=True, exist_ok=True)
                 if overwrite_existing_crops and crop_path.is_file():
@@ -2301,6 +2289,7 @@ def process_local_image(
     delete_source: bool = False,
     create_crop_files: bool = True,
     overwrite_existing_crops: bool = False,
+    store_metadata: bool = True,
 ) -> dict[str, int | bool | str]:
     """Сканирует локальную фотографию без JSON-метаданных.
 
@@ -2329,7 +2318,7 @@ def process_local_image(
     except (OSError, ValueError):
         source_url = str(image_path)
 
-    file_metadata_json = _image_metadata_json(image_path)
+    file_metadata_json = _image_metadata_json(image_path) if store_metadata else None
 
     # Если этот исходник уже был обработан в режиме "без JSON",
     # не создаём новые дубли при повторном сканировании.
@@ -2340,10 +2329,11 @@ def process_local_image(
     )
 
     if existing_rows and not overwrite_existing_crops:
-        # Повторный проход не распознаёт лица заново: дополняет только
-        # отсутствующие метаданные, сохраняя существующие значения.
-        for existing_image_id, _existing_path in existing_rows:
-            conn.execute("UPDATE images SET metadata_json = ? WHERE id = ? AND (metadata_json IS NULL OR TRIM(metadata_json) = '')", (file_metadata_json, int(existing_image_id)))
+        # Метаданные извлекаются только для изображений без sidecar JSON.
+        # Для файлов с JSON не меняем metadata_json в БД.
+        if store_metadata:
+            for existing_image_id, _existing_path in existing_rows:
+                conn.execute("UPDATE images SET metadata_json = ? WHERE id = ? AND (metadata_json IS NULL OR TRIM(metadata_json) = '')", (file_metadata_json, int(existing_image_id)))
         conn.commit()
         missing_existing_rows = [
             (image_id, stored_path)
@@ -2485,8 +2475,6 @@ def process_local_image(
                     "UPDATE images SET path = ?, filename = ?, processed = 1 WHERE id = ?",
                     (_relative_crop_db_path(crop_path), crop_path.name, image_id),
                 )
-
-            conn.execute("UPDATE images SET metadata_json = ? WHERE id = ?", (file_metadata_json, int(image_id)))
 
             if create_crop_files:
                 crop_dir.mkdir(parents=True, exist_ok=True)
@@ -6767,6 +6755,7 @@ class FaceSearchGUI:
                                 delete_source=False,
                                 create_crop_files=create_crop_files,
                                 overwrite_existing_crops=overwrite_existing_crops,
+                                store_metadata=False,
                             )
                             return path, int(result["faces"]), None, result
 
