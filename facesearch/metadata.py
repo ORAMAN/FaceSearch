@@ -69,6 +69,16 @@ def extract_image_metadata(path: str | Path) -> dict[str, Any]:
             exif = image.getexif()
             tag_names = {int(key): value for key, value in ExifTags.TAGS.items()}
             values = {tag_names.get(int(key), str(key)): value for key, value in exif.items()}
+            # Сведения о съёмке обычно находятся во вложенном Exif IFD,
+            # а не в основном наборе тегов изображения.
+            try:
+                exif_ifd = exif.get_ifd(ExifTags.IFD.Exif)
+                values.update({
+                    tag_names.get(int(key), str(key)): value
+                    for key, value in exif_ifd.items()
+                })
+            except Exception:
+                pass
 
             aliases = {
                 "DateTimeOriginal": "date_taken",
