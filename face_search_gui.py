@@ -7047,14 +7047,12 @@ class FaceSearchGUI:
             return False
 
     def _update_open_query_button_state(self):
-        """Синхронизирует доступность кнопки «Открыть» с состоянием файла."""
+        """Кнопка остаётся активной, чтобы можно было сначала вставить URL."""
         button = getattr(self, "open_query_btn", None)
         if button is None:
             return
         try:
-            button.configure(
-                state="normal" if self._query_file_is_available() else "disabled"
-            )
+            button.configure(state="normal")
         except tk.TclError:
             pass
 
