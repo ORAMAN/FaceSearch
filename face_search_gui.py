@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 from collections import deque
+from itertools import islice
 import ctypes
 import gc
 import hashlib
@@ -55,6 +56,18 @@ from urllib.parse import unquote, urlparse
 from urllib.request import Request, url2pathname, urlopen
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
+
+
+def _iter_batches(iterable, size: int):
+    """Разбивает ленивый итератор на небольшие списки, не загружая весь каталог."""
+    size = max(1, int(size))
+    iterator = iter(iterable)
+    while True:
+        batch = list(islice(iterator, size))
+        if not batch:
+            return
+        yield batch
+
 
 # Разделённые модули конфигурации, настроек, профилей БД и телеметрии.
 from facesearch.config import *  # noqa: F401,F403 - constants are public app configuration
@@ -4012,6 +4025,7 @@ class FaceSearchGUI:
             self.backend_mode_var,
             self.folder_var,
             self.local_workers_var,
+            self.scan_batch_size_var,
             self.auto_workers_var,
             self.delete_processed_var,
             self.use_json_metadata_var,
@@ -4230,6 +4244,7 @@ class FaceSearchGUI:
                 ),
                 "backend": str(self.backend_mode_var.get()),
                 "workers": int(self.local_workers_var.get()),
+                "scan_batch_size": int(str(self.scan_batch_size_var.get()).strip() or 0),
                 "auto_workers": bool(self.auto_workers_var.get()),
                 "delete_processed": bool(self.delete_processed_var.get()),
                 "use_json_metadata": bool(self.use_json_metadata_var.get()),
@@ -5328,6 +5343,28 @@ class FaceSearchGUI:
         self.create_crops_on_html_check.grid(
             row=1, column=2, sticky="w", padx=(0, 10), pady=2
         )
+        self.scan_batch_size_var = tk.StringVar(
+            value=str(self.gui_settings.get("scan_batch_size", DEFAULT_SCAN_BATCH_SIZE))
+        )
+        ttk.Label(
+            scan_options, text="Размер пакета файлов",
+        ).grid(row=2, column=0, sticky="w", padx=(0, 10), pady=2)
+        self.scan_batch_size_spinbox = ttk.Spinbox(
+            scan_options,
+            from_=0,
+            to=MAX_SCAN_BATCH_SIZE,
+            increment=100,
+            textvariable=self.scan_batch_size_var,
+            width=10,
+        )
+        self.scan_batch_size_spinbox.grid(
+            row=2, column=1, sticky="w", padx=(0, 10), pady=2
+        )
+        ttk.Label(
+            scan_options,
+            text=f"0 = весь каталог (потоково, пакетами по {DEFAULT_SCAN_BATCH_SIZE})",
+            style="Muted.TLabel",
+        ).grid(row=2, column=2, sticky="w", padx=(0, 10), pady=2)
 
         # --------------------------------------------------------
         # Нижняя полоса состояния закреплена у нижнего края окна.
@@ -5689,6 +5726,7 @@ class FaceSearchGUI:
         # параметрами сканирования и индексации, чтобы флажок не менялся
         # посреди операции после того, как worker уже прочитал его значение.
         self.overwrite_existing_crops_check.config(state=state)
+        self.scan_batch_size_spinbox.config(state=state)
         # Не меняем параметры автоподстройки посреди активной операции:
         # выбранный режим потоков фиксируется при запуске задачи.
         self.auto_workers_check.config(state=state)
@@ -5933,6 +5971,24 @@ class FaceSearchGUI:
             )
             return
 
+        raw_batch_size = str(self.scan_batch_size_var.get() or "").strip()
+        try:
+            scan_batch_size = int(raw_batch_size) if raw_batch_size else 0
+        except (TypeError, ValueError):
+            messagebox.showerror(
+                "Сканирование",
+                "Размер пакета должен быть целым числом от 0 "
+                f"до {MAX_SCAN_BATCH_SIZE:,}.",
+            )
+            return
+        if scan_batch_size < 0 or scan_batch_size > MAX_SCAN_BATCH_SIZE:
+            messagebox.showerror(
+                "Сканирование",
+                "Размер пакета должен быть от 0 "
+                f"до {MAX_SCAN_BATCH_SIZE:,}.",
+            )
+            return
+
         auto_workers = bool(self.auto_workers_var.get())
 
         # Профиль среды определяем до запуска: это влияет только на стартовое
@@ -6022,12 +6078,17 @@ class FaceSearchGUI:
             else ", создание CROP ВЫКЛ (исходники сохраняются)"
         )
         overwrite_text = ", перезапись CROP ВКЛ" if overwrite_existing_crops else ""
+        batch_text = (
+            f", пакет файлов: {scan_batch_size}"
+            if scan_batch_size > 0
+            else f", все файлы (внутренний пакет {DEFAULT_SCAN_BATCH_SIZE})"
+        )
         backend = self.backend_mode_var.get()
         backend_text = "GPU (CUDA, fallback CPU)" if backend == BACKEND_GPU else "CPU"
         worker_text = "AUTO" if auto_workers else str(workers)
         self.status_var.set(
             f"Сканирование HDD... {backend_text}; потоков: {worker_text}; "
-            f"{mode_text}{delete_text}{crop_text}{overwrite_text}"
+            f"{mode_text}{delete_text}{crop_text}{overwrite_text}{batch_text}"
         )
         if auto_workers:
             self._set_auto_workers_status("Авто: запуск адаптивного контроллера...")
@@ -6048,6 +6109,7 @@ class FaceSearchGUI:
                 create_crop_files,
                 overwrite_existing_crops,
                 remote_db,
+                scan_batch_size,
             ),
             daemon=True,
         ).start()
@@ -6063,6 +6125,7 @@ class FaceSearchGUI:
         create_crop_files=True,
         overwrite_existing_crops=False,
         remote_db=False,
+        scan_batch_size=DEFAULT_SCAN_BATCH_SIZE,
     ):
         """Высокопроизводительный HDD -> CPU/GPU inference -> DB pipeline.
 
@@ -6077,21 +6140,41 @@ class FaceSearchGUI:
         5. Тяжёлая очистка duplicate SHA выполняется только один раз до worker-ов.
         """
         try:
-            # Не выполнять полную проверку всех images и файлов на диске перед
-            # каждым сканированием. На БД с сотнями тысяч записей тысячи stat()
-            # по HDD могут задерживать старт на минуты. Очистка отсутствующих
-            # исходников остаётся отдельной обслуживающей операцией.
-            self.events.put(("scan_startup_status", "Подготовка списка изображений..."))
-            files = [
-                p for p in directory.rglob("*")
-                if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
-            ]
-            total = len(files)
+            # Потоково перечисляем каталог: не создаём список из сотен тысяч или
+            # миллионов Path-объектов перед началом распознавания.
+            effective_batch_size = (
+                min(MAX_SCAN_BATCH_SIZE, int(scan_batch_size))
+                if int(scan_batch_size or 0) > 0
+                else DEFAULT_SCAN_BATCH_SIZE
+            )
+            self.events.put((
+                "scan_startup_status",
+                f"Поиск изображений; подготовка пакета до {effective_batch_size} файлов...",
+            ))
+            image_paths = (
+                path for path in directory.rglob("*")
+                if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+            )
+            batch_iter = iter(_iter_batches(image_paths, effective_batch_size))
+            first_batch = next(batch_iter, [])
+            total = len(first_batch)
             self.events.put(("scan_total", total))
             self.events.put((
                 "scan_startup_status",
-                f"Найдено изображений: {total}. Проверка базы данных...",
+                f"Найдено изображений: {total}. Проверка базы данных..."
+                if total else "Изображения в выбранной папке не найдены.",
             ))
+            if not first_batch:
+                self.events.put(("scan_done", 0, 0, 0, False, 0, 0, 0))
+                return
+
+            def iter_scan_paths():
+                nonlocal total
+                yield from first_batch
+                for batch in batch_iter:
+                    total += len(batch)
+                    self.events.put(("scan_discovered", total))
+                    yield from batch
 
             # Схема и legacy CROP-пути проверяются ровно один раз за сканирование.
             # Рабочие потоки ниже открывают свои соединения без повторной миграции.
@@ -6216,12 +6299,6 @@ class FaceSearchGUI:
                     return selected_app
 
             self.events.put(("backend_actual", actual_backend, backend))
-
-            self.events.put(("scan_total", total))
-
-            if total == 0:
-                self.events.put(("scan_done", 0))
-                return
 
             total_faces = 0
             total_updated_crops = 0
@@ -6570,7 +6647,7 @@ class FaceSearchGUI:
                 max_workers=executor_max_workers,
                 thread_name_prefix="gpu-face",
             ) as executor:
-                path_iter = iter(files)
+                path_iter = iter_scan_paths()
                 pending = set()
                 # Future -> исходный файл: даже при непредвиденном исключении
                 # не теряем имя изображения и не показываем «<unknown>».
@@ -6578,9 +6655,9 @@ class FaceSearchGUI:
 
                 # Очередь небольшая: достаточно держать executor занятым, но не
                 # резервировать память под огромное количество Future.
-                preload = min(
-                    total,
-                    max(executor_max_workers * 2, executor_max_workers + 2),
+                preload = max(
+                    executor_max_workers * 2,
+                    executor_max_workers + 2,
                 )
                 for _ in range(preload):
                     try:
@@ -9518,15 +9595,15 @@ def scan_directory(
     use_json_metadata: bool = True,
 ):
     """Сканирует папку в консольном режиме."""
-    files = [
-        p for p in directory.rglob("*")
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
-    ]
+    files = (
+        path for path in directory.rglob("*")
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+    )
 
-    total = len(files)
     total_faces = 0
+    processed_files = 0
 
-    print(f"Найдено изображений: {total}")
+    print("Обход каталога и обработка выполняются потоково.")
     print(
         "Режим: "
         + ("image + JSON" if use_json_metadata else "только лица + путь к файлу")
@@ -9537,6 +9614,7 @@ def scan_directory(
     )
 
     for index, path in enumerate(files, 1):
+        processed_files = index
         try:
             json_path = path.with_suffix(".json")
 
@@ -9562,12 +9640,15 @@ def scan_directory(
 
             total_faces += count
             suffix = ", исходник удалён" if deleted else ""
-            print(f"[{index}/{total}] {path.name}: лиц={count}{suffix}")
+            print(f"[{index}] {path.name}: лиц={count}{suffix}")
 
         except Exception as e:
             print(f"[ERROR] {path}: {e}")
 
-    print(f"Сканирование завершено. Добавлено лиц: {total_faces}")
+    print(
+        f"Сканирование завершено. Обработано изображений: {processed_files}; "
+        f"добавлено лиц: {total_faces}"
+    )
     return total_faces
 
 
