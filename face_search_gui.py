@@ -7180,7 +7180,7 @@ class FaceSearchGUI:
 
     def _query_drop_data_values(self, raw_data):
         """Разбирает Tcl-список файлов или текстовую ссылку из события Drop."""
-        raw = str(raw_data or "").replace("\\x00", "").strip()
+        raw = str(raw_data or "").replace("\x00", "").strip()
         if not raw:
             return []
         try:
@@ -7191,7 +7191,7 @@ class FaceSearchGUI:
         result = []
         for value in values:
             # URL-списки из браузеров могут содержать несколько строк и комментарии.
-            for line in str(value).replace("\\r", "\\n").split("\\n"):
+            for line in str(value).replace("\r", "\n").split("\n"):
                 candidate = line.strip().strip('"')
                 if not candidate or candidate.startswith("#"):
                     continue
@@ -7210,7 +7210,7 @@ class FaceSearchGUI:
         try:
             path = url2pathname(parsed.path)
             if parsed.netloc and parsed.netloc.lower() not in ("", "localhost"):
-                path = "\\\\" + parsed.netloc + path.replace("/", "\\\\")
+                path = "\\\\" + parsed.netloc + path.replace("/", "\\")
             return path
         except (OSError, TypeError, ValueError):
             return value
