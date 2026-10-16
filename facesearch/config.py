@@ -10,6 +10,10 @@ INDEX_FILE = "faces.faiss"
 DET_THRESHOLD = 0.50
 DET_SIZE = (640, 640)
 DEFAULT_TOP_K = 24
+# Количество путей в одном пакете при потоковом сканировании каталога.
+# Значение 0 в настройках GUI означает сканирование всего каталога с безопасным пакетом по умолчанию.
+DEFAULT_SCAN_BATCH_SIZE = 1000
+MAX_SCAN_BATCH_SIZE = 100000
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 LOCAL_DEFAULT_WORKERS = 8
 LOCAL_MAX_WORKERS = 24
