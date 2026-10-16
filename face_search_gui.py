@@ -81,7 +81,9 @@ def _iter_image_batches(
     отдельного каталога. Поэтому большая плоская папка с миллионом файлов не
     требует предварительно прочитать все записи до получения первых изображений.
     """
-    size = max(1, int(size))
+    # 0 означает один общий пакет: сначала перечисляем все изображения,
+    # затем передаём их в обработку без разбиения на внутренние блоки.
+    size = max(0, int(size))
     report_every = max(1, int(report_every))
     batch: list[Path] = []
     entries_seen = 0
@@ -143,7 +145,7 @@ def _iter_image_batches(
             # Отдаём неполный пакет также после каждых нескольких тысяч
             # записей каталога. Иначе при малом числе изображений среди
             # множества других файлов первый пакет мог бы собираться слишком долго.
-            if len(batch) >= size or (chunk_boundary and batch):
+            if size > 0 and (len(batch) >= size or (chunk_boundary and batch)):
                 yield batch
                 batch = []
 
@@ -5446,7 +5448,7 @@ class FaceSearchGUI:
         )
         ttk.Label(
             scan_options,
-            text=f"0 = весь каталог (потоково, пакетами по {DEFAULT_SCAN_BATCH_SIZE})",
+            text="0 = все файлы одним пакетом",
             style="Muted.TLabel",
         ).grid(row=2, column=2, sticky="w", padx=(0, 10), pady=2)
 
@@ -6308,7 +6310,7 @@ class FaceSearchGUI:
         batch_text = (
             f", пакет файлов: {scan_batch_size}"
             if scan_batch_size > 0
-            else f", все файлы (внутренний пакет {DEFAULT_SCAN_BATCH_SIZE})"
+            else ", все файлы одним пакетом"
         )
         backend = self.backend_mode_var.get()
         backend_text = "GPU (CUDA, fallback CPU)" if backend == BACKEND_GPU else "CPU"
@@ -6372,11 +6374,15 @@ class FaceSearchGUI:
             effective_batch_size = (
                 min(MAX_SCAN_BATCH_SIZE, int(scan_batch_size))
                 if int(scan_batch_size or 0) > 0
-                else DEFAULT_SCAN_BATCH_SIZE
+                else 0
             )
             self.events.put((
                 "scan_startup_status",
-                f"Поиск изображений; подготовка пакета до {effective_batch_size} файлов...",
+                (
+                    f"Поиск изображений; подготовка пакета до {effective_batch_size} файлов..."
+                    if effective_batch_size > 0
+                    else "Поиск изображений; подготовка общего пакета всех файлов..."
+                ),
             ))
             def report_discovery(entries_seen: int, images_found: int):
                 self.events.put((
