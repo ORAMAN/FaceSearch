@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 from collections import deque
+from itertools import islice
 import ctypes
 import gc
 import hashlib
@@ -56,9 +57,102 @@ from urllib.request import Request, url2pathname, urlopen
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 
+
+def _iter_image_batches(
+    directory: Path,
+    size: int,
+    *,
+    status_callback: Callable[[int, int], None] | None = None,
+    stop_check: Callable[[], bool] | None = None,
+    report_every: int = 5000,
+):
+    """Потоково обходит дерево через scandir и выдаёт ограниченные пакеты изображений.
+
+    В отличие от Path.rglob/os.walk, не материализует весь список содержимого
+    отдельного каталога. Поэтому большая плоская папка с миллионом файлов не
+    требует предварительно прочитать все записи до получения первых изображений.
+    """
+    size = max(1, int(size))
+    report_every = max(1, int(report_every))
+    batch: list[Path] = []
+    entries_seen = 0
+    images_found = 0
+    stack = []
+
+    try:
+        # Сразу сообщаем GUI, что именно сейчас начался обход каталога.
+        # Это важно для очень больших или медленных сетевых папок: первый пакет
+        # ещё не собран, но пользователь уже видит текущий этап.
+        if status_callback is not None:
+            status_callback(entries_seen, images_found)
+
+        stack.append(os.scandir(os.fspath(directory)))
+        while stack:
+            if stop_check is not None and stop_check():
+                return
+
+            current = stack[-1]
+            try:
+                entry = next(current)
+            except StopIteration:
+                try:
+                    current.close()
+                finally:
+                    stack.pop()
+                continue
+            except OSError:
+                try:
+                    current.close()
+                finally:
+                    stack.pop()
+                continue
+
+            entries_seen += 1
+            try:
+                # Не следуем за ссылками на каталоги, чтобы избежать циклов.
+                # Для файлов сохраняем прежнее поведение: file-symlink на фото
+                # может быть включён в обработку.
+                if entry.is_dir(follow_symlinks=False):
+                    try:
+                        stack.append(os.scandir(entry.path))
+                    except OSError:
+                        pass
+                elif (
+                    os.path.splitext(entry.name)[1].lower() in IMAGE_EXTENSIONS
+                    and entry.is_file()
+                ):
+                    batch.append(Path(entry.path))
+                    images_found += 1
+            except OSError:
+                # Удалённые/недоступные во время обхода записи пропускаем.
+                pass
+
+            chunk_boundary = entries_seen % report_every == 0
+            if chunk_boundary and status_callback is not None:
+                status_callback(entries_seen, images_found)
+
+            # Отдаём неполный пакет также после каждых нескольких тысяч
+            # записей каталога. Иначе при малом числе изображений среди
+            # множества других файлов первый пакет мог бы собираться слишком долго.
+            if len(batch) >= size or (chunk_boundary and batch):
+                yield batch
+                batch = []
+
+        if batch and not (stop_check is not None and stop_check()):
+            yield batch
+    finally:
+        for iterator in reversed(stack):
+            try:
+                iterator.close()
+            except Exception:
+                pass
+
+
 # Разделённые модули конфигурации, настроек, профилей БД и телеметрии.
 from facesearch.config import *  # noqa: F401,F403 - constants are public app configuration
-from facesearch.settings import _load_gui_settings, _save_gui_settings_data
+from facesearch.settings import (
+    _load_gui_settings, _save_gui_settings_data, COLLAPSIBLE_SECTION_DEFAULTS,
+)
 from facesearch.database_profiles import (
     _profile_storage_slug, _profile_storage_paths, _normalize_profile_storage_paths,
     _default_profile, _load_db_profiles, _save_db_profiles,
@@ -1606,36 +1700,23 @@ def _find_existing_source_crop_rows(
                 (int(profile_id), url_image),
             ).fetchall()
         else:
-            # Если JSON не содержит url_image, старые записи могли хранить
-            # либо NULL/пустое значение, либо file://-ссылку в url_image.
-            # Разбиваем OR на два запроса, чтобы SQLite использовал оба новых
-            # составных индекса, а не сканировал все строки source_type='import'.
+            # Без url_image профильная ссылка source_url не позволяет определить,
+            # какая исходная фотография породила CROP: у одного профиля может быть
+            # сотни фотографий. Нельзя связывать все строки с NULL url_image с
+            # текущим файлом — иначе последующие фотографии профиля будут пропущены.
+            # Сопоставляем только по точному локальному URI исходного файла.
+            if not fallback_image_url:
+                return []
             rows = conn.execute(
                 """
                 SELECT id, path
                 FROM images
                 WHERE source_type = 'import'
-                  AND profile_id = ?
-                  AND source_url = ?
-                  AND (url_image IS NULL OR url_image = '')
+                  AND profile_id = ? AND url_image = ?
                 ORDER BY id
                 """,
-                (int(profile_id), source_url),
+                (int(profile_id), fallback_image_url),
             ).fetchall()
-            if fallback_image_url:
-                fallback_rows = conn.execute(
-                    """
-                    SELECT id, path
-                    FROM images
-                    WHERE source_type = 'import'
-                      AND profile_id = ? AND url_image = ?
-                    ORDER BY id
-                    """,
-                    (int(profile_id), fallback_image_url),
-                ).fetchall()
-                found = {int(row[0]): row for row in rows}
-                found.update({int(row[0]): row for row in fallback_rows})
-                rows = [found[key] for key in sorted(found)]
 
     return [(int(row[0]), str(row[1] or "")) for row in rows]
 
@@ -1912,11 +1993,12 @@ def import_image_bundle(
                     return {
                         "faces": 0,
                         "deleted": deleted,
-                        "message": "метаданные уже есть в БД",
+                        "message": "исходное изображение уже есть в БД; распознавание пропущено",
                         "updated": 0,
                         "added": 0,
                         "removed": 0,
                         "restored": 0,
+                        "detected_faces": None,
                     }
 
     # Завершаем транзакцию чтения до длительной загрузки/распознавания кадра.
@@ -1938,17 +2020,18 @@ def import_image_bundle(
         # Распознавание завершилось штатно: отсутствие лиц — это результат,
         # а не ошибка. При включённом чекбоксе удаляем и изображение, и JSON.
         deleted = _delete_processed_source_files(image_path, json_path) if delete_source else False
-        return {"faces": 0, "deleted": deleted, "message": "лицо не найдено"}
+        return {
+            "faces": 0,
+            "deleted": deleted,
+            "message": "лицо не найдено",
+            "detected_faces": 0,
+        }
 
     profile_id = _upsert_import_profile(conn, metadata)
-    image_url = metadata_image_url
-    if not image_url and not create_crop_files:
-        # Для последующего восстановления сохраняем локальный исходник как
-        # file:// URL, не затирая source_url (ссылка на профиль/страницу).
-        try:
-            image_url = image_path.resolve().as_uri()
-        except (OSError, ValueError):
-            image_url = str(image_path.resolve())
+    # Если JSON не содержит URL оригинала, используем локальный URI исходника
+    # независимо от режима создания CROP. Это позволяет отличать несколько
+    # фотографий одного профиля и не пропускать новые файлы при повторном сканировании.
+    image_url = metadata_image_url or fallback_image_url
 
     created = 0
     created_files: list[Path] = []
@@ -1985,7 +2068,7 @@ def import_image_bundle(
                 deleted = True
             except OSError:
                 deleted = False
-        message = "метаданные уже есть в БД"
+        message = "исходное изображение уже есть в БД; распознавание пропущено"
         if restored_missing_crops:
             message += f"; восстановлено CROP: {restored_missing_crops}"
         return {
@@ -1996,6 +2079,7 @@ def import_image_bundle(
             "added": 0,
             "removed": 0,
             "restored": restored_missing_crops,
+            "detected_faces": len(valid_faces),
         }
 
     old_crop_row_index = 0
@@ -2140,13 +2224,17 @@ def import_image_bundle(
                 deleted = _delete_processed_source_files(image_path, json_path)
             else:
                 deleted = False
-            message = "crop уже есть в БД"
+            message = (
+                f"распознано лиц: {len(valid_faces)}, "
+                "новых CROP нет — соответствующие записи уже есть в БД"
+            )
             if restored_missing_crops:
                 message += f"; восстановлено CROP: {restored_missing_crops}"
             return {
                 "faces": 0, "deleted": deleted, "message": message,
                 "updated": 0, "added": 0, "removed": 0,
                 "restored": restored_missing_crops,
+                "detected_faces": len(valid_faces),
             }
 
         conn.commit()
@@ -2176,6 +2264,7 @@ def import_image_bundle(
         "updated": updated_count,
         "added": added_count,
         "removed": removed_count,
+        "detected_faces": len(valid_faces),
     }
 
 
@@ -2231,12 +2320,14 @@ def process_local_image(
             if not _resolve_db_crop_path(stored_path, image_id=int(image_id)).is_file()
         ]
         restored_missing_crops = 0
+        detected_faces: int | None = None
         if create_crop_files and missing_existing_rows:
             existing_image = load_image(image_path)
             if existing_image is not None:
                 existing_faces = _detect_faces_with_padding(
                     app, existing_image, padding_ratio=0.40
                 )
+                detected_faces = len(existing_faces)
                 restored_missing_crops = _restore_missing_source_crops(
                     conn, existing_image, existing_faces, existing_rows
                 )
@@ -2251,6 +2342,7 @@ def process_local_image(
             "deleted": deleted,
             "message": message,
             "restored": restored_missing_crops,
+            "detected_faces": detected_faces,
         }
 
     image = load_image(image_path)
@@ -2259,6 +2351,7 @@ def process_local_image(
             "faces": 0,
             "deleted": False,
             "message": "не удалось открыть изображение",
+            "detected_faces": None,
         }
 
     valid_faces = _detect_faces_with_padding(
@@ -2273,6 +2366,7 @@ def process_local_image(
             "faces": 0,
             "deleted": False,
             "message": "лицо не найдено",
+            "detected_faces": 0,
         }
 
     created = 0
@@ -2418,10 +2512,14 @@ def process_local_image(
             return {
                 "faces": 0,
                 "deleted": deleted,
-                "message": "crop уже есть в БД",
+                "message": (
+                    f"распознано лиц: {len(valid_faces)}, "
+                    "новых CROP нет — соответствующие записи уже есть в БД"
+                ),
                 "updated": 0,
                 "added": 0,
                 "removed": 0,
+                "detected_faces": len(valid_faces),
             }
 
         conn.commit()
@@ -2445,6 +2543,7 @@ def process_local_image(
         "updated": updated_count,
         "added": added_count,
         "removed": removed_count,
+        "detected_faces": len(valid_faces),
     }
 
 
@@ -4012,6 +4111,7 @@ class FaceSearchGUI:
             self.backend_mode_var,
             self.folder_var,
             self.local_workers_var,
+            self.scan_batch_size_var,
             self.auto_workers_var,
             self.delete_processed_var,
             self.use_json_metadata_var,
@@ -4209,6 +4309,12 @@ class FaceSearchGUI:
             except tk.TclError:
                 maximized = False
 
+            try:
+                scan_batch_size = int(str(self.scan_batch_size_var.get()).strip() or 0)
+            except (TypeError, ValueError):
+                scan_batch_size = DEFAULT_SCAN_BATCH_SIZE
+            scan_batch_size = max(0, min(MAX_SCAN_BATCH_SIZE, scan_batch_size))
+
             settings = {
                 "window_geometry": self.root.geometry(),
                 "window_maximized": maximized,
@@ -4230,6 +4336,7 @@ class FaceSearchGUI:
                 ),
                 "backend": str(self.backend_mode_var.get()),
                 "workers": int(self.local_workers_var.get()),
+                "scan_batch_size": scan_batch_size,
                 "auto_workers": bool(self.auto_workers_var.get()),
                 "delete_processed": bool(self.delete_processed_var.get()),
                 "use_json_metadata": bool(self.use_json_metadata_var.get()),
@@ -4239,6 +4346,10 @@ class FaceSearchGUI:
                 "create_crops_on_html": bool(self.create_crops_on_html_var.get()),
                 "top_k": int(self.topk_var.get()),
                 "min_similarity": float(self.min_similarity_var.get()),
+                "collapsible_sections": {
+                    key: bool(group.get("expanded", True))
+                    for key, group in getattr(self, "_collapsible_groups", {}).items()
+                },
             }
 
             _save_gui_settings_data(settings)
@@ -4937,6 +5048,20 @@ class FaceSearchGUI:
                 font=("Segoe UI Semibold", 9),
             )
             style.configure(
+                "SectionHeader.TButton",
+                background=colors["window"], foreground=colors["foreground"],
+                bordercolor=colors["border"], borderwidth=0, relief="flat",
+                anchor="w", padding=(8, 5), font=("Segoe UI Semibold", 10),
+            )
+            style.map(
+                "SectionHeader.TButton",
+                background=[
+                    ("pressed", colors["selection"]),
+                    ("active", colors["button_active"]),
+                ],
+                foreground=[("disabled", colors["muted"]), ("!disabled", colors["foreground"])],
+            )
+            style.configure(
                 "TButton", background=colors["button"], foreground=colors["foreground"],
                 bordercolor=colors["border"], padding=(10, 7), font=("Segoe UI", 9),
                 relief="flat",
@@ -5060,6 +5185,72 @@ class FaceSearchGUI:
         except tk.TclError:
             pass
 
+    def _create_collapsible_group(
+        self,
+        parent,
+        title: str,
+        key: str,
+        *,
+        padding=(10, 8),
+        pady=(0, 8),
+    ):
+        """Создаёт секцию с кликабельным заголовком и сохраняемым состоянием."""
+        if not hasattr(self, "_collapsible_groups"):
+            self._collapsible_groups = {}
+
+        saved_states = self.gui_settings.get("collapsible_sections", {})
+        if not isinstance(saved_states, dict):
+            saved_states = {}
+        expanded = bool(saved_states.get(key, COLLAPSIBLE_SECTION_DEFAULTS.get(key, True)))
+
+        container = ttk.Frame(parent, style="App.TFrame")
+        container.pack(fill="x", pady=pady)
+
+        header = ttk.Button(
+            container,
+            text="",
+            style="SectionHeader.TButton",
+            command=lambda group_key=key: self._toggle_collapsible_group(group_key),
+        )
+        # ttk.Button не принимает параметр anchor напрямую; выравнивание
+        # задаётся стилем SectionHeader.TButton ниже.
+        header.pack(fill="x")
+
+        content = ttk.LabelFrame(container, padding=padding)
+        self._collapsible_groups[key] = {
+            "title": title,
+            "container": container,
+            "header": header,
+            "content": content,
+            "expanded": expanded,
+        }
+        self._render_collapsible_group(key)
+        return content
+
+    def _render_collapsible_group(self, key: str):
+        """Отображает стрелку и состояние тела одной сворачиваемой секции."""
+        group = getattr(self, "_collapsible_groups", {}).get(key)
+        if not group:
+            return
+        expanded = bool(group.get("expanded", True))
+        arrow = "▾" if expanded else "▸"
+        group["header"].configure(text=f"{arrow}  {group['title']}")
+        content = group["content"]
+        if expanded:
+            if not content.winfo_manager():
+                content.pack(fill="x")
+        else:
+            content.pack_forget()
+
+    def _toggle_collapsible_group(self, key: str):
+        """Переключает секцию и сохраняет её состояние в settings.xml."""
+        group = getattr(self, "_collapsible_groups", {}).get(key)
+        if not group:
+            return
+        group["expanded"] = not bool(group.get("expanded", True))
+        self._render_collapsible_group(key)
+        self._schedule_settings_save()
+
     def _build_ui(self):
         """Создаёт современную компоновку интерфейса, не меняя обработчики приложения."""
         self.style = ttk.Style(self.root)
@@ -5103,10 +5294,10 @@ class FaceSearchGUI:
         # --------------------------------------------------------
         # Источник изображений и действия
         # --------------------------------------------------------
-        source_frame = ttk.LabelFrame(
-            self.page, text="Источник изображений", padding=(10, 8),
+        source_frame = self._create_collapsible_group(
+            self.page, "Источник изображений", "source_images", padding=(10, 8),
+            pady=(0, 8),
         )
-        source_frame.pack(fill="x", pady=(0, 8))
         source_row = ttk.Frame(source_frame)
         source_row.pack(fill="x")
 
@@ -5189,14 +5380,10 @@ class FaceSearchGUI:
         # --------------------------------------------------------
         # Профиль базы данных: выбор/подключение отдельно от управления профилями
         # --------------------------------------------------------
-        db_groups_row = ttk.Frame(self.page, style="App.TFrame")
-        db_groups_row.pack(fill="x", pady=(0, 8))
-        db_groups_row.columnconfigure(0, weight=1)
-
-        db_frame = ttk.LabelFrame(
-            db_groups_row, text="База данных", padding=(10, 8),
+        db_frame = self._create_collapsible_group(
+            self.page, "База данных", "database", padding=(10, 8),
+            pady=(0, 8),
         )
-        db_frame.grid(row=0, column=0, columnspan=2, sticky="nsew")
 
         # Одна строка: выбор и подключение слева, управление профилями справа.
         # Вертикальный разделитель и дополнительный отступ визуально отделяют
@@ -5264,10 +5451,10 @@ class FaceSearchGUI:
         # --------------------------------------------------------
         # Вычисления
         # --------------------------------------------------------
-        backend_frame = ttk.LabelFrame(
-            self.page, text="Вычисления", padding=(10, 6),
+        backend_frame = self._create_collapsible_group(
+            self.page, "Вычисления", "compute", padding=(10, 6),
+            pady=(0, 8),
         )
-        backend_frame.pack(fill="x", pady=(0, 8))
         self.backend_gpu_radio = ttk.Radiobutton(
             backend_frame, text="GPU (CUDA с переходом на CPU при ошибке)",
             value=BACKEND_GPU, variable=self.backend_mode_var, command=self._on_backend_change,
@@ -5285,10 +5472,10 @@ class FaceSearchGUI:
         # --------------------------------------------------------
         # Параметры сканирования. Grid не даёт длинным подписям вытеснять кнопки.
         # --------------------------------------------------------
-        scan_options = ttk.LabelFrame(
-            self.page, text="Параметры обработки", padding=(10, 5),
+        scan_options = self._create_collapsible_group(
+            self.page, "Параметры обработки", "processing", padding=(10, 5),
+            pady=(0, 6),
         )
-        scan_options.pack(fill="x", pady=(0, 6))
         for column in range(3):
             scan_options.columnconfigure(column, weight=1)
 
@@ -5328,6 +5515,28 @@ class FaceSearchGUI:
         self.create_crops_on_html_check.grid(
             row=1, column=2, sticky="w", padx=(0, 10), pady=2
         )
+        self.scan_batch_size_var = tk.StringVar(
+            value=str(self.gui_settings.get("scan_batch_size", DEFAULT_SCAN_BATCH_SIZE))
+        )
+        ttk.Label(
+            scan_options, text="Размер пакета файлов",
+        ).grid(row=2, column=0, sticky="w", padx=(0, 10), pady=2)
+        self.scan_batch_size_spinbox = ttk.Spinbox(
+            scan_options,
+            from_=0,
+            to=MAX_SCAN_BATCH_SIZE,
+            increment=100,
+            textvariable=self.scan_batch_size_var,
+            width=10,
+        )
+        self.scan_batch_size_spinbox.grid(
+            row=2, column=1, sticky="w", padx=(0, 10), pady=2
+        )
+        ttk.Label(
+            scan_options,
+            text=f"0 = весь каталог (потоково, пакетами по {DEFAULT_SCAN_BATCH_SIZE})",
+            style="Muted.TLabel",
+        ).grid(row=2, column=2, sticky="w", padx=(0, 10), pady=2)
 
         # --------------------------------------------------------
         # Нижняя полоса состояния закреплена у нижнего края окна.
@@ -5689,6 +5898,7 @@ class FaceSearchGUI:
         # параметрами сканирования и индексации, чтобы флажок не менялся
         # посреди операции после того, как worker уже прочитал его значение.
         self.overwrite_existing_crops_check.config(state=state)
+        self.scan_batch_size_spinbox.config(state=state)
         # Не меняем параметры автоподстройки посреди активной операции:
         # выбранный режим потоков фиксируется при запуске задачи.
         self.auto_workers_check.config(state=state)
@@ -5933,6 +6143,24 @@ class FaceSearchGUI:
             )
             return
 
+        raw_batch_size = str(self.scan_batch_size_var.get() or "").strip()
+        try:
+            scan_batch_size = int(raw_batch_size) if raw_batch_size else 0
+        except (TypeError, ValueError):
+            messagebox.showerror(
+                "Сканирование",
+                "Размер пакета должен быть целым числом от 0 "
+                f"до {MAX_SCAN_BATCH_SIZE:,}.",
+            )
+            return
+        if scan_batch_size < 0 or scan_batch_size > MAX_SCAN_BATCH_SIZE:
+            messagebox.showerror(
+                "Сканирование",
+                "Размер пакета должен быть от 0 "
+                f"до {MAX_SCAN_BATCH_SIZE:,}.",
+            )
+            return
+
         auto_workers = bool(self.auto_workers_var.get())
 
         # Профиль среды определяем до запуска: это влияет только на стартовое
@@ -6022,12 +6250,17 @@ class FaceSearchGUI:
             else ", создание CROP ВЫКЛ (исходники сохраняются)"
         )
         overwrite_text = ", перезапись CROP ВКЛ" if overwrite_existing_crops else ""
+        batch_text = (
+            f", пакет файлов: {scan_batch_size}"
+            if scan_batch_size > 0
+            else f", все файлы (внутренний пакет {DEFAULT_SCAN_BATCH_SIZE})"
+        )
         backend = self.backend_mode_var.get()
         backend_text = "GPU (CUDA, fallback CPU)" if backend == BACKEND_GPU else "CPU"
         worker_text = "AUTO" if auto_workers else str(workers)
         self.status_var.set(
             f"Сканирование HDD... {backend_text}; потоков: {worker_text}; "
-            f"{mode_text}{delete_text}{crop_text}{overwrite_text}"
+            f"{mode_text}{delete_text}{crop_text}{overwrite_text}{batch_text}"
         )
         if auto_workers:
             self._set_auto_workers_status("Авто: запуск адаптивного контроллера...")
@@ -6048,6 +6281,7 @@ class FaceSearchGUI:
                 create_crop_files,
                 overwrite_existing_crops,
                 remote_db,
+                scan_batch_size,
             ),
             daemon=True,
         ).start()
@@ -6063,6 +6297,7 @@ class FaceSearchGUI:
         create_crop_files=True,
         overwrite_existing_crops=False,
         remote_db=False,
+        scan_batch_size=DEFAULT_SCAN_BATCH_SIZE,
     ):
         """Высокопроизводительный HDD -> CPU/GPU inference -> DB pipeline.
 
@@ -6077,21 +6312,49 @@ class FaceSearchGUI:
         5. Тяжёлая очистка duplicate SHA выполняется только один раз до worker-ов.
         """
         try:
-            # Не выполнять полную проверку всех images и файлов на диске перед
-            # каждым сканированием. На БД с сотнями тысяч записей тысячи stat()
-            # по HDD могут задерживать старт на минуты. Очистка отсутствующих
-            # исходников остаётся отдельной обслуживающей операцией.
-            self.events.put(("scan_startup_status", "Подготовка списка изображений..."))
-            files = [
-                p for p in directory.rglob("*")
-                if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
-            ]
-            total = len(files)
+            # Потоково перечисляем каталог: не создаём список из сотен тысяч или
+            # миллионов Path-объектов перед началом распознавания.
+            effective_batch_size = (
+                min(MAX_SCAN_BATCH_SIZE, int(scan_batch_size))
+                if int(scan_batch_size or 0) > 0
+                else DEFAULT_SCAN_BATCH_SIZE
+            )
+            self.events.put((
+                "scan_startup_status",
+                f"Поиск изображений; подготовка пакета до {effective_batch_size} файлов...",
+            ))
+            def report_discovery(entries_seen: int, images_found: int):
+                self.events.put((
+                    "scan_discovery_status",
+                    int(entries_seen),
+                    int(images_found),
+                ))
+
+            batch_iter = iter(_iter_image_batches(
+                directory,
+                effective_batch_size,
+                status_callback=report_discovery,
+                stop_check=self.scan_stop.is_set,
+            ))
+            first_batch = next(batch_iter, [])
+            total = len(first_batch)
             self.events.put(("scan_total", total))
             self.events.put((
                 "scan_startup_status",
-                f"Найдено изображений: {total}. Проверка базы данных...",
+                f"Подготовлено в первом пакете изображений: {total}. Проверка базы данных..."
+                if total else "Изображения в выбранной папке не найдены.",
             ))
+            if not first_batch:
+                self.events.put(("scan_done", 0, 0, 0, False, 0, 0, 0))
+                return
+
+            def iter_scan_paths():
+                nonlocal total
+                yield from first_batch
+                for batch in batch_iter:
+                    total += len(batch)
+                    self.events.put(("scan_discovered", total))
+                    yield from batch
 
             # Схема и legacy CROP-пути проверяются ровно один раз за сканирование.
             # Рабочие потоки ниже открывают свои соединения без повторной миграции.
@@ -6103,7 +6366,7 @@ class FaceSearchGUI:
 
             self.events.put((
                 "scan_startup_status",
-                f"Найдено изображений: {total}. Подготовка модели распознавания...",
+                f"Первый пакет: {total} изображений. Подготовка модели распознавания...",
             ))
 
             # Сначала создаём базовую модель выбранного backend; дополнительные
@@ -6216,12 +6479,6 @@ class FaceSearchGUI:
                     return selected_app
 
             self.events.put(("backend_actual", actual_backend, backend))
-
-            self.events.put(("scan_total", total))
-
-            if total == 0:
-                self.events.put(("scan_done", 0))
-                return
 
             total_faces = 0
             total_updated_crops = 0
@@ -6570,7 +6827,7 @@ class FaceSearchGUI:
                 max_workers=executor_max_workers,
                 thread_name_prefix="gpu-face",
             ) as executor:
-                path_iter = iter(files)
+                path_iter = iter_scan_paths()
                 pending = set()
                 # Future -> исходный файл: даже при непредвиденном исключении
                 # не теряем имя изображения и не показываем «<unknown>».
@@ -6578,9 +6835,9 @@ class FaceSearchGUI:
 
                 # Очередь небольшая: достаточно держать executor занятым, но не
                 # резервировать память под огромное количество Future.
-                preload = min(
-                    total,
-                    max(executor_max_workers * 2, executor_max_workers + 2),
+                preload = max(
+                    executor_max_workers * 2,
+                    executor_max_workers + 2,
                 )
                 for _ in range(preload):
                     try:
@@ -6666,12 +6923,24 @@ class FaceSearchGUI:
                             else:
                                 message = f"{result_path.name}: лиц={count}"
 
+                            # Для скорости используем лица, найденные детектором,
+                            # а не только новые CROP/строки, добавленные в БД.
+                            # None означает, что модель не запускалась (например,
+                            # исходник и его CROP уже были обработаны ранее).
+                            detected_count = import_result.get("detected_faces")
+                            if detected_count is not None:
+                                try:
+                                    detected_count = max(0, int(detected_count))
+                                except (TypeError, ValueError):
+                                    detected_count = 0
+
                             self.events.put((
                                 "scan_progress",
                                 completed,
                                 total,
                                 count,
                                 message,
+                                detected_count,
                             ))
 
                         # Контроллер получает реальную скорость завершения изображений
@@ -8032,8 +8301,17 @@ class FaceSearchGUI:
                 elif kind == "scan_startup_status":
                     self.status_var.set(str(event[1]))
 
+                elif kind == "scan_discovery_status":
+                    entries_seen = max(0, int(event[1] or 0))
+                    images_found = max(0, int(event[2] or 0))
+                    self.status_var.set(
+                        "Обход каталога: проверено элементов "
+                        f"{entries_seen:,}; найдено изображений {images_found:,}"
+                    )
+
                 elif kind == "scan_total":
                     total = event[1]
+                    self._scan_progress_value = 0
                     self._scan_rate_started_at = time.monotonic()
                     self._scan_rate_last_completed = 0
                     # Скользящее окно: время, число завершённых изображений и лиц.
@@ -8052,12 +8330,28 @@ class FaceSearchGUI:
                     )
 
                     self.status_var.set(
-                        f"Найдено изображений: {total}"
+                        f"Подготовлен первый пакет изображений: {total}"
                     )
 
-                elif kind == "scan_progress":
-                    n, total, count, path = event[1:]
+                elif kind == "scan_discovered":
+                    total = max(0, int(event[1] or 0))
+                    current_value = int(getattr(self, "_scan_progress_value", 0) or 0)
+                    self.progress.stop()
+                    self.progress.config(
+                        mode="determinate",
+                        maximum=max(1, total),
+                        value=min(current_value, max(1, total)),
+                    )
+                    self.status_var.set(f"Найдено изображений: {total}")
 
+                elif kind == "scan_progress":
+                    n, total, count, path = event[1:5]
+                    # Старые события используют count; новые отдельно передают
+                    # число лиц, найденных при inference. None означает, что
+                    # изображение было пропущено без запуска детектора.
+                    detected_count = event[5] if len(event) > 5 else count
+
+                    self._scan_progress_value = int(n or 0)
                     self.progress.config(value=n)
 
                     # Скорость за скользящее окно последних 5 секунд, а не
@@ -8071,7 +8365,7 @@ class FaceSearchGUI:
                         self._scan_rate_samples = deque()
                     previous_n = int(getattr(self, "_scan_rate_last_completed", 0) or 0)
                     completed_delta = max(0, int(n or 0) - previous_n)
-                    faces_delta = max(0, int(count or 0))
+                    faces_delta = max(0, int(detected_count or 0))
                     self._scan_rate_last_completed = int(n or 0)
                     if completed_delta or faces_delta:
                         self._scan_rate_samples.append((now, completed_delta, faces_delta))
@@ -8101,7 +8395,7 @@ class FaceSearchGUI:
                             f"{base} | {self._scan_rate_text}" if base else self._scan_rate_text
                         )
                     self.status_var.set(
-                        f"[{n}/{total}] лиц: {count} — {path}"
+                        f"[{n}/{total}] добавлено лиц: {count} — {path}"
                     )
 
                 elif kind == "scan_error":
@@ -8176,15 +8470,17 @@ class FaceSearchGUI:
                                     f"удалено лишних: {total_removed}; лиц: {total_faces}"
                                 )
                             self.status_var.set(
-                                f"Сканирование остановлено ({completed}/{total}). {summary}"
+                                f"Сканирование остановлено. Обработано: {completed}; "
+                                f"обнаружено: {total}. {summary}"
                             )
                         else:
                             self.status_var.set(
                                 "Сканирование остановлено. "
-                                f"Обработано: {completed}/{total}; добавлено лиц: {total_faces}"
+                                f"Обработано: {completed}; обнаружено: {total}; "
+                                f"добавлено лиц: {total_faces}"
                             )
                         self.scan_control_status_var.set(
-                            f"Остановлено: {completed}/{total}"
+                            f"Остановлено: обработано {completed}; обнаружено {total}"
                         )
                     else:
                         if bool(self.overwrite_existing_crops_var.get()):
@@ -8442,11 +8738,20 @@ class FaceSearchGUI:
 
         except queue.Empty:
             pass
-
-        self.root.after(
-            100,
-            self._poll_events,
-        )
+        except Exception as exc:
+            # Ошибка обработки одного GUI-события не должна навсегда отключать
+            # опрос очереди. Иначе scan worker продолжает работать и ставить
+            # события в очередь, а статус интерфейса остаётся на первом сообщении.
+            print(f"[GUI EVENT POLL ERROR] {exc}")
+            traceback.print_exc()
+        finally:
+            # Всегда планируем следующий опрос, даже если обработчик события
+            # неожиданно выбросил исключение. После закрытия окна after уже не нужен.
+            try:
+                if self.root.winfo_exists():
+                    self.root.after(100, self._poll_events)
+            except (tk.TclError, RuntimeError):
+                pass
 
     def _close(self):
         try:
@@ -9518,15 +9823,15 @@ def scan_directory(
     use_json_metadata: bool = True,
 ):
     """Сканирует папку в консольном режиме."""
-    files = [
-        p for p in directory.rglob("*")
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
-    ]
+    files = (
+        path for path in directory.rglob("*")
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+    )
 
-    total = len(files)
     total_faces = 0
+    processed_files = 0
 
-    print(f"Найдено изображений: {total}")
+    print("Обход каталога и обработка выполняются потоково.")
     print(
         "Режим: "
         + ("image + JSON" if use_json_metadata else "только лица + путь к файлу")
@@ -9537,6 +9842,7 @@ def scan_directory(
     )
 
     for index, path in enumerate(files, 1):
+        processed_files = index
         try:
             json_path = path.with_suffix(".json")
 
@@ -9562,12 +9868,15 @@ def scan_directory(
 
             total_faces += count
             suffix = ", исходник удалён" if deleted else ""
-            print(f"[{index}/{total}] {path.name}: лиц={count}{suffix}")
+            print(f"[{index}] {path.name}: лиц={count}{suffix}")
 
         except Exception as e:
             print(f"[ERROR] {path}: {e}")
 
-    print(f"Сканирование завершено. Добавлено лиц: {total_faces}")
+    print(
+        f"Сканирование завершено. Обработано изображений: {processed_files}; "
+        f"добавлено лиц: {total_faces}"
+    )
     return total_faces
 
 

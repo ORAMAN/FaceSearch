@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 from typing import Any
 from .config import (
     APP_DIR, SETTINGS_FILE, LOCAL_DEFAULT_WORKERS, LOCAL_MAX_WORKERS,
-    AUTO_WORKERS_DEFAULT, DEFAULT_TOP_K,
+    AUTO_WORKERS_DEFAULT, DEFAULT_TOP_K, DEFAULT_SCAN_BATCH_SIZE, MAX_SCAN_BATCH_SIZE,
 )
 
 def _xml_bool(value: Any, default: bool = False) -> bool:
@@ -28,6 +28,15 @@ def _xml_float(value: Any, default: float) -> float:
         return default
 
 
+# Новые установки по умолчанию сохраняют прежний вид интерфейса (все группы раскрыты).
+COLLAPSIBLE_SECTION_DEFAULTS = {
+    "source_images": True,
+    "database": True,
+    "compute": True,
+    "processing": True,
+}
+
+
 def _load_gui_settings() -> dict[str, Any]:
     settings = {
         "window_geometry": "1250x900",
@@ -40,6 +49,7 @@ def _load_gui_settings() -> dict[str, Any]:
         "query_image": "",
         "backend": "",
         "workers": LOCAL_DEFAULT_WORKERS,
+        "scan_batch_size": DEFAULT_SCAN_BATCH_SIZE,
         "auto_workers": AUTO_WORKERS_DEFAULT,
         "delete_processed": False,
         "use_json_metadata": True,
@@ -49,6 +59,7 @@ def _load_gui_settings() -> dict[str, Any]:
         "create_crops_on_html": False,
         "top_k": DEFAULT_TOP_K,
         "min_similarity": 43.0,
+        "collapsible_sections": dict(COLLAPSIBLE_SECTION_DEFAULTS),
     }
 
     if not SETTINGS_FILE.is_file():
@@ -77,6 +88,15 @@ def _load_gui_settings() -> dict[str, Any]:
                 0, _xml_int(node.findtext("paned_preview_sash_position"), 0)
             )
 
+        node = root.find("sections")
+        if node is not None:
+            section_states = dict(COLLAPSIBLE_SECTION_DEFAULTS)
+            for key, default in COLLAPSIBLE_SECTION_DEFAULTS.items():
+                value = node.findtext(key)
+                if value is not None:
+                    section_states[key] = _xml_bool(value, default)
+            settings["collapsible_sections"] = section_states
+
         node = root.find("database")
         if node is not None:
             value = node.findtext("profile")
@@ -93,6 +113,13 @@ def _load_gui_settings() -> dict[str, Any]:
                 min(
                     LOCAL_MAX_WORKERS,
                     _xml_int(node.findtext("workers"), LOCAL_DEFAULT_WORKERS),
+                ),
+            )
+            settings["scan_batch_size"] = max(
+                0,
+                min(
+                    MAX_SCAN_BATCH_SIZE,
+                    _xml_int(node.findtext("batch_size"), DEFAULT_SCAN_BATCH_SIZE),
                 ),
             )
             settings["auto_workers"] = _xml_bool(
@@ -173,6 +200,15 @@ def _save_gui_settings_data(settings: dict[str, Any]) -> None:
         max(0, _xml_int(settings.get("paned_preview_sash_position"), 0))
     )
 
+    node = ET.SubElement(root, "sections")
+    section_states = settings.get("collapsible_sections", {})
+    if not isinstance(section_states, dict):
+        section_states = {}
+    for key, default in COLLAPSIBLE_SECTION_DEFAULTS.items():
+        ET.SubElement(node, key).text = (
+            "true" if bool(section_states.get(key, default)) else "false"
+        )
+
     node = ET.SubElement(root, "database")
     ET.SubElement(node, "profile").text = str(
         settings.get("selected_db_profile") or ""
@@ -185,6 +221,12 @@ def _save_gui_settings_data(settings: dict[str, Any]) -> None:
     ET.SubElement(node, "workers").text = str(
         int(settings.get("workers") or LOCAL_DEFAULT_WORKERS)
     )
+    try:
+        scan_batch_size = int(str(settings.get("scan_batch_size", DEFAULT_SCAN_BATCH_SIZE)).strip() or 0)
+    except (TypeError, ValueError):
+        scan_batch_size = DEFAULT_SCAN_BATCH_SIZE
+    scan_batch_size = max(0, min(MAX_SCAN_BATCH_SIZE, scan_batch_size))
+    ET.SubElement(node, "batch_size").text = str(scan_batch_size)
     ET.SubElement(node, "auto_workers").text = (
         "true" if bool(settings.get("auto_workers")) else "false"
     )
