@@ -214,6 +214,7 @@ def initialize_schema(
                 url_image {path_type},
                 profile_id BIGINT,
                 source_updated_at {short_type},
+                metadata_json {json_type},
                 FOREIGN KEY(profile_id)
                     REFERENCES profiles(id)
                     ON DELETE SET NULL
@@ -242,6 +243,9 @@ def initialize_schema(
         ensure_columns(conn, "profiles", PROFILE_COLUMNS)
         ensure_columns(conn, "images", IMAGE_COLUMNS)
         backfill_import_image_urls(conn)
+
+    # Метаданные изображения добавляются и в уже существующие базы всех СУБД.
+    ensure_columns(conn, "images", {"metadata_json": json_type})
 
     # Имена столбцов и таблиц в этом списке заданы самим приложением.
     # Для MySQL CREATE INDEX IF NOT EXISTS не является переносимым синтаксисом:
