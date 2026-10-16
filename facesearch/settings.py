@@ -28,6 +28,15 @@ def _xml_float(value: Any, default: float) -> float:
         return default
 
 
+# Новые установки по умолчанию сохраняют прежний вид интерфейса (все группы раскрыты).
+COLLAPSIBLE_SECTION_DEFAULTS = {
+    "source_images": True,
+    "database": True,
+    "compute": True,
+    "processing": True,
+}
+
+
 def _load_gui_settings() -> dict[str, Any]:
     settings = {
         "window_geometry": "1250x900",
@@ -50,6 +59,7 @@ def _load_gui_settings() -> dict[str, Any]:
         "create_crops_on_html": False,
         "top_k": DEFAULT_TOP_K,
         "min_similarity": 43.0,
+        "collapsible_sections": dict(COLLAPSIBLE_SECTION_DEFAULTS),
     }
 
     if not SETTINGS_FILE.is_file():
@@ -77,6 +87,15 @@ def _load_gui_settings() -> dict[str, Any]:
             settings["paned_preview_sash_position"] = max(
                 0, _xml_int(node.findtext("paned_preview_sash_position"), 0)
             )
+
+        node = root.find("sections")
+        if node is not None:
+            section_states = dict(COLLAPSIBLE_SECTION_DEFAULTS)
+            for key, default in COLLAPSIBLE_SECTION_DEFAULTS.items():
+                value = node.findtext(key)
+                if value is not None:
+                    section_states[key] = _xml_bool(value, default)
+            settings["collapsible_sections"] = section_states
 
         node = root.find("database")
         if node is not None:
@@ -180,6 +199,15 @@ def _save_gui_settings_data(settings: dict[str, Any]) -> None:
     ET.SubElement(node, "paned_preview_sash_position").text = str(
         max(0, _xml_int(settings.get("paned_preview_sash_position"), 0))
     )
+
+    node = ET.SubElement(root, "sections")
+    section_states = settings.get("collapsible_sections", {})
+    if not isinstance(section_states, dict):
+        section_states = {}
+    for key, default in COLLAPSIBLE_SECTION_DEFAULTS.items():
+        ET.SubElement(node, key).text = (
+            "true" if bool(section_states.get(key, default)) else "false"
+        )
 
     node = ET.SubElement(root, "database")
     ET.SubElement(node, "profile").text = str(
