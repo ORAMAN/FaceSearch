@@ -88,6 +88,83 @@ def _site_display_data(source_url: str | None) -> tuple[str, str, str]:
         return value, value, ""
 
 
+def _local_metadata_html(metadata_value: Any, source_path: Path | None = None) -> str:
+    """Формирует блок метаданных локального исходника; пустые поля не выводятся."""
+    metadata: dict[str, Any] = {}
+    try:
+        parsed = json.loads(str(metadata_value or ""))
+        if isinstance(parsed, dict):
+            metadata = parsed
+    except Exception:
+        pass
+
+    if not metadata and source_path is not None and source_path.is_file():
+        try:
+            from ..metadata import extract_image_metadata
+            metadata = extract_image_metadata(source_path)
+        except Exception:
+            metadata = {}
+
+    labels = (
+        ("filename", "Файл"),
+        ("date_taken", "Дата съёмки"),
+        ("date_digitized", "Дата оцифровки"),
+        ("file_modified", "Изменён"),
+        ("image_width", "Ширина"),
+        ("image_height", "Высота"),
+        ("file_size_bytes", "Размер файла"),
+        ("camera_make", "Производитель камеры"),
+        ("camera_model", "Камера"),
+        ("lens_model", "Объектив"),
+        ("exposure_time", "Выдержка"),
+        ("f_number", "Диафрагма f/"),
+        ("iso", "ISO"),
+        ("focal_length_mm", "Фокусное расстояние, мм"),
+        ("artist", "Автор"),
+        ("copyright", "Авторские права"),
+        ("description", "Описание"),
+        ("software", "ПО"),
+    )
+    rows = []
+    for key, label in labels:
+        value = metadata.get(key)
+        if value is None or str(value).strip() == "":
+            continue
+        if key == "file_size_bytes":
+            try:
+                size = int(value)
+                value = f"{size / (1024 * 1024):.2f} МБ" if size >= 1024 * 1024 else f"{size / 1024:.1f} КБ"
+            except (TypeError, ValueError):
+                pass
+        elif key in {"image_width", "image_height"}:
+            value = f"{value} px"
+        rows.append(f"<div><b>{html.escape(label)}:</b> {html.escape(str(value))}</div>")
+
+    latitude = metadata.get("gps_latitude")
+    longitude = metadata.get("gps_longitude")
+    try:
+        lat = float(latitude)
+        lon = float(longitude)
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            map_url = f"https://www.openstreetmap.org/?mlat={lat:.7f}&mlon={lon:.7f}#map=16/{lat:.7f}/{lon:.7f}"
+            gps_label = f"{lat:.6f}, {lon:.6f}"
+            altitude = metadata.get("gps_altitude_m")
+            if altitude is not None:
+                gps_label += f" (высота {altitude} м)"
+            rows.append(
+                '<div><b>GPS:</b> '
+                f'<a href="{html.escape(map_url, quote=True)}" target="_blank" rel="noopener noreferrer">'
+                f'{html.escape(gps_label)} — открыть карту</a></div>'
+            )
+    except (TypeError, ValueError):
+        pass
+
+    if not rows:
+        return ""
+    title = html.escape(str(metadata.get("filename") or "Метаданные файла"))
+    return f'<div class="vk-info local-metadata"><div class="vk-name">{title}</div>{"".join(rows)}</div>'
+
+
 def _display_face_id(result: dict[str, Any]) -> str:
     """Возвращает ID записи лица в виде #00000000, без имени файла."""
     value = result.get("face_id")
@@ -486,7 +563,10 @@ def generate_html_gallery(
             """
 
         else:
-            profile_html = ""
+            profile_html = _local_metadata_html(
+                result.get("metadata_json"),
+                local_source_path,
+            )
             local_original_href = local_source_href or _safe_file_href(path)
             buttons = f"""
                 <div class="buttons">
