@@ -6695,50 +6695,80 @@ class FaceSearchGUI:
                         if use_json_metadata and json_path.is_file():
                             try:
                                 metadata = json.loads(json_path.read_text(encoding="utf-8"))
-                            except Exception:
-                                # import_image_bundle сформирует штатную ошибку JSON;
-                                # здесь не скрываем детали парсинга.
-                                metadata = None
-                            profile_lock = _import_profile_lock_for_json(
-                                json_path, metadata=metadata
-                            )
-                            if profile_lock is None:
-                                result = import_image_bundle(
-                                    conn,
-                                    worker_app,
-                                    path,
-                                    json_path,
-                                    delete_source=delete_processed,
-                                    create_crop_files=create_crop_files,
-                                    overwrite_existing_crops=overwrite_existing_crops,
-                                    metadata=metadata,
+                            except Exception as exc:
+                                # Повреждённый JSON не следует молча трактовать как
+                                # локальные метаданные: сообщаем штатную ошибку импорта.
+                                raise RuntimeError(
+                                    f"Ошибка JSON {json_path.name}: {exc}"
+                                ) from exc
+
+                            # Поддерживаем два разных формата sidecar JSON:
+                            # 1) описание импортируемого профиля (url_source/name/url_image/info);
+                            # 2) технические метаданные локального файла (filename, date_taken,
+                            #    image_width и т. п.). Второй формат не является профилем
+                            #    и должен идти через обычное локальное распознавание.
+                            is_profile_json = (
+                                isinstance(metadata, dict)
+                                and any(
+                                    key in metadata
+                                    for key in ("url_source", "name", "url_image", "info")
                                 )
-                            else:
-                                # Удерживаем блокировку до завершения транзакции импорта,
-                                # чтобы одинаковый url_source не создавался одновременно.
-                                with profile_lock:
-                                    try:
-                                        result = import_image_bundle(
-                                            conn,
-                                            worker_app,
-                                            path,
-                                            json_path,
-                                            delete_source=delete_processed,
-                                            create_crop_files=create_crop_files,
-                                            overwrite_existing_crops=overwrite_existing_crops,
-                                            metadata=metadata,
-                                        )
-                                    except Exception:
-                                        # Откатываем транзакцию до освобождения lock:
-                                        # следующий файл того же профиля не должен
-                                        # читать незавершённое состояние предыдущего.
+                            )
+
+                            if is_profile_json:
+                                profile_lock = _import_profile_lock_for_json(
+                                    json_path, metadata=metadata
+                                )
+                                if profile_lock is None:
+                                    result = import_image_bundle(
+                                        conn,
+                                        worker_app,
+                                        path,
+                                        json_path,
+                                        delete_source=delete_processed,
+                                        create_crop_files=create_crop_files,
+                                        overwrite_existing_crops=overwrite_existing_crops,
+                                        metadata=metadata,
+                                    )
+                                else:
+                                    # Удерживаем блокировку до завершения транзакции импорта,
+                                    # чтобы одинаковый url_source не создавался одновременно.
+                                    with profile_lock:
                                         try:
-                                            conn.rollback()
+                                            result = import_image_bundle(
+                                                conn,
+                                                worker_app,
+                                                path,
+                                                json_path,
+                                                delete_source=delete_processed,
+                                                create_crop_files=create_crop_files,
+                                                overwrite_existing_crops=overwrite_existing_crops,
+                                                metadata=metadata,
+                                            )
                                         except Exception:
-                                            pass
-                                        raise
-                            count = int(result["faces"])
-                            return path, count, None, result
+                                            # Откатываем транзакцию до освобождения lock:
+                                            # следующий файл того же профиля не должен
+                                            # читать незавершённое состояние предыдущего.
+                                            try:
+                                                conn.rollback()
+                                            except Exception:
+                                                pass
+                                            raise
+                                count = int(result["faces"])
+                                return path, count, None, result
+
+                            # JSON с EXIF/файловыми свойствами не должен создавать
+                            # пустой профиль source='import'. Лица и images добавляются
+                            # так же, как при сканировании локального файла без JSON.
+                            result = process_local_image(
+                                conn,
+                                worker_app,
+                                path,
+                                delete_source=False,
+                                create_crop_files=create_crop_files,
+                                overwrite_existing_crops=overwrite_existing_crops,
+                            )
+                            return path, int(result["faces"]), None, result
 
                         result = process_local_image(
                             conn,
