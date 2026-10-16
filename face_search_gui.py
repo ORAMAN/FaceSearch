@@ -1698,36 +1698,23 @@ def _find_existing_source_crop_rows(
                 (int(profile_id), url_image),
             ).fetchall()
         else:
-            # Если JSON не содержит url_image, старые записи могли хранить
-            # либо NULL/пустое значение, либо file://-ссылку в url_image.
-            # Разбиваем OR на два запроса, чтобы SQLite использовал оба новых
-            # составных индекса, а не сканировал все строки source_type='import'.
+            # Без url_image профильная ссылка source_url не позволяет определить,
+            # какая исходная фотография породила CROP: у одного профиля может быть
+            # сотни фотографий. Нельзя связывать все строки с NULL url_image с
+            # текущим файлом — иначе последующие фотографии профиля будут пропущены.
+            # Сопоставляем только по точному локальному URI исходного файла.
+            if not fallback_image_url:
+                return []
             rows = conn.execute(
                 """
                 SELECT id, path
                 FROM images
                 WHERE source_type = 'import'
-                  AND profile_id = ?
-                  AND source_url = ?
-                  AND (url_image IS NULL OR url_image = '')
+                  AND profile_id = ? AND url_image = ?
                 ORDER BY id
                 """,
-                (int(profile_id), source_url),
+                (int(profile_id), fallback_image_url),
             ).fetchall()
-            if fallback_image_url:
-                fallback_rows = conn.execute(
-                    """
-                    SELECT id, path
-                    FROM images
-                    WHERE source_type = 'import'
-                      AND profile_id = ? AND url_image = ?
-                    ORDER BY id
-                    """,
-                    (int(profile_id), fallback_image_url),
-                ).fetchall()
-                found = {int(row[0]): row for row in rows}
-                found.update({int(row[0]): row for row in fallback_rows})
-                rows = [found[key] for key in sorted(found)]
 
     return [(int(row[0]), str(row[1] or "")) for row in rows]
 
@@ -2004,7 +1991,7 @@ def import_image_bundle(
                     return {
                         "faces": 0,
                         "deleted": deleted,
-                        "message": "метаданные уже есть в БД",
+                        "message": "исходное изображение уже есть в БД; распознавание пропущено",
                         "updated": 0,
                         "added": 0,
                         "removed": 0,
@@ -2033,14 +2020,10 @@ def import_image_bundle(
         return {"faces": 0, "deleted": deleted, "message": "лицо не найдено"}
 
     profile_id = _upsert_import_profile(conn, metadata)
-    image_url = metadata_image_url
-    if not image_url and not create_crop_files:
-        # Для последующего восстановления сохраняем локальный исходник как
-        # file:// URL, не затирая source_url (ссылка на профиль/страницу).
-        try:
-            image_url = image_path.resolve().as_uri()
-        except (OSError, ValueError):
-            image_url = str(image_path.resolve())
+    # Если JSON не содержит URL оригинала, используем локальный URI исходника
+    # независимо от режима создания CROP. Это позволяет отличать несколько
+    # фотографий одного профиля и не пропускать новые файлы при повторном сканировании.
+    image_url = metadata_image_url or fallback_image_url
 
     created = 0
     created_files: list[Path] = []
@@ -2077,7 +2060,7 @@ def import_image_bundle(
                 deleted = True
             except OSError:
                 deleted = False
-        message = "метаданные уже есть в БД"
+        message = "исходное изображение уже есть в БД; распознавание пропущено"
         if restored_missing_crops:
             message += f"; восстановлено CROP: {restored_missing_crops}"
         return {
@@ -2232,7 +2215,10 @@ def import_image_bundle(
                 deleted = _delete_processed_source_files(image_path, json_path)
             else:
                 deleted = False
-            message = "crop уже есть в БД"
+            message = (
+                f"распознано лиц: {len(valid_faces)}, "
+                "новых CROP нет — соответствующие записи уже есть в БД"
+            )
             if restored_missing_crops:
                 message += f"; восстановлено CROP: {restored_missing_crops}"
             return {
@@ -2510,7 +2496,10 @@ def process_local_image(
             return {
                 "faces": 0,
                 "deleted": deleted,
-                "message": "crop уже есть в БД",
+                "message": (
+                    f"распознано лиц: {len(valid_faces)}, "
+                    "новых CROP нет — соответствующие записи уже есть в БД"
+                ),
                 "updated": 0,
                 "added": 0,
                 "removed": 0,
