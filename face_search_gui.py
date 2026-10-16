@@ -171,10 +171,13 @@ from facesearch.database_profiles import (
 from facesearch.database.connection import (
     DBResult, DatabaseConnection, _safe_db_identifier, _quote_identifier,
 )
+from facesearch.database.retry import is_transient_database_conflict, database_retry_delay
 from facesearch.metadata import (
     metadata_json as _image_metadata_json,
     is_standard_metadata_document as _is_standard_metadata_document,
 )
+from facesearch.indexing.cleanup import image_record_has_recoverable_source
+from facesearch.indexing.embeddings import embedding_blob_to_view
 from facesearch.database.schema import (
     ensure_columns as _ensure_columns,
     backfill_import_image_urls as _backfill_import_image_urls,
@@ -1033,12 +1036,13 @@ def embedding_to_blob(embedding: np.ndarray) -> bytes:
 
 
 def blob_to_embedding(blob: bytes, dimension: int) -> np.ndarray:
-    _ensure_runtime_dependencies(need_numpy=True)
-    return np.frombuffer(
-        blob,
-        dtype=np.float32,
-        count=dimension,
-    ).copy()
+    # The scanner/build loop calls this once per face. NumPy is already loaded
+    # by the caller in hot paths, so avoid taking the runtime-import lock for
+    # every single embedding. The returned array is a read-only view over BLOB
+    # bytes; consumers that mutate it must explicitly call .copy().
+    if np is None:
+        _ensure_runtime_dependencies(need_numpy=True)
+    return embedding_blob_to_view(blob, dimension, numpy_module=np)
 
 
 # ============================================================
@@ -1105,36 +1109,53 @@ def cleanup_duplicate_images(conn: DatabaseConnection) -> int:
     return removed
 
 
-def cleanup_missing_images(conn: DatabaseConnection) -> int:
-    rows = conn.execute(
+def cleanup_missing_images(
+    conn: DatabaseConnection,
+    progress_callback=None,
+) -> int:
+    """Удаляет записи images без CROP/доступного исходника и сообщает о ходе проверки."""
+    stream_execute = getattr(conn, "execute_streaming", conn.execute)
+    cursor = stream_execute(
         "SELECT id, path, source_type, url_image, source_url FROM images"
-    ).fetchall()
-    missing = []
+    )
+    missing: list[int] = []
+    batch_size = max(1024, int(FAISS_BUILD_BATCH_ROWS))
+    checked = 0
 
-    for image_id, path, source_type, url_image, source_url in rows:
-        try:
-            # Пути CROP в БД хранятся относительно активного CROP_DIR,
-            # а исходные локальные изображения — относительно APP_DIR.
-            # Используем общий resolver, иначе CROP-путь ошибочно проверяется
-            # только внутри APP_DIR и валидные записи удаляются из БД.
-            exists = _resolve_db_storage_path(path).is_file()
-        except Exception:
-            exists = False
+    try:
+        while True:
+            rows = cursor.fetchmany(batch_size)
+            if not rows:
+                break
 
-        # Импортированные JSON-изображения можно восстановить прямо в HTML
-        # по сохранённому url_image, поэтому запись и face/embedding сохраняем.
-        has_remote_fallback = (
-            str(source_type or "") == "import"
-            and bool(str(url_image or "").strip())
-        )
-        # Записи, у которых CROP намеренно отложен, должны переживать обычную
-        # очистку при открытии БД, пока исходная локальная фотография доступна.
-        try:
-            has_local_source = _source_url_to_local_path(source_url) is not None
-        except Exception:
-            has_local_source = False
-        if not exists and not has_remote_fallback and not has_local_source:
-            missing.append(int(image_id))
+            for image_id, path, source_type, url_image, source_url in rows:
+                # Эти строки сохранялись и раньше независимо от наличия CROP.
+                # Проверяем это до файловой системы, особенно полезно для
+                # удалённой БД и больших коллекций с импортированными URL.
+                if image_record_has_recoverable_source(
+                    source_type,
+                    url_image,
+                    source_url,
+                    _source_url_to_local_path,
+                ):
+                    continue
+
+                try:
+                    exists = _resolve_db_storage_path(path).is_file()
+                except Exception:
+                    exists = False
+
+                if not exists:
+                    missing.append(int(image_id))
+
+            checked += len(rows)
+            if progress_callback is not None:
+                try:
+                    progress_callback(checked, len(missing))
+                except Exception as exc:
+                    print(f"[FAISS PROGRESS CALLBACK ERROR] {exc}")
+    finally:
+        cursor.close()
 
     if not missing:
         return 0
@@ -2408,6 +2429,14 @@ def process_local_image(
             for image_id, stored_path in existing_rows
             if not _resolve_db_crop_path(stored_path, image_id=int(image_id)).is_file()
         ]
+        # Close the read-only transaction opened by the initial SELECT before
+        # potentially long image decoding/GPU inference. MySQL connections use
+        # autocommit=False by default, so otherwise every worker can retain a
+        # stale transaction snapshot while other workers perform writes.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         restored_missing_crops = 0
         detected_faces: int | None = None
         if create_crop_files and missing_existing_rows:
@@ -2421,7 +2450,12 @@ def process_local_image(
                     conn, existing_image, existing_faces, existing_rows
                 )
 
-        # Локальные исходные изображения сохраняются даже при повторном сканировании.
+        # Local source photos are preserved even on repeat scans. Crop repair
+        # performs SELECTs only, so close its read transaction before returning.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         deleted = False
         message = "исходник уже есть в БД"
         if restored_missing_crops:
@@ -2433,6 +2467,14 @@ def process_local_image(
             "restored": restored_missing_crops,
             "detected_faces": detected_faces,
         }
+
+    # The existing-source lookup is a read-only preflight; end that transaction
+    # before decoding and inference. This avoids keeping MySQL snapshots open
+    # during relatively expensive CPU/GPU work.
+    try:
+        conn.rollback()
+    except Exception:
+        pass
 
     image = load_image(image_path)
     if image is None:
@@ -3397,22 +3439,78 @@ def build_faiss_index(
     conn: DatabaseConnection,
     *,
     use_gpu_index: bool = True,
+    progress_callback=None,
 ):
-    """Создаёт индекс пакетно: память не расходуется на fetchall() всех embeddings."""
+    """Создаёт индекс пакетно, печатает тайминги и сообщает прогресс GUI."""
+    build_started = time.perf_counter()
     _ensure_runtime_dependencies(need_numpy=True, need_faiss=True)
-    removed = cleanup_missing_images(conn)
+
+    def report_progress(
+        stage: str,
+        message: str,
+        processed=None,
+        total=None,
+        percent=None,
+    ):
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(stage, message, processed, total, percent)
+        except Exception as exc:
+            # Проблема интерфейса не должна прерывать построение индекса.
+            print(f"[FAISS PROGRESS CALLBACK ERROR] {exc}")
+
+    report_progress("cleanup", "Проверка таблицы images перед созданием индекса...")
+    cleanup_started = time.perf_counter()
+
+    def cleanup_progress(checked, missing_count):
+        report_progress(
+            "cleanup",
+            f"Проверка images: просмотрено {checked:,} записей; "
+            f"отсутствующих CROP/исходников: {missing_count:,}",
+            processed=checked,
+            total=None,
+            percent=None,
+        )
+
+    removed = cleanup_missing_images(conn, progress_callback=cleanup_progress)
+    cleanup_seconds = time.perf_counter() - cleanup_started
+    report_progress(
+        "cleanup",
+        f"Проверка images завершена за {cleanup_seconds:.1f} с; удалено строк: {removed:,}",
+        processed=None,
+        total=None,
+        percent=5,
+    )
     if removed:
         print(f"Удалено записей отсутствующих файлов: {removed}")
+    print(
+        f"[FAISS TIMING] Проверка images: {cleanup_seconds:.2f} с; "
+        f"удалено строк: {removed:,}"
+    )
 
     # Убираем прежний resident-index ДО сборки нового: иначе при обновлении
     # многогигабайтной БД старый CPU/GPU индекс и новый индекс занимали бы память одновременно.
     _clear_gpu_search_index(release_cuda_memory=True)
     _clear_cpu_faiss_cache()
 
+    report_progress("count", "Подсчёт количества лиц в базе данных...", percent=5)
+    count_started = time.perf_counter()
     total_expected = int(conn.execute("SELECT COUNT(*) FROM faces").fetchone()[0] or 0)
+    count_seconds = time.perf_counter() - count_started
+    print(f"[FAISS TIMING] COUNT(faces): {count_seconds:.2f} с")
     if total_expected <= 0:
         print("В базе нет лиц.")
+        print(f"[FAISS TIMING] Полное время: {time.perf_counter() - build_started:.2f} с")
+        report_progress("done", "В базе нет лиц; построение индекса не требуется.", 0, 0, 100)
         return
+    report_progress(
+        "count",
+        f"В базе {total_expected:,} лиц. Подготовка CPU FAISS...",
+        processed=0,
+        total=total_expected,
+        percent=6,
+    )
 
     index_path = Path(INDEX_FILE).expanduser().resolve()
     index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3422,6 +3520,14 @@ def build_faiss_index(
         f"Создание CPU FAISS индекса пакетами по {FAISS_BUILD_BATCH_ROWS:,} embeddings "
         f"(в базе ожидается {total_expected:,} лиц)..."
     )
+    report_progress(
+        "build",
+        f"Создание CPU FAISS: 0 / ~{total_expected:,} лиц (6%)",
+        processed=0,
+        total=total_expected,
+        percent=6,
+    )
+    read_build_started = time.perf_counter()
     stream_execute = getattr(conn, "execute_streaming", conn.execute)
     cursor = stream_execute("""
         SELECT id, embedding, embedding_dim
@@ -3437,6 +3543,7 @@ def build_faiss_index(
     if not first_batch:
         cursor.close()
         print("В базе больше нет лиц для индекса.")
+        report_progress("done", "В базе больше нет лиц для индекса.", 0, 0, 100)
         return
 
     dimension = int(first_batch[0][2])
@@ -3463,6 +3570,10 @@ def build_faiss_index(
                     )
                 vectors[i] = blob_to_embedding(blob, dimension)
                 ids[i] = int(face_id)
+                # Не удерживаем GIL на весь большой пакет: даём Tkinter
+                # регулярно обрабатывать оконные события и очередь прогресса.
+                if (i + 1) % 1024 == 0:
+                    time.sleep(0)
 
             required = processed + batch_count
             if required > face_ids.size:
@@ -3476,23 +3587,59 @@ def build_faiss_index(
 
             if processed % (FAISS_BUILD_BATCH_ROWS * 10) < FAISS_BUILD_BATCH_ROWS:
                 print(f"FAISS: добавлено {processed:,} / ~{total_expected:,} лиц")
+
+            build_percent = 6.0 + 76.0 * min(1.0, processed / max(1, total_expected))
+            report_progress(
+                "build",
+                f"Создание CPU FAISS: {processed:,} / ~{total_expected:,} лиц "
+                f"({build_percent:.0f}%)",
+                processed=processed,
+                total=total_expected,
+                percent=build_percent,
+            )
+            # Явно уступаем планировщику после каждого пакета, чтобы GUI
+            # получал время на обработку очереди событий даже при CPU-нагрузке.
+            time.sleep(0)
             batch = cursor.fetchmany(FAISS_BUILD_BATCH_ROWS)
 
         cursor.close()
         if processed <= 0:
             raise RuntimeError("Не удалось прочитать embeddings для FAISS")
         face_ids = np.ascontiguousarray(face_ids[:processed], dtype=np.int64)
+        read_build_seconds = time.perf_counter() - read_build_started
+        read_rate = processed / read_build_seconds if read_build_seconds > 0 else 0.0
+        print(
+            f"[FAISS TIMING] SQL-чтение + декодирование + CPU FAISS: "
+            f"{read_build_seconds:.2f} с; скорость {read_rate:,.0f} лиц/с"
+        )
+        report_progress(
+            "write",
+            f"CPU FAISS построен: {processed:,} лиц. Запись файла индекса...",
+            processed=processed,
+            total=processed,
+            percent=83,
+        )
 
         print(f"Запись временного FAISS-файла: {temp_path.name}")
         try:
             temp_path.unlink(missing_ok=True)
         except OSError:
             pass
+        write_started = time.perf_counter()
         faiss.write_index(cpu_index, str(temp_path))
         # Атомарная замена не повреждает предыдущий рабочий индекс при ошибке записи.
         os.replace(temp_path, index_path)
-
+        write_seconds = time.perf_counter() - write_started
+        print(f"[FAISS TIMING] Запись CPU-индекса: {write_seconds:.2f} с")
         stat = index_path.stat()
+        report_progress(
+            "write",
+            f"Файл CPU FAISS записан ({stat.st_size / (1024 ** 3):.2f} GB); "
+            "подготовка поискового индекса...",
+            processed=processed,
+            total=processed,
+            percent=89,
+        )
         with _FAISS_META_LOCK:
             global _FAISS_META_PATH, _FAISS_META_MTIME_NS
             global _FAISS_META_COUNT, _FAISS_META_DIM, _FAISS_META_ERROR
@@ -3509,6 +3656,14 @@ def build_faiss_index(
         print(f"Файл: {index_path} ({stat.st_size / (1024 ** 3):.2f} GB)")
 
         if use_gpu_index:
+            report_progress(
+                "gpu",
+                "Загрузка GPU search index в видеопамять...",
+                processed=processed,
+                total=processed,
+                percent=90,
+            )
+            gpu_started = time.perf_counter()
             gpu_ok = _build_gpu_search_index_from_cpu_index(
                 cpu_index, face_ids, dimension, processed
             )
@@ -3527,12 +3682,47 @@ def build_faiss_index(
                 _set_cpu_faiss_cache(cpu_index, index_path)
             elif get_gpu_search_status().get("mode") == "full":
                 _clear_cpu_faiss_cache()
+            gpu_status = get_gpu_search_status()
+            print(
+                f"[FAISS TIMING] Перенос search index на GPU: "
+                f"{time.perf_counter() - gpu_started:.2f} с; "
+                f"режим={gpu_status.get('mode')}"
+            )
+            gpu_message = (
+                f"GPU search index готов: {processed:,} лиц "
+                f"({gpu_status.get('mode', 'CPU fallback')})."
+                if gpu_status.get("loaded")
+                else "CPU FAISS готов; GPU search недоступен, используется CPU fallback."
+            )
+            report_progress(
+                "gpu",
+                gpu_message,
+                processed=processed,
+                total=processed,
+                percent=99,
+            )
         else:
             _clear_gpu_search_index(release_cuda_memory=True)
             _set_cpu_faiss_cache(cpu_index, index_path)
             print("GPU search отключён: выбран режим CPU-only.")
+            report_progress(
+                "gpu",
+                "CPU FAISS готов; выбран режим CPU-only.",
+                processed=processed,
+                total=processed,
+                percent=99,
+            )
 
         gc.collect()
+        total_seconds = time.perf_counter() - build_started
+        print(f"[FAISS TIMING] Полное время: {total_seconds:.2f} с")
+        report_progress(
+            "done",
+            f"Построение FAISS завершено: {processed:,} лиц за {total_seconds:.1f} с.",
+            processed=processed,
+            total=processed,
+            percent=100,
+        )
     except Exception:
         try:
             cursor.close()
@@ -6531,7 +6721,7 @@ class FaceSearchGUI:
             # Рабочие потоки ниже открывают свои соединения без повторной миграции.
             init_conn = create_database(maintenance=False, initialize=True)
             try:
-                pass
+                scan_db_backend = str(init_conn.backend)
             finally:
                 init_conn.close()
 
@@ -6728,7 +6918,15 @@ class FaceSearchGUI:
                     # worker-ов одновременно обновляют одну строку profiles. MSSQL
                     # также может возвращать deadlock/lock timeout. Повторяем только
                     # распознанные временные конфликты и ограниченное число раз.
-                    max_attempts = 4 if conn.backend in (DB_TYPE_MYSQL, DB_TYPE_MSSQL) else 1
+                    # MySQL receives more attempts with jittered exponential
+                    # backoff. Synchronized retries from many workers can otherwise
+                    # hit the same InnoDB lock conflict repeatedly.
+                    if conn.backend == DB_TYPE_MYSQL:
+                        max_attempts = 6
+                    elif conn.backend == DB_TYPE_MSSQL:
+                        max_attempts = 4
+                    else:
+                        max_attempts = 1
                 except Exception as exc:
                     # Это исключение раньше выходило из worker до его основного
                     # try/except, после чего интерфейс показывал «<unknown>».
@@ -6849,38 +7047,25 @@ class FaceSearchGUI:
                                 error_code = int(exc.args[0])
                         except (TypeError, ValueError):
                             pass
-                        transient = (
-                            error_code in {1020, 1205, 1206, 1213}
-                            or any(
-                                marker in error_text
-                                for marker in (
-                                    "record has changed since last read",
-                                    "deadlock",
-                                    "1020",
-                                    "1205",
-                                    "1206",
-                                    "1213",
-                                    "lock wait timeout",
-                                    "lock request time out",
-                                    "1222",
-                                    "timeout expired",
-                                    "hyt00",
-                                    "40001",
-                                )
-                            )
-                        )
+                        transient = is_transient_database_conflict(exc)
                         if not transient:
                             return path, 0, exc, {
                                 "faces": 0,
                                 "deleted": False,
                             }
 
+                        delay = database_retry_delay(
+                            attempt,
+                            base_seconds=0.30,
+                            max_seconds=3.0,
+                            jitter_seconds=0.35,
+                        )
                         print(
                             f"[SCAN DB RETRY] {path.name}: временный конфликт БД "
                             f"({error_code or type(exc).__name__}), "
-                            f"повтор {attempt + 2}/{max_attempts}"
+                            f"повтор {attempt + 2}/{max_attempts} через {delay:.2f} с"
                         )
-                        time.sleep(0.15 * (attempt + 1))
+                        time.sleep(delay)
 
                 return path, 0, RuntimeError(
                     "Не удалось завершить запись в БД после повторных попыток."
@@ -6900,6 +7085,31 @@ class FaceSearchGUI:
                 remote_db=remote_db,
                 auto_adjust=auto_workers,
             )
+            # Concurrent MySQL transactions on images/faces can deadlock under
+            # a large scan. The GPU inference pool is already independently capped;
+            # bound active scan workers to four in both auto and manual modes.
+            if scan_db_backend == DB_TYPE_MYSQL:
+                mysql_scan_worker_cap = 4
+                controller.max_workers = min(
+                    max(1, int(controller.max_workers)),
+                    mysql_scan_worker_cap,
+                )
+                controller.min_workers = 1
+                controller.current_workers = min(
+                    max(1, int(controller.current_workers)),
+                    controller.max_workers,
+                )
+                if not auto_workers:
+                    workers = min(max(1, int(workers)), mysql_scan_worker_cap)
+                    controller.current_workers = workers
+                    controller.max_workers = workers
+                else:
+                    workers = controller.current_workers
+                print(
+                    "[SCAN DB] MySQL: ограничение одновременной обработки "
+                    f"до {controller.max_workers} worker-ов для снижения deadlock."
+                )
+
             if auto_workers:
                 workers = controller.current_workers
             limiter = AdaptiveConcurrencyLimiter(controller.current_workers)
@@ -8113,14 +8323,17 @@ class FaceSearchGUI:
         self.operation = "index"
         self._set_busy(True)
 
+        self.progress.stop()
         self.progress.config(
-            mode="indeterminate"
+            mode="indeterminate",
+            maximum=100,
+            value=0,
         )
         self.progress.start(10)
 
         if self.backend_mode_var.get() == BACKEND_GPU:
             self.status_var.set(
-                "Создание CPU FAISS + загрузка GPU-индекса в VRAM..."
+                "Подготовка: проверка images, создание CPU FAISS и загрузка GPU-индекса..."
             )
         else:
             self.status_var.set(
@@ -8397,6 +8610,17 @@ class FaceSearchGUI:
             self.events.put(("fatal", str(exc)))
 
     def _index_worker(self, backend=BACKEND_GPU):
+        def progress(stage, message, processed=None, total=None, percent=None):
+            # Tkinter нельзя вызывать из worker-а: передаём прогресс GUI через очередь.
+            self.events.put((
+                "index_progress",
+                stage,
+                str(message),
+                processed,
+                total,
+                percent,
+            ))
+
         try:
             conn = create_database()
 
@@ -8404,6 +8628,7 @@ class FaceSearchGUI:
                 build_faiss_index(
                     conn,
                     use_gpu_index=(backend == BACKEND_GPU),
+                    progress_callback=progress,
                 )
             finally:
                 conn.close()
@@ -9238,10 +9463,32 @@ class FaceSearchGUI:
                     )
                     self._update_search_state()
 
+                elif kind == "index_progress":
+                    stage = str(event[1])
+                    message = str(event[2])
+                    percent = event[5] if len(event) > 5 else None
+                    if self.operation == "index":
+                        if percent is None:
+                            # На этапе проверки images точное общее число строк
+                            # не вычисляется: оставляем анимированный индикатор.
+                            if str(self.progress.cget("mode")) != "indeterminate":
+                                self.progress.stop()
+                                self.progress.config(mode="indeterminate")
+                                self.progress.start(10)
+                        else:
+                            if str(self.progress.cget("mode")) != "determinate":
+                                self.progress.stop()
+                                self.progress.config(mode="determinate", maximum=100)
+                            self.progress.config(
+                                maximum=100,
+                                value=max(0.0, min(100.0, float(percent))),
+                            )
+                        self.status_var.set(message)
+
                 elif kind == "index_done":
                     self.progress.stop()
                     self.progress.config(
-                        value=0
+                        value=100
                     )
 
                     status = event[1] if len(event) > 1 else get_gpu_search_status()

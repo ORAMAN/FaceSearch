@@ -29,7 +29,9 @@ GPU_WARMUP = True
 GPU_INDEX_USE_FP16 = True
 GPU_INDEX_RESERVE_GB = 2.00
 GPU_INDEX_DEVICE = 0
-FAISS_BUILD_BATCH_ROWS = 8192
+# Повышенный пакет сокращает число fetchmany на потоковых курсорах БД.
+# 16 384 x 512 x float32 ≈ 32 MiB вектора + BLOB/объекты Python.
+FAISS_BUILD_BATCH_ROWS = 16384
 FAISS_GPU_COPY_CHUNK_ROWS = 16384
 DB_RESULT_BATCH_SIZE = 500
 CROP_MARGIN = 0.20
