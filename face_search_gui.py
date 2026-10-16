@@ -7197,7 +7197,7 @@ class FaceSearchGUI:
             )
             canvas.create_text(
                 width // 2, height // 2,
-                text="Отпустите изображение или ссылку\\nдля поиска",
+                text="Отпустите изображение или ссылку\nдля поиска",
                 fill="#ffffff", font=("Segoe UI", 14, "bold"),
                 width=max(80, width - 40), justify="center", tags=(tags,),
             )
@@ -7220,12 +7220,18 @@ class FaceSearchGUI:
         entry = getattr(self, "query_path_entry", None)
         canvas = getattr(self, "canvas", None)
 
-        if widget is entry:
+        is_entry = widget is entry or (
+            widget is not None and entry is not None and str(widget) == str(entry)
+        )
+        is_canvas = widget is canvas or (
+            widget is not None and canvas is not None and str(widget) == str(canvas)
+        )
+        if is_entry:
             try:
                 entry.configure(style="QueryDrop.TEntry")
             except tk.TclError:
                 pass
-        elif widget is canvas:
+        elif is_canvas:
             self._show_query_preview_drop_overlay()
         else:
             # Резервный путь на случай, если версия TkDND не разрешила widget.
@@ -7251,12 +7257,18 @@ class FaceSearchGUI:
         entry = getattr(self, "query_path_entry", None)
         canvas = getattr(self, "canvas", None)
 
-        if widget is entry:
+        is_entry = widget is entry or (
+            widget is not None and entry is not None and str(widget) == str(entry)
+        )
+        is_canvas = widget is canvas or (
+            widget is not None and canvas is not None and str(widget) == str(canvas)
+        )
+        if is_entry:
             try:
                 entry.configure(style=getattr(self, "_query_entry_default_style", "TEntry"))
             except tk.TclError:
                 pass
-        elif widget is canvas:
+        elif is_canvas:
             self._hide_query_preview_drop_overlay()
         else:
             # Если TkDND не сообщил widget, безопасно сбрасываем визуальное состояние обеих зон.
