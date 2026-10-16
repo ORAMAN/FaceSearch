@@ -1996,6 +1996,7 @@ def import_image_bundle(
                         "added": 0,
                         "removed": 0,
                         "restored": 0,
+                        "detected_faces": None,
                     }
 
     # Завершаем транзакцию чтения до длительной загрузки/распознавания кадра.
@@ -2017,7 +2018,12 @@ def import_image_bundle(
         # Распознавание завершилось штатно: отсутствие лиц — это результат,
         # а не ошибка. При включённом чекбоксе удаляем и изображение, и JSON.
         deleted = _delete_processed_source_files(image_path, json_path) if delete_source else False
-        return {"faces": 0, "deleted": deleted, "message": "лицо не найдено"}
+        return {
+            "faces": 0,
+            "deleted": deleted,
+            "message": "лицо не найдено",
+            "detected_faces": 0,
+        }
 
     profile_id = _upsert_import_profile(conn, metadata)
     # Если JSON не содержит URL оригинала, используем локальный URI исходника
@@ -2071,6 +2077,7 @@ def import_image_bundle(
             "added": 0,
             "removed": 0,
             "restored": restored_missing_crops,
+            "detected_faces": len(valid_faces),
         }
 
     old_crop_row_index = 0
@@ -2225,6 +2232,7 @@ def import_image_bundle(
                 "faces": 0, "deleted": deleted, "message": message,
                 "updated": 0, "added": 0, "removed": 0,
                 "restored": restored_missing_crops,
+                "detected_faces": len(valid_faces),
             }
 
         conn.commit()
@@ -2254,6 +2262,7 @@ def import_image_bundle(
         "updated": updated_count,
         "added": added_count,
         "removed": removed_count,
+        "detected_faces": len(valid_faces),
     }
 
 
@@ -2309,12 +2318,14 @@ def process_local_image(
             if not _resolve_db_crop_path(stored_path, image_id=int(image_id)).is_file()
         ]
         restored_missing_crops = 0
+        detected_faces: int | None = None
         if create_crop_files and missing_existing_rows:
             existing_image = load_image(image_path)
             if existing_image is not None:
                 existing_faces = _detect_faces_with_padding(
                     app, existing_image, padding_ratio=0.40
                 )
+                detected_faces = len(existing_faces)
                 restored_missing_crops = _restore_missing_source_crops(
                     conn, existing_image, existing_faces, existing_rows
                 )
@@ -2329,6 +2340,7 @@ def process_local_image(
             "deleted": deleted,
             "message": message,
             "restored": restored_missing_crops,
+            "detected_faces": detected_faces,
         }
 
     image = load_image(image_path)
@@ -2337,6 +2349,7 @@ def process_local_image(
             "faces": 0,
             "deleted": False,
             "message": "не удалось открыть изображение",
+            "detected_faces": None,
         }
 
     valid_faces = _detect_faces_with_padding(
@@ -2351,6 +2364,7 @@ def process_local_image(
             "faces": 0,
             "deleted": False,
             "message": "лицо не найдено",
+            "detected_faces": 0,
         }
 
     created = 0
@@ -2503,6 +2517,7 @@ def process_local_image(
                 "updated": 0,
                 "added": 0,
                 "removed": 0,
+                "detected_faces": len(valid_faces),
             }
 
         conn.commit()
@@ -2526,6 +2541,7 @@ def process_local_image(
         "updated": updated_count,
         "added": added_count,
         "removed": removed_count,
+        "detected_faces": len(valid_faces),
     }
 
 
@@ -6825,12 +6841,24 @@ class FaceSearchGUI:
                             else:
                                 message = f"{result_path.name}: лиц={count}"
 
+                            # Для скорости используем лица, найденные детектором,
+                            # а не только новые CROP/строки, добавленные в БД.
+                            # None означает, что модель не запускалась (например,
+                            # исходник и его CROP уже были обработаны ранее).
+                            detected_count = import_result.get("detected_faces")
+                            if detected_count is not None:
+                                try:
+                                    detected_count = max(0, int(detected_count))
+                                except (TypeError, ValueError):
+                                    detected_count = 0
+
                             self.events.put((
                                 "scan_progress",
                                 completed,
                                 total,
                                 count,
                                 message,
+                                detected_count,
                             ))
 
                         # Контроллер получает реальную скорость завершения изображений
@@ -8235,7 +8263,11 @@ class FaceSearchGUI:
                     self.status_var.set(f"Найдено изображений: {total}")
 
                 elif kind == "scan_progress":
-                    n, total, count, path = event[1:]
+                    n, total, count, path = event[1:5]
+                    # Старые события используют count; новые отдельно передают
+                    # число лиц, найденных при inference. None означает, что
+                    # изображение было пропущено без запуска детектора.
+                    detected_count = event[5] if len(event) > 5 else count
 
                     self._scan_progress_value = int(n or 0)
                     self.progress.config(value=n)
@@ -8251,7 +8283,7 @@ class FaceSearchGUI:
                         self._scan_rate_samples = deque()
                     previous_n = int(getattr(self, "_scan_rate_last_completed", 0) or 0)
                     completed_delta = max(0, int(n or 0) - previous_n)
-                    faces_delta = max(0, int(count or 0))
+                    faces_delta = max(0, int(detected_count or 0))
                     self._scan_rate_last_completed = int(n or 0)
                     if completed_delta or faces_delta:
                         self._scan_rate_samples.append((now, completed_delta, faces_delta))
@@ -8281,7 +8313,7 @@ class FaceSearchGUI:
                             f"{base} | {self._scan_rate_text}" if base else self._scan_rate_text
                         )
                     self.status_var.set(
-                        f"[{n}/{total}] лиц: {count} — {path}"
+                        f"[{n}/{total}] добавлено лиц: {count} — {path}"
                     )
 
                 elif kind == "scan_error":
