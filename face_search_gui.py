@@ -5711,6 +5711,12 @@ class FaceSearchGUI:
         ):
             self.query_path_entry.bind(sequence, handler)
 
+        # В русской раскладке keysym для Ctrl+C/V/X/A становится кириллическим.
+        # Общий обработчик проверяет и Windows keycode, и фактический символ.
+        self.query_path_entry.bind(
+            "<Control-KeyPress>", self._query_entry_control_key, add="+",
+        )
+
         self.query_entry_context_menu = tk.Menu(self.root, tearoff=False)
         self.query_entry_context_menu.add_command(
             label="Вырезать", command=self._query_entry_cut,
@@ -7053,6 +7059,51 @@ class FaceSearchGUI:
     # --------------------------------------------------------
     # Query image
     # --------------------------------------------------------
+
+    def _query_entry_control_key(self, event=None):
+        """Обрабатывает Ctrl+C/V/X/A независимо от раскладки клавиатуры."""
+        if event is None:
+            return None
+
+        # На Windows keycode обычно остаётся VK-кодом физической клавиши
+        # (A=65, C=67, V=86, X=88), даже когда символ раскладки кириллический.
+        keycode = getattr(event, "keycode", None)
+        handlers_by_keycode = {
+            67: self._query_entry_copy,
+            86: self._query_entry_paste,
+            88: self._query_entry_cut,
+            65: self._query_entry_select_all,
+        }
+        handler = handlers_by_keycode.get(keycode)
+
+        # Резервная проверка для систем/Tk-сборок, где keycode зависит от раскладки.
+        if handler is None:
+            keys = {
+                "c": self._query_entry_copy,
+                "с": self._query_entry_copy,
+                "cyrillic_es": self._query_entry_copy,
+                "v": self._query_entry_paste,
+                "м": self._query_entry_paste,
+                "cyrillic_em": self._query_entry_paste,
+                "x": self._query_entry_cut,
+                "ч": self._query_entry_cut,
+                "cyrillic_che": self._query_entry_cut,
+                "a": self._query_entry_select_all,
+                "ф": self._query_entry_select_all,
+                "cyrillic_ef": self._query_entry_select_all,
+            }
+            for key in (
+                str(getattr(event, "keysym", "") or "").lower(),
+                str(getattr(event, "char", "") or "").lower(),
+            ):
+                handler = keys.get(key)
+                if handler is not None:
+                    break
+
+        if handler is None:
+            # Не мешаем другим Ctrl-сочетаниям, например Ctrl+стрелка.
+            return None
+        return handler(event)
 
     def _query_entry_copy(self, event=None):
         """Копирует выделенный текст из поля пути/URL в системный буфер."""
