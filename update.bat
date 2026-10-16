@@ -281,7 +281,46 @@ exit /b 0
 if exist "%TMP_DIR%" rmdir /s /q "%TMP_DIR%" >nul 2>&1
 exit /b 0
 
+REM ------------------------------------------------------------
+REM Устанавливает только новую зависимость drag-and-drop в уже
+REM существующее окружение .venv. Не переустанавливает PyTorch/ORT.
+REM ------------------------------------------------------------
+:ensure_tkinterdnd
+if not exist ".venv\Scripts\python.exe" (
+    echo [INFO] .venv не найден. tkinterdnd2 будет установлен через setup.bat.
+    exit /b 0
+)
+".venv\Scripts\python.exe" -c "import tkinterdnd2" >nul 2>&1
+if not errorlevel 1 exit /b 0
+
+set "UV_EXE="
+for /f "delims=" %%U in ('where uv 2^>nul') do if not defined UV_EXE set "UV_EXE=%%U"
+if not defined UV_EXE if exist "%USERPROFILE%\.local\bin\uv.exe" set "UV_EXE=%USERPROFILE%\.local\bin\uv.exe"
+if not defined UV_EXE if exist "%USERPROFILE%\.cargo\bin\uv.exe" set "UV_EXE=%USERPROFILE%\.cargo\bin\uv.exe"
+if not defined UV_EXE (
+    echo [WARN] tkinterdnd2 не установлен, а uv не найден.
+    echo [WARN] Установите зависимость вручную или запустите setup.bat.
+    exit /b 1
+)
+
+echo [STEP] Установка tkinterdnd2 для drag-and-drop ...
+"!UV_EXE!" pip install --python ".venv\Scripts\python.exe" "tkinterdnd2>=0.4.2"
+if errorlevel 1 (
+    echo [WARN] Не удалось автоматически установить tkinterdnd2.
+    echo [WARN] Запустите setup.bat или выполните установку вручную.
+    exit /b 1
+)
+".venv\Scripts\python.exe" -c "import tkinterdnd2" >nul 2>&1
+if errorlevel 1 (
+    echo [WARN] tkinterdnd2 не прошёл проверку импорта.
+    exit /b 1
+)
+echo [OK] Drag-and-drop зависимость установлена.
+exit /b 0
+
 :post_update
+call :ensure_tkinterdnd
+if errorlevel 1 echo [WARN] Автоматическая настройка drag-and-drop не завершена.
 echo.
 echo Для обновления/проверки Python-зависимостей можно запустить setup.bat.
 echo Он может переустановить PyTorch/ONNX Runtime в соответствии с обнаруженным GPU.
