@@ -3412,20 +3412,32 @@ def build_faiss_index(
     *,
     use_gpu_index: bool = True,
 ):
-    """Создаёт индекс пакетно: память не расходуется на fetchall() всех embeddings."""
+    """Создаёт индекс пакетно и печатает тайминги всех основных этапов."""
+    build_started = time.perf_counter()
     _ensure_runtime_dependencies(need_numpy=True, need_faiss=True)
+
+    cleanup_started = time.perf_counter()
     removed = cleanup_missing_images(conn)
+    cleanup_seconds = time.perf_counter() - cleanup_started
     if removed:
         print(f"Удалено записей отсутствующих файлов: {removed}")
+    print(
+        f"[FAISS TIMING] Проверка images: {cleanup_seconds:.2f} с; "
+        f"удалено строк: {removed:,}"
+    )
 
     # Убираем прежний resident-index ДО сборки нового: иначе при обновлении
     # многогигабайтной БД старый CPU/GPU индекс и новый индекс занимали бы память одновременно.
     _clear_gpu_search_index(release_cuda_memory=True)
     _clear_cpu_faiss_cache()
 
+    count_started = time.perf_counter()
     total_expected = int(conn.execute("SELECT COUNT(*) FROM faces").fetchone()[0] or 0)
+    count_seconds = time.perf_counter() - count_started
+    print(f"[FAISS TIMING] COUNT(faces): {count_seconds:.2f} с")
     if total_expected <= 0:
         print("В базе нет лиц.")
+        print(f"[FAISS TIMING] Полное время: {time.perf_counter() - build_started:.2f} с")
         return
 
     index_path = Path(INDEX_FILE).expanduser().resolve()
@@ -3436,6 +3448,7 @@ def build_faiss_index(
         f"Создание CPU FAISS индекса пакетами по {FAISS_BUILD_BATCH_ROWS:,} embeddings "
         f"(в базе ожидается {total_expected:,} лиц)..."
     )
+    read_build_started = time.perf_counter()
     stream_execute = getattr(conn, "execute_streaming", conn.execute)
     cursor = stream_execute("""
         SELECT id, embedding, embedding_dim
@@ -3496,15 +3509,24 @@ def build_faiss_index(
         if processed <= 0:
             raise RuntimeError("Не удалось прочитать embeddings для FAISS")
         face_ids = np.ascontiguousarray(face_ids[:processed], dtype=np.int64)
+        read_build_seconds = time.perf_counter() - read_build_started
+        read_rate = processed / read_build_seconds if read_build_seconds > 0 else 0.0
+        print(
+            f"[FAISS TIMING] SQL-чтение + декодирование + CPU FAISS: "
+            f"{read_build_seconds:.2f} с; скорость {read_rate:,.0f} лиц/с"
+        )
 
         print(f"Запись временного FAISS-файла: {temp_path.name}")
         try:
             temp_path.unlink(missing_ok=True)
         except OSError:
             pass
+        write_started = time.perf_counter()
         faiss.write_index(cpu_index, str(temp_path))
         # Атомарная замена не повреждает предыдущий рабочий индекс при ошибке записи.
         os.replace(temp_path, index_path)
+        write_seconds = time.perf_counter() - write_started
+        print(f"[FAISS TIMING] Запись CPU-индекса: {write_seconds:.2f} с")
 
         stat = index_path.stat()
         with _FAISS_META_LOCK:
@@ -3523,6 +3545,7 @@ def build_faiss_index(
         print(f"Файл: {index_path} ({stat.st_size / (1024 ** 3):.2f} GB)")
 
         if use_gpu_index:
+            gpu_started = time.perf_counter()
             gpu_ok = _build_gpu_search_index_from_cpu_index(
                 cpu_index, face_ids, dimension, processed
             )
@@ -3541,12 +3564,18 @@ def build_faiss_index(
                 _set_cpu_faiss_cache(cpu_index, index_path)
             elif get_gpu_search_status().get("mode") == "full":
                 _clear_cpu_faiss_cache()
+            print(
+                f"[FAISS TIMING] Перенос search index на GPU: "
+                f"{time.perf_counter() - gpu_started:.2f} с; "
+                f"режим={get_gpu_search_status().get('mode')}"
+            )
         else:
             _clear_gpu_search_index(release_cuda_memory=True)
             _set_cpu_faiss_cache(cpu_index, index_path)
             print("GPU search отключён: выбран режим CPU-only.")
 
         gc.collect()
+        print(f"[FAISS TIMING] Полное время: {time.perf_counter() - build_started:.2f} с")
     except Exception:
         try:
             cursor.close()
