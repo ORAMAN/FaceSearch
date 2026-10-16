@@ -528,6 +528,9 @@ def generate_html_gallery(
                     {info_rows}
                 </div>
             """
+            # EXIF исходного файла дополняет импортированный JSON, но не
+            # перезаписывает его и не меняет структуру карточки/тему оформления.
+            profile_html += _local_metadata_html(result.get("metadata_json"))
 
             source_href, site_address, favicon_url = _site_display_data(source_url)
             if site_address:
