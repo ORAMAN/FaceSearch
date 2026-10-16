@@ -155,9 +155,9 @@ def _apply_metadata_json_updates(conn: DatabaseConnection, updates) -> None:
     if not updates:
         return
     # Three parameters per row (CASE id WHEN id THEN value, plus WHERE id IN id).
-    # 250 rows stays safely below SQL Server's 2100-parameter limit.
-    for offset in range(0, len(updates), 250):
-        batch = updates[offset:offset + 250]
+    # 600 rows = 1800 parameters, safely below SQL Server's 2100-parameter limit.
+    for offset in range(0, len(updates), 600):
+        batch = updates[offset:offset + 600]
         case_sql = " ".join("WHEN ? THEN ?" for _ in batch)
         where_sql = ",".join("?" for _ in batch)
         params = []
@@ -200,10 +200,11 @@ def _migrate_metadata_json_to_strict_envelope(conn: DatabaseConnection) -> None:
         return
 
     last_id = -1
+    batches_since_commit = 0
     while True:
         if conn.backend == DB_TYPE_MSSQL:
             sql = (
-                "SELECT TOP 250 id, source_type, source_url, metadata_json "
+                "SELECT TOP 600 id, source_type, source_url, metadata_json "
                 "FROM images WHERE id > ? AND metadata_json IS NOT NULL "
                 "ORDER BY id"
             )
@@ -211,7 +212,7 @@ def _migrate_metadata_json_to_strict_envelope(conn: DatabaseConnection) -> None:
             sql = (
                 "SELECT id, source_type, source_url, metadata_json "
                 "FROM images WHERE id > ? AND metadata_json IS NOT NULL "
-                "ORDER BY id LIMIT 250"
+                "ORDER BY id LIMIT 600"
             )
         rows = conn.execute(sql, (last_id,)).fetchall()
         if not rows:
@@ -248,6 +249,14 @@ def _migrate_metadata_json_to_strict_envelope(conn: DatabaseConnection) -> None:
             updates.append((int(image_id), encoded))
 
         _apply_metadata_json_updates(conn, updates)
+        batches_since_commit += 1
+        # Remote database commits are expensive; commit after several bounded
+        # batches rather than once per 250 rows.
+        if batches_since_commit >= 10:
+            conn.commit()
+            batches_since_commit = 0
+
+    if batches_since_commit:
         conn.commit()
 
     conn.execute(
