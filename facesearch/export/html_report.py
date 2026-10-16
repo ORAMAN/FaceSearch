@@ -510,9 +510,22 @@ def generate_html_gallery(
             else ""
         )
 
+        # URL оригинала для полноэкранного просмотра. Для локальных
+        # записей это исходный файл, для импортированных — images.url_image.
+        # Если оригинал недоступен, JS откроет изображение самой карточки.
+        if is_local:
+            original_view_href = local_source_href or (
+                _safe_file_href(path) if local_image_exists else ""
+            )
+        else:
+            original_view_href = remote_image_url or (
+                _safe_file_href(path) if local_image_exists else ""
+            )
+        original_view_href_html = html.escape(original_view_href, quote=True)
+
         cards.append(
             f"""
-            <div class="card">
+            <div class="card" data-original-src="{original_view_href_html}">
                 <div class="rank">#{result["rank"]}</div>
                 <div class="score">{score * 100:.2f}%</div>
 
@@ -584,6 +597,159 @@ def generate_html_gallery(
     }, true);
 })();
 </script>"""
+    lightbox_script = """<script>
+(function () {
+    const overlay = document.getElementById("image-lightbox");
+    const preview = document.getElementById("lightbox-image");
+    const closeButton = document.getElementById("lightbox-close");
+    const previousButton = document.getElementById("lightbox-previous");
+    const nextButton = document.getElementById("lightbox-next");
+    const counter = document.getElementById("lightbox-counter");
+    let opener = null;
+    let galleryImages = [];
+    let currentIndex = -1;
+
+    function collectGalleryImages() {
+        return Array.from(document.querySelectorAll(".gallery .face img"))
+            .filter(function (image) {
+                return image.getAttribute("src") &&
+                    image.style.display !== "none" &&
+                    image.isConnected;
+            });
+    }
+
+    function refreshControls() {
+        const count = galleryImages.length;
+        counter.textContent = count > 0
+            ? (currentIndex + 1) + " / " + count
+            : "0 / 0";
+        const showNavigation = count > 1;
+        previousButton.hidden = !showNavigation;
+        nextButton.hidden = !showNavigation;
+    }
+
+    function displayCurrentImage() {
+        if (currentIndex < 0 || currentIndex >= galleryImages.length) return;
+
+        opener = galleryImages[currentIndex];
+        const card = opener.closest(".card");
+        const original = card ? (card.dataset.originalSrc || "") : "";
+        const source = original || opener.currentSrc || opener.src;
+        if (!source) return;
+
+        preview.dataset.fallbackTried = "false";
+        preview.referrerPolicy = "no-referrer";
+        preview.alt = opener.alt || "Оригинал фотографии";
+        preview.src = source;
+        refreshControls();
+    }
+
+    function openLightbox(image) {
+        galleryImages = collectGalleryImages();
+        currentIndex = galleryImages.indexOf(image);
+        if (currentIndex < 0) {
+            galleryImages.push(image);
+            currentIndex = galleryImages.length - 1;
+        }
+
+        displayCurrentImage();
+        overlay.classList.add("open");
+        overlay.setAttribute("aria-hidden", "false");
+        document.body.classList.add("lightbox-open");
+        closeButton.focus({ preventScroll: true });
+    }
+
+    function moveImage(direction) {
+        galleryImages = collectGalleryImages();
+        if (!galleryImages.length) return;
+
+        let index = galleryImages.indexOf(opener);
+        if (index < 0) index = currentIndex;
+        if (index < 0) index = 0;
+
+        currentIndex = (index + direction + galleryImages.length) % galleryImages.length;
+        displayCurrentImage();
+    }
+
+    function closeLightbox() {
+        if (!overlay.classList.contains("open")) return;
+
+        overlay.classList.remove("open");
+        overlay.setAttribute("aria-hidden", "true");
+        document.body.classList.remove("lightbox-open");
+        preview.removeAttribute("src");
+
+        const previousOpener = opener;
+        opener = null;
+        currentIndex = -1;
+        galleryImages = [];
+        if (previousOpener && typeof previousOpener.focus === "function") {
+            previousOpener.focus({ preventScroll: true });
+        }
+    }
+
+    document.addEventListener("click", function (event) {
+        const target = event.target;
+        const image = target && target.closest
+            ? target.closest(".face img")
+            : null;
+        if (image) {
+            event.preventDefault();
+            openLightbox(image);
+        }
+    });
+
+    closeButton.addEventListener("click", function (event) {
+        event.stopPropagation();
+        closeLightbox();
+    });
+
+    previousButton.addEventListener("click", function (event) {
+        event.stopPropagation();
+        moveImage(-1);
+    });
+
+    nextButton.addEventListener("click", function (event) {
+        event.stopPropagation();
+        moveImage(1);
+    });
+
+    overlay.addEventListener("click", function (event) {
+        if (event.target === overlay) closeLightbox();
+    });
+
+    preview.addEventListener("error", function () {
+        if (!opener) return;
+
+        const fallback = opener.currentSrc || opener.src;
+        if (
+            fallback &&
+            preview.dataset.fallbackTried !== "true" &&
+            fallback !== preview.src
+        ) {
+            preview.dataset.fallbackTried = "true";
+            preview.src = fallback;
+        } else {
+            preview.alt = "Не удалось загрузить оригинал фотографии";
+        }
+    });
+
+    document.addEventListener("keydown", function (event) {
+        if (!overlay.classList.contains("open")) return;
+
+        if (event.key === "Escape") {
+            closeLightbox();
+        } else if (event.key === "ArrowLeft") {
+            event.preventDefault();
+            moveImage(-1);
+        } else if (event.key === "ArrowRight") {
+            event.preventDefault();
+            moveImage(1);
+        }
+    });
+})();
+</script>"""
+
     document = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -663,6 +829,7 @@ h1 {{
     height: 100%;
     object-fit: contain;
     border-radius: 3px;
+    cursor: zoom-in;
 }}
 
 .no-image {{
@@ -781,6 +948,145 @@ h1 {{
 .button:hover {{
     background: {"#444444" if str(theme).lower() == "dark" else "#d1d5db"};
 }}
+.lightbox {{
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 24px;
+    background: rgba(0, 0, 0, .94);
+    backdrop-filter: blur(3px);
+    cursor: zoom-out;
+}}
+
+.lightbox.open {{
+    display: flex;
+}}
+
+.lightbox img {{
+    display: block;
+    max-width: 96vw;
+    max-height: 88vh;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    border-radius: 4px;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, .55);
+    cursor: default;
+}}
+
+.lightbox-close {{
+    position: fixed;
+    top: 14px;
+    right: 20px;
+    z-index: 1;
+    width: 48px;
+    height: 48px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, .3);
+    border-radius: 50%;
+    color: #fff;
+    background: rgba(35, 35, 35, .85);
+    font-size: 34px;
+    line-height: 42px;
+    text-align: center;
+    cursor: pointer;
+}}
+
+.lightbox-close:hover {{
+    background: rgba(85, 85, 85, .95);
+}}
+
+.lightbox-nav {{
+    position: fixed;
+    top: 50%;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 52px;
+    height: 68px;
+    padding: 0;
+    transform: translateY(-50%);
+    border: 1px solid rgba(255, 255, 255, .22);
+    border-radius: 12px;
+    color: #fff;
+    background: rgba(35, 35, 35, .72);
+    font-size: 44px;
+    line-height: 1;
+    cursor: pointer;
+    user-select: none;
+}}
+
+.lightbox-nav:hover {{
+    background: rgba(85, 85, 85, .92);
+}}
+
+.lightbox-nav[hidden] {{
+    display: none;
+}}
+
+.lightbox-previous {{
+    left: 18px;
+}}
+
+.lightbox-next {{
+    right: 18px;
+}}
+
+.lightbox-counter {{
+    position: fixed;
+    bottom: 38px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 12px;
+    border: 1px solid rgba(255, 255, 255, .2);
+    border-radius: 20px;
+    color: #fff;
+    background: rgba(30, 30, 30, .8);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+}}
+
+.lightbox-hint {{
+    position: fixed;
+    right: 12px;
+    bottom: 14px;
+    left: 12px;
+    color: rgba(255, 255, 255, .72);
+    font-size: 12px;
+    text-align: center;
+    pointer-events: none;
+}}
+
+body.lightbox-open {{
+    overflow: hidden;
+}}
+
+@media (max-width: 640px) {{
+    .lightbox {{
+        padding: 58px 8px;
+    }}
+
+    .lightbox-nav {{
+        width: 40px;
+        height: 54px;
+        font-size: 34px;
+        border-radius: 8px;
+    }}
+
+    .lightbox-previous {{
+        left: 6px;
+    }}
+
+    .lightbox-next {{
+        right: 6px;
+    }}
+}}
+
 </style>
 </head>
 
@@ -801,7 +1107,25 @@ h1 {{
 <div class="gallery">
 {cards_html}
 </div>
+
+<div id="image-lightbox" class="lightbox"
+     role="dialog" aria-modal="true" aria-hidden="true"
+     aria-label="Полноэкранный просмотр фотографии">
+    <button type="button" id="lightbox-close" class="lightbox-close"
+            aria-label="Закрыть просмотр">×</button>
+    <button type="button" id="lightbox-previous"
+            class="lightbox-nav lightbox-previous"
+            aria-label="Предыдущее изображение" title="Предыдущее изображение">‹</button>
+    <img id="lightbox-image" alt="">
+    <button type="button" id="lightbox-next"
+            class="lightbox-nav lightbox-next"
+            aria-label="Следующее изображение" title="Следующее изображение">›</button>
+    <div id="lightbox-counter" class="lightbox-counter" aria-live="polite">1 / 1</div>
+    <div class="lightbox-hint">← / → — переключение · Esc — закрыть · Нажмите на затемнённый фон, чтобы закрыть</div>
+</div>
+
 {retry_script}
+{lightbox_script}
 </body>
 </html>
 """
