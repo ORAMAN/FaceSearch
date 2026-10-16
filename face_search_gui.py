@@ -5051,7 +5051,7 @@ class FaceSearchGUI:
                 "SectionHeader.TButton",
                 background=colors["window"], foreground=colors["foreground"],
                 bordercolor=colors["border"], borderwidth=0, relief="flat",
-                padding=(8, 5), font=("Segoe UI Semibold", 10),
+                anchor="w", padding=(8, 5), font=("Segoe UI Semibold", 10),
             )
             style.map(
                 "SectionHeader.TButton",
@@ -5212,7 +5212,8 @@ class FaceSearchGUI:
             style="SectionHeader.TButton",
             command=lambda group_key=key: self._toggle_collapsible_group(group_key),
         )
-        header.configure(anchor="w")
+        # ttk.Button не принимает параметр anchor напрямую; выравнивание
+        # задаётся стилем SectionHeader.TButton ниже.
         header.pack(fill="x")
 
         content = ttk.LabelFrame(container, padding=padding)
