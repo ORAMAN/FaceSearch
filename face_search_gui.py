@@ -1678,16 +1678,6 @@ def _face_crop_encoded(crop: np.ndarray) -> tuple[bytes, str]:
     return data, hashlib.sha256(data).hexdigest()
 
 
-def _parse_metadata_json_value(value: Any) -> Any:
-    """Parses a DB JSON field defensively without raising during a scan."""
-    if value is None:
-        return None
-    try:
-        return json.loads(str(value))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-
-
 def _find_existing_source_crop_rows(
     conn: DatabaseConnection,
     *,
@@ -1702,7 +1692,13 @@ def _find_existing_source_crop_rows(
     if source_type == "local":
         if not source_url:
             return []
-        selected_columns = "id, path, metadata_json" if include_metadata else "id, path"
+        # The scan only needs to know whether metadata exists; don't transfer
+        # and JSON-decode the full text value on every repeated scan.
+        selected_columns = (
+            "id, path, CASE WHEN metadata_json IS NULL OR TRIM(metadata_json) = '' "
+            "THEN NULL ELSE 1 END"
+            if include_metadata else "id, path"
+        )
         rows = conn.execute(
             f"""
             SELECT {selected_columns}
@@ -2371,15 +2367,14 @@ def process_local_image(
     )
     if store_metadata and not overwrite_existing_crops:
         existing_rows = [(int(row[0]), str(row[1] or "")) for row in metadata_rows]
-        metadata_needs_refresh = any(
-            not _is_standard_metadata_document(_parse_metadata_json_value(row[2]))
-            for row in metadata_rows
-        )
+        # Schema migration normalizes every legacy non-empty value. On the hot
+        # path, only test NULL/empty values; avoid parsing JSON for every face.
+        metadata_needs_refresh = any(row[2] is None for row in metadata_rows)
     else:
         existing_rows = [(int(row[0]), str(row[1] or "")) for row in metadata_rows]
         metadata_needs_refresh = False
     has_saved_metadata = any(
-        len(row) > 2 and row[2] is not None and str(row[2]).strip()
+        len(row) > 2 and row[2] is not None
         for row in metadata_rows
     )
 
