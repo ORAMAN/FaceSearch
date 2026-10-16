@@ -58,6 +58,7 @@ PROFILE_COLUMNS = {
 IMAGE_COLUMNS = {
     "source_type": "TEXT NOT NULL DEFAULT 'local'", "source_url": "TEXT",
     "url_image": "TEXT", "profile_id": "INTEGER", "source_updated_at": "TEXT",
+    "metadata_json": "TEXT",
 }
 DB_CONFIG_FILE = APP_DIR / "database_profiles.json"
 SETTINGS_FILE = APP_DIR / "settings.xml"

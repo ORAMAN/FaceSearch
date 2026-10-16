@@ -19,6 +19,7 @@ _RESULT_SELECT_SQL = """
         i.source_type,
         i.source_url,
         i.url_image,
+        i.metadata_json,
         p.vk_user_id,
         p.screen_name,
         p.domain,
@@ -116,6 +117,7 @@ def _row_to_result(row, rank: int, score: float) -> dict[str, Any]:
         source_type,
         source_url,
         url_image,
+        metadata_json,
         vk_user_id,
         screen_name,
         domain,
@@ -158,6 +160,7 @@ def _row_to_result(row, rank: int, score: float) -> dict[str, Any]:
         "source_type": source_type or "local",
         "source_url": source_url,
         "url_image": url_image,
+        "metadata_json": metadata_json,
 
         "vk_user_id": vk_user_id,
         "screen_name": screen_name,
