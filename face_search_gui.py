@@ -2365,7 +2365,9 @@ def process_local_image(
         conn,
         source_type="local",
         source_url=source_url,
-        include_metadata=bool(store_metadata and not overwrite_existing_crops),
+        include_metadata=bool(
+            (store_metadata or clear_metadata) and not overwrite_existing_crops
+        ),
     )
     if store_metadata and not overwrite_existing_crops:
         existing_rows = [(int(row[0]), str(row[1] or "")) for row in metadata_rows]
@@ -2376,18 +2378,25 @@ def process_local_image(
     else:
         existing_rows = [(int(row[0]), str(row[1] or "")) for row in metadata_rows]
         metadata_needs_refresh = False
+    has_saved_metadata = any(
+        len(row) > 2 and row[2] is not None and str(row[2]).strip()
+        for row in metadata_rows
+    )
 
     file_metadata_json = None
 
     if existing_rows and not overwrite_existing_crops:
-        if clear_metadata:
-            # Одно групповое обновление вместо UPDATE на каждое лицо/CROP.
+        metadata_changed = False
+        if clear_metadata and has_saved_metadata:
+            # Чистим только действительно устаревшее значение и один раз на
+            # исходник; после миграции повторные сканы не делают лишних UPDATE.
             conn.execute(
                 "UPDATE images SET metadata_json = NULL "
                 "WHERE source_type = 'local' AND source_url = ? "
                 "AND metadata_json IS NOT NULL",
                 (source_url,),
             )
+            metadata_changed = True
         elif store_metadata and metadata_needs_refresh:
             file_metadata_json = _image_metadata_json(image_path)
             # Исправление старых/пустых значений одной операцией на исходник.
@@ -2396,7 +2405,9 @@ def process_local_image(
                 "WHERE source_type = 'local' AND source_url = ?",
                 (file_metadata_json, source_url),
             )
-        conn.commit()
+            metadata_changed = True
+        if metadata_changed:
+            conn.commit()
         missing_existing_rows = [
             (image_id, stored_path)
             for image_id, stored_path in existing_rows
