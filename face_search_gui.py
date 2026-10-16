@@ -4223,6 +4223,12 @@ class FaceSearchGUI:
             except tk.TclError:
                 maximized = False
 
+            try:
+                scan_batch_size = int(str(self.scan_batch_size_var.get()).strip() or 0)
+            except (TypeError, ValueError):
+                scan_batch_size = DEFAULT_SCAN_BATCH_SIZE
+            scan_batch_size = max(0, min(MAX_SCAN_BATCH_SIZE, scan_batch_size))
+
             settings = {
                 "window_geometry": self.root.geometry(),
                 "window_maximized": maximized,
@@ -4244,7 +4250,7 @@ class FaceSearchGUI:
                 ),
                 "backend": str(self.backend_mode_var.get()),
                 "workers": int(self.local_workers_var.get()),
-                "scan_batch_size": int(str(self.scan_batch_size_var.get()).strip() or 0),
+                "scan_batch_size": scan_batch_size,
                 "auto_workers": bool(self.auto_workers_var.get()),
                 "delete_processed": bool(self.delete_processed_var.get()),
                 "use_json_metadata": bool(self.use_json_metadata_var.get()),
@@ -8111,6 +8117,7 @@ class FaceSearchGUI:
 
                 elif kind == "scan_total":
                     total = event[1]
+                    self._scan_progress_value = 0
                     self._scan_rate_started_at = time.monotonic()
                     self._scan_rate_last_completed = 0
                     # Скользящее окно: время, число завершённых изображений и лиц.
@@ -8132,9 +8139,21 @@ class FaceSearchGUI:
                         f"Найдено изображений: {total}"
                     )
 
+                elif kind == "scan_discovered":
+                    total = max(0, int(event[1] or 0))
+                    current_value = int(getattr(self, "_scan_progress_value", 0) or 0)
+                    self.progress.stop()
+                    self.progress.config(
+                        mode="determinate",
+                        maximum=max(1, total),
+                        value=min(current_value, max(1, total)),
+                    )
+                    self.status_var.set(f"Найдено изображений: {total}")
+
                 elif kind == "scan_progress":
                     n, total, count, path = event[1:]
 
+                    self._scan_progress_value = int(n or 0)
                     self.progress.config(value=n)
 
                     # Скорость за скользящее окно последних 5 секунд, а не
