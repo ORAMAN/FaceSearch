@@ -5745,7 +5745,6 @@ class FaceSearchGUI:
             label="Выделить всё", command=self._query_entry_select_all,
         )
         self.query_path_entry.bind("<Button-3>", self._show_query_entry_context_menu)
-        self._setup_query_drag_and_drop()
 
         self.root.after_idle(self._show_query_path_tail)
         # Проверяем сохранённый путь уже при построении формы: отсутствующий
@@ -5774,6 +5773,8 @@ class FaceSearchGUI:
         self.canvas.bind("<Button-1>", self.on_canvas_click)
         self.canvas.bind("<Configure>", self._redraw_preview)
 
+        # Обе зоны принимают один и тот же объект: поле пути и большой холст.
+        self._setup_query_drag_and_drop()
         self._update_backend_ui()
 
     # --------------------------------------------------------
@@ -7120,8 +7121,9 @@ class FaceSearchGUI:
         return handler(event)
 
     def _setup_query_drag_and_drop(self):
-        """Регистрирует поле пути/URL как цель для перетаскивания файлов и текста."""
+        """Регистрирует поле пути и область предпросмотра как цели drag-and-drop."""
         entry = getattr(self, "query_path_entry", None)
+        canvas = getattr(self, "canvas", None)
         if entry is None:
             return
         if DND_FILES is None or DND_TEXT is None:
@@ -7137,45 +7139,133 @@ class FaceSearchGUI:
             style = ttk.Style(self.root)
             style.configure("QueryDrop.TEntry", fieldbackground="#dff3e4")
 
-            # DND_FILES принимает файлы из Проводника, DND_TEXT — текстовые
-            # ссылки, которые браузеры передают при перетаскивании изображения.
-            entry.drop_target_register(DND_FILES, DND_TEXT)
-            entry.dnd_bind("<<DropEnter>>", self._on_query_drop_enter)
-            entry.dnd_bind("<<DropPosition>>", self._on_query_drop_enter)
-            entry.dnd_bind("<<DropLeave>>", self._on_query_drop_leave)
-            entry.dnd_bind("<<Drop>>", self._on_query_drop)
+            # DND_FILES принимает локальные файлы, DND_TEXT — текстовые URL,
+            # которые браузеры могут передавать при перетаскивании изображения.
+            targets = [entry]
+            if canvas is not None:
+                targets.append(canvas)
+
+            for target in targets:
+                target.drop_target_register(DND_FILES, DND_TEXT)
+                target.dnd_bind("<<DropEnter>>", self._on_query_drop_enter)
+                target.dnd_bind("<<DropPosition>>", self._on_query_drop_enter)
+                target.dnd_bind("<<DropLeave>>", self._on_query_drop_leave)
+                target.dnd_bind("<<Drop>>", self._on_query_drop)
+
             self._query_drag_drop_enabled = True
         except Exception as exc:
             self._query_drag_drop_enabled = False
-            print(f"[WARN] Не удалось включить drag-and-drop для поля запроса: {exc}")
+            print(f"[WARN] Не удалось включить drag-and-drop для зоны запроса: {exc}")
 
     @staticmethod
     def _query_drop_action(event=None):
         """Возвращает действие drag-and-drop, ожидаемое расширением TkDND."""
         return (getattr(event, "action", None) or "copy") if event is not None else "copy"
 
+    def _show_query_preview_drop_overlay(self):
+        """Рисует временную подсказку поверх холста предпросмотра при drag-over."""
+        canvas = getattr(self, "canvas", None)
+        if canvas is None:
+            return
+        try:
+            width = max(1, int(canvas.winfo_width()))
+            height = max(1, int(canvas.winfo_height()))
+            pad = min(12, max(2, min(width, height) // 20))
+            x1, y1 = pad, pad
+            x2, y2 = max(pad + 1, width - pad), max(pad + 1, height - pad)
+            tags = "query_dnd_overlay"
+            existing = canvas.find_withtag(tags)
+            if existing:
+                # Обновляем координаты, если размер холста изменился при перетаскивании.
+                rectangle = next(
+                    (item for item in existing if canvas.type(item) == "rectangle"), None
+                )
+                label = next(
+                    (item for item in existing if canvas.type(item) == "text"), None
+                )
+                if rectangle is not None:
+                    canvas.coords(rectangle, x1, y1, x2, y2)
+                if label is not None:
+                    canvas.coords(label, width // 2, height // 2)
+                canvas.tag_raise(tags)
+                return
+
+            canvas.create_rectangle(
+                x1, y1, x2, y2,
+                outline="#7ee2a8", width=3, dash=(8, 4),
+                fill="#244532", stipple="gray25", tags=(tags,),
+            )
+            canvas.create_text(
+                width // 2, height // 2,
+                text="Отпустите изображение или ссылку\\nдля поиска",
+                fill="#ffffff", font=("Segoe UI", 14, "bold"),
+                width=max(80, width - 40), justify="center", tags=(tags,),
+            )
+            canvas.tag_raise(tags)
+        except tk.TclError:
+            pass
+
+    def _hide_query_preview_drop_overlay(self):
+        """Удаляет временную подсказку drag-and-drop, не трогая изображение и лица."""
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None:
+            try:
+                canvas.delete("query_dnd_overlay")
+            except tk.TclError:
+                pass
+
     def _on_query_drop_enter(self, event=None):
-        """Подсвечивает поле, пока над ним находится перетаскиваемый объект."""
+        """Подсвечивает активную цель, пока над ней находится перетаскиваемый объект."""
+        widget = getattr(event, "widget", None) if event is not None else None
         entry = getattr(self, "query_path_entry", None)
-        if entry is not None:
+        canvas = getattr(self, "canvas", None)
+
+        if widget is entry:
             try:
                 entry.configure(style="QueryDrop.TEntry")
             except tk.TclError:
                 pass
+        elif widget is canvas:
+            self._show_query_preview_drop_overlay()
+        else:
+            # Резервный путь на случай, если версия TkDND не разрешила widget.
+            if entry is not None:
+                try:
+                    entry.configure(style="QueryDrop.TEntry")
+                except tk.TclError:
+                    pass
+            if canvas is not None:
+                self._show_query_preview_drop_overlay()
+
         try:
-            self.status_var.set("Отпустите изображение, файл или прямую ссылку в поле запроса.")
+            self.status_var.set(
+                "Отпустите изображение или ссылку в поле запроса либо в области предпросмотра."
+            )
         except (AttributeError, tk.TclError):
             pass
         return self._query_drop_action(event)
 
     def _on_query_drop_leave(self, event=None):
-        """Убирает подсветку после выхода перетаскиваемого объекта из поля."""
+        """Убирает подсветку активной зоны при уходе курсора или после drop."""
+        widget = getattr(event, "widget", None) if event is not None else None
         entry = getattr(self, "query_path_entry", None)
-        if entry is not None:
+        canvas = getattr(self, "canvas", None)
+
+        if widget is entry:
             try:
                 entry.configure(style=getattr(self, "_query_entry_default_style", "TEntry"))
             except tk.TclError:
                 pass
+        elif widget is canvas:
+            self._hide_query_preview_drop_overlay()
+        else:
+            # Если TkDND не сообщил widget, безопасно сбрасываем визуальное состояние обеих зон.
+            if entry is not None:
+                try:
+                    entry.configure(style=getattr(self, "_query_entry_default_style", "TEntry"))
+                except tk.TclError:
+                    pass
+            self._hide_query_preview_drop_overlay()
         return self._query_drop_action(event)
 
     def _query_drop_data_values(self, raw_data):
