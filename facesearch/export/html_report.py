@@ -475,7 +475,7 @@ def generate_html_gallery(
             # target="_blank" открывает оригинал в новой вкладке браузера.
             original_image_button = (
                 f'<a class="button" href="{html.escape(remote_image_url, quote=True)}" '
-                'target="_blank" rel="noopener noreferrer">Открыть изображение</a>'
+                'target="_blank" rel="noopener noreferrer">Открыть</a>'
                 if remote_image_url else ""
             )
             buttons = f"""
@@ -491,7 +491,7 @@ def generate_html_gallery(
             buttons = f"""
                 <div class="buttons">
                     <a class="button" href="{html.escape(local_original_href)}">
-                        Открыть изображение
+                        Открыть
                     </a>
                 </div>
             """
