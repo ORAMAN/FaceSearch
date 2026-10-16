@@ -5291,8 +5291,51 @@ class FaceSearchGUI:
         )
         self.theme_toggle_btn.pack(side="right", padx=(12, 0), ipadx=0, ipady=3)
 
+        action_row = ttk.Frame(self.page, padding=(0, 0, 0, 8))
+        action_row.pack(fill="x")
+        self.scan_btn = ttk.Button(
+            action_row, text="▶  Сканировать GPU", style="Primary.TButton",
+            command=self.start_scan,
+        )
+        self.scan_btn.pack(side="left", padx=(0, 8))
+        self.repair_crops_btn = ttk.Button(
+            action_row, text="◇  Проверить CROP", command=self.start_crop_repair,
+        )
+        self.repair_crops_btn.pack(side="left", padx=(0, 8))
+        self.pause_scan_btn = ttk.Button(
+            action_row, text="Ⅱ  Пауза", command=self.toggle_scan_pause, state="disabled",
+        )
+        self.pause_scan_btn.pack(side="left", padx=(0, 8))
+        self.stop_scan_btn = ttk.Button(
+            action_row, text="■  Остановить", style="Danger.TButton",
+            command=self.stop_scan, state="disabled",
+        )
+        self.stop_scan_btn.pack(side="left")
+        # Кнопка HTML остаётся в постоянно видимой верхней панели действий,
+        # а не внутри ограниченной по высоте панели поиска.
+        self.open_results_btn = ttk.Button(
+            action_row, text="↗  Открыть последний HTML", command=self.open_last_html,
+            state="normal" if os.path.exists(os.path.join(os.getcwd(), "face_search_results_gui.html")) else "disabled",
+        )
+        self.open_results_btn.pack(side="right", padx=(10, 0))
+
+        self.scan_control_status_var = tk.StringVar(value="")
+        self.scan_control_status_label = ttk.Label(
+            action_row, textvariable=self.scan_control_status_var, style="Muted.TLabel",
+        )
+        # Показывается только во время сканирования или восстановления CROP.
+
+        # Динамический статус располагается сразу под кнопками и появляется только по необходимости.
+        self.dynamic_status_area = ttk.Frame(self.page, style="App.TFrame")
+        self.dynamic_status_area.pack(fill="x")
+        self.auto_workers_status_label = ttk.Label(
+            self.dynamic_status_area, textvariable=self.auto_workers_status_var, anchor="w",
+            style="Muted.TLabel", padding=(4, 2),
+        )
+        # Элемент появляется только во время активной адаптивной операции.
+
         # --------------------------------------------------------
-        # Источник изображений и действия
+        # Источник изображений
         # --------------------------------------------------------
         source_frame = self._create_collapsible_group(
             self.page, "Источник изображений", "source_images", padding=(10, 8),
@@ -5328,146 +5371,6 @@ class FaceSearchGUI:
             textvariable=self.local_workers_var, width=4,
         )
         self.local_workers_spinbox.pack(side="right")
-
-        action_row = ttk.Frame(self.page, padding=(0, 0, 0, 8))
-        action_row.pack(fill="x")
-        self.scan_btn = ttk.Button(
-            action_row, text="▶  Сканировать GPU", style="Primary.TButton",
-            command=self.start_scan,
-        )
-        self.scan_btn.pack(side="left", padx=(0, 8))
-        self.index_btn = ttk.Button(
-            action_row, text="⟳  Обновить индекс", command=self.start_index,
-        )
-        self.index_btn.pack(side="left", padx=(0, 8))
-        self.repair_crops_btn = ttk.Button(
-            action_row, text="◇  Проверить CROP", command=self.start_crop_repair,
-        )
-        self.repair_crops_btn.pack(side="left", padx=(0, 8))
-        self.pause_scan_btn = ttk.Button(
-            action_row, text="Ⅱ  Пауза", command=self.toggle_scan_pause, state="disabled",
-        )
-        self.pause_scan_btn.pack(side="left", padx=(0, 8))
-        self.stop_scan_btn = ttk.Button(
-            action_row, text="■  Остановить", style="Danger.TButton",
-            command=self.stop_scan, state="disabled",
-        )
-        self.stop_scan_btn.pack(side="left")
-        # Кнопка HTML остаётся в постоянно видимой верхней панели действий,
-        # а не внутри ограниченной по высоте панели поиска.
-        self.open_results_btn = ttk.Button(
-            action_row, text="↗  Открыть последний HTML", command=self.open_last_html,
-            state="normal" if os.path.exists(os.path.join(os.getcwd(), "face_search_results_gui.html")) else "disabled",
-        )
-        self.open_results_btn.pack(side="right", padx=(10, 0))
-
-        self.scan_control_status_var = tk.StringVar(value="")
-        self.scan_control_status_label = ttk.Label(
-            action_row, textvariable=self.scan_control_status_var, style="Muted.TLabel",
-        )
-        # Показывается только во время сканирования или восстановления CROP.
-
-        # Зарезервированное место между панелью действий и настройками БД:
-        # динамический статус не должен появляться под нижней строкой приложения.
-        self.dynamic_status_area = ttk.Frame(self.page, style="App.TFrame")
-        self.dynamic_status_area.pack(fill="x")
-        self.auto_workers_status_label = ttk.Label(
-            self.dynamic_status_area, textvariable=self.auto_workers_status_var, anchor="w",
-            style="Muted.TLabel", padding=(4, 2),
-        )
-        # Элемент появляется только во время активной адаптивной операции.
-
-        # --------------------------------------------------------
-        # Профиль базы данных: выбор/подключение отдельно от управления профилями
-        # --------------------------------------------------------
-        db_frame = self._create_collapsible_group(
-            self.page, "База данных", "database", padding=(10, 8),
-            pady=(0, 8),
-        )
-
-        # Одна строка: выбор и подключение слева, управление профилями справа.
-        # Вертикальный разделитель и дополнительный отступ визуально отделяют
-        # опасные/административные действия от обычного подключения.
-        db_select_row = ttk.Frame(db_frame)
-        db_select_row.pack(fill="x")
-        ttk.Label(db_select_row, text="Активный профиль:", style="Muted.TLabel").pack(side="left", padx=(0, 8))
-        self.db_combo = ttk.Combobox(
-            db_select_row, textvariable=self.db_profile_var, state="readonly", width=34,
-        )
-        self.db_combo.pack(side="left", padx=(0, 8))
-        self.db_combo.bind("<<ComboboxSelected>>", self._on_database_selected)
-        self.connect_db_btn = ttk.Button(
-            db_select_row, text="Подключиться", style="Primary.TButton", command=self.switch_database,
-        )
-        self.connect_db_btn.pack(side="left", padx=(0, 8))
-        self.refresh_db_btn = ttk.Button(
-            db_select_row, text="↻  Обновить", command=self.refresh_database_info,
-        )
-        self.refresh_db_btn.pack(side="left", padx=(0, 0))
-
-        ttk.Separator(db_select_row, orient="vertical").pack(
-            side="left", fill="y", padx=(14, 12), pady=3,
-        )
-        self.new_db_btn = ttk.Button(
-            db_select_row, text="＋ Новая БД", command=self.new_database_profile,
-        )
-        self.new_db_btn.pack(side="left", padx=(0, 6))
-        self.edit_db_btn = ttk.Button(
-            db_select_row, text="Настроить", command=self.edit_database_profile,
-        )
-        self.edit_db_btn.pack(side="left", padx=(0, 6))
-        self.delete_db_btn = ttk.Button(
-            db_select_row, text="Удалить профиль", command=self.delete_database_profile,
-        )
-        self.delete_db_btn.pack(side="left", padx=(0, 6))
-        self.migrate_db_btn = ttk.Button(
-            db_select_row, text="⇄  Миграция БД", command=self.open_database_migration,
-        )
-        self.migrate_db_btn.pack(side="left")
-
-        info_frame = ttk.Frame(db_frame, style="Inset.TFrame", padding=(8, 6))
-        info_frame.pack(fill="x", pady=(5, 0))
-        self.db_info_var = tk.StringVar(value="")
-        ttk.Label(
-            info_frame, textvariable=self.db_info_var, anchor="w", style="InsetMuted.TLabel",
-        ).pack(fill="x")
-        self.db_connection_var = tk.StringVar(value="Соединение: инициализация...")
-        ttk.Label(
-            info_frame, textvariable=self.db_connection_var, anchor="w", style="Inset.TLabel",
-        ).pack(fill="x", pady=(2, 0))
-        self.startup_progress_frame = ttk.Frame(info_frame, style="Inset.TFrame")
-        self.startup_progress_label_var = tk.StringVar(value="")
-        ttk.Label(
-            self.startup_progress_frame, textvariable=self.startup_progress_label_var,
-            anchor="w", style="Muted.TLabel",
-        ).pack(side="left", fill="x", expand=True)
-        self.startup_progress = ttk.Progressbar(
-            self.startup_progress_frame, mode="indeterminate", length=170,
-        )
-        self.startup_progress.pack(side="right", padx=(8, 0))
-        self.startup_progress_frame.pack_forget()
-        self._refresh_database_combo()
-
-        # --------------------------------------------------------
-        # Вычисления
-        # --------------------------------------------------------
-        backend_frame = self._create_collapsible_group(
-            self.page, "Вычисления", "compute", padding=(10, 6),
-            pady=(0, 8),
-        )
-        self.backend_gpu_radio = ttk.Radiobutton(
-            backend_frame, text="GPU (CUDA с переходом на CPU при ошибке)",
-            value=BACKEND_GPU, variable=self.backend_mode_var, command=self._on_backend_change,
-        )
-        self.backend_gpu_radio.pack(side="left", padx=(0, 16))
-        self.backend_cpu_radio = ttk.Radiobutton(
-            backend_frame, text="Только CPU", value=BACKEND_CPU,
-            variable=self.backend_mode_var, command=self._on_backend_change,
-        )
-        self.backend_cpu_radio.pack(side="left", padx=(0, 16))
-        ttk.Label(
-            backend_frame, textvariable=self.backend_status_var, style="Muted.TLabel",
-        ).pack(side="left", fill="x", expand=True)
 
         # --------------------------------------------------------
         # Параметры сканирования. Grid не даёт длинным подписям вытеснять кнопки.
@@ -5537,6 +5440,105 @@ class FaceSearchGUI:
             text=f"0 = весь каталог (потоково, пакетами по {DEFAULT_SCAN_BATCH_SIZE})",
             style="Muted.TLabel",
         ).grid(row=2, column=2, sticky="w", padx=(0, 10), pady=2)
+
+        # --------------------------------------------------------
+        # Вычисления
+        # --------------------------------------------------------
+        backend_frame = self._create_collapsible_group(
+            self.page, "Вычисления", "compute", padding=(10, 6),
+            pady=(0, 8),
+        )
+        self.backend_gpu_radio = ttk.Radiobutton(
+            backend_frame, text="GPU (CUDA с переходом на CPU при ошибке)",
+            value=BACKEND_GPU, variable=self.backend_mode_var, command=self._on_backend_change,
+        )
+        self.backend_gpu_radio.pack(side="left", padx=(0, 16))
+        self.backend_cpu_radio = ttk.Radiobutton(
+            backend_frame, text="Только CPU", value=BACKEND_CPU,
+            variable=self.backend_mode_var, command=self._on_backend_change,
+        )
+        self.backend_cpu_radio.pack(side="left", padx=(0, 16))
+        ttk.Label(
+            backend_frame, textvariable=self.backend_status_var, style="Muted.TLabel",
+        ).pack(side="left", fill="x", expand=True)
+
+        # --------------------------------------------------------
+        # Профиль базы данных: выбор/подключение отдельно от управления профилями
+        # --------------------------------------------------------
+        db_frame = self._create_collapsible_group(
+            self.page, "База данных", "database", padding=(10, 8),
+            pady=(0, 8),
+        )
+
+        # Одна строка: выбор и подключение слева, управление профилями справа.
+        # Вертикальный разделитель и дополнительный отступ визуально отделяют
+        # опасные/административные действия от обычного подключения.
+        db_select_row = ttk.Frame(db_frame)
+        db_select_row.pack(fill="x")
+        ttk.Label(db_select_row, text="Активный профиль:", style="Muted.TLabel").pack(side="left", padx=(0, 8))
+        self.db_combo = ttk.Combobox(
+            db_select_row, textvariable=self.db_profile_var, state="readonly", width=34,
+        )
+        self.db_combo.pack(side="left", padx=(0, 8))
+        self.db_combo.bind("<<ComboboxSelected>>", self._on_database_selected)
+        self.connect_db_btn = ttk.Button(
+            db_select_row, text="Подключиться", style="Primary.TButton", command=self.switch_database,
+        )
+        self.connect_db_btn.pack(side="left", padx=(0, 8))
+        self.refresh_db_btn = ttk.Button(
+            db_select_row, text="↻  Обновить", command=self.refresh_database_info,
+        )
+        self.refresh_db_btn.pack(side="left", padx=(0, 0))
+
+        ttk.Separator(db_select_row, orient="vertical").pack(
+            side="left", fill="y", padx=(14, 12), pady=3,
+        )
+        self.new_db_btn = ttk.Button(
+            db_select_row, text="＋ Новая БД", command=self.new_database_profile,
+        )
+        self.new_db_btn.pack(side="left", padx=(0, 6))
+        self.edit_db_btn = ttk.Button(
+            db_select_row, text="Настроить", command=self.edit_database_profile,
+        )
+        self.edit_db_btn.pack(side="left", padx=(0, 6))
+        self.delete_db_btn = ttk.Button(
+            db_select_row, text="Удалить профиль", command=self.delete_database_profile,
+        )
+        self.delete_db_btn.pack(side="left", padx=(0, 6))
+        self.migrate_db_btn = ttk.Button(
+            db_select_row, text="⇄  Миграция БД", command=self.open_database_migration,
+        )
+        self.migrate_db_btn.pack(side="left", padx=(0, 6))
+        ttk.Separator(db_select_row, orient="vertical").pack(
+            side="left", fill="y", padx=(8, 10), pady=3,
+        )
+        self.index_btn = ttk.Button(
+            db_select_row, text="⟳  Обновить индекс", command=self.start_index,
+        )
+        self.index_btn.pack(side="left")
+
+        info_frame = ttk.Frame(db_frame, style="Inset.TFrame", padding=(8, 6))
+        info_frame.pack(fill="x", pady=(5, 0))
+        self.db_info_var = tk.StringVar(value="")
+        ttk.Label(
+            info_frame, textvariable=self.db_info_var, anchor="w", style="InsetMuted.TLabel",
+        ).pack(fill="x")
+        self.db_connection_var = tk.StringVar(value="Соединение: инициализация...")
+        ttk.Label(
+            info_frame, textvariable=self.db_connection_var, anchor="w", style="Inset.TLabel",
+        ).pack(fill="x", pady=(2, 0))
+        self.startup_progress_frame = ttk.Frame(info_frame, style="Inset.TFrame")
+        self.startup_progress_label_var = tk.StringVar(value="")
+        ttk.Label(
+            self.startup_progress_frame, textvariable=self.startup_progress_label_var,
+            anchor="w", style="Muted.TLabel",
+        ).pack(side="left", fill="x", expand=True)
+        self.startup_progress = ttk.Progressbar(
+            self.startup_progress_frame, mode="indeterminate", length=170,
+        )
+        self.startup_progress.pack(side="right", padx=(8, 0))
+        self.startup_progress_frame.pack_forget()
+        self._refresh_database_combo()
 
         # --------------------------------------------------------
         # Нижняя полоса состояния закреплена у нижнего края окна.
