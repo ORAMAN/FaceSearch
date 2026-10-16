@@ -7060,7 +7060,9 @@ class FaceSearchGUI:
         if entry is None:
             return "break"
         try:
-            selected = entry.selection_get()
+            start = entry.index("sel.first")
+            end = entry.index("sel.last")
+            selected = entry.get()[start:end]
             self.root.clipboard_clear()
             self.root.clipboard_append(selected)
         except tk.TclError:
