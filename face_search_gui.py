@@ -150,7 +150,9 @@ def _iter_image_batches(
 
 # Разделённые модули конфигурации, настроек, профилей БД и телеметрии.
 from facesearch.config import *  # noqa: F401,F403 - constants are public app configuration
-from facesearch.settings import _load_gui_settings, _save_gui_settings_data
+from facesearch.settings import (
+    _load_gui_settings, _save_gui_settings_data, COLLAPSIBLE_SECTION_DEFAULTS,
+)
 from facesearch.database_profiles import (
     _profile_storage_slug, _profile_storage_paths, _normalize_profile_storage_paths,
     _default_profile, _load_db_profiles, _save_db_profiles,
@@ -4344,6 +4346,10 @@ class FaceSearchGUI:
                 "create_crops_on_html": bool(self.create_crops_on_html_var.get()),
                 "top_k": int(self.topk_var.get()),
                 "min_similarity": float(self.min_similarity_var.get()),
+                "collapsible_sections": {
+                    key: bool(group.get("expanded", True))
+                    for key, group in getattr(self, "_collapsible_groups", {}).items()
+                },
             }
 
             _save_gui_settings_data(settings)
@@ -5042,6 +5048,20 @@ class FaceSearchGUI:
                 font=("Segoe UI Semibold", 9),
             )
             style.configure(
+                "SectionHeader.TButton",
+                background=colors["window"], foreground=colors["foreground"],
+                bordercolor=colors["border"], borderwidth=0, relief="flat",
+                padding=(8, 5), font=("Segoe UI Semibold", 10),
+            )
+            style.map(
+                "SectionHeader.TButton",
+                background=[
+                    ("pressed", colors["selection"]),
+                    ("active", colors["button_active"]),
+                ],
+                foreground=[("disabled", colors["muted"]), ("!disabled", colors["foreground"])],
+            )
+            style.configure(
                 "TButton", background=colors["button"], foreground=colors["foreground"],
                 bordercolor=colors["border"], padding=(10, 7), font=("Segoe UI", 9),
                 relief="flat",
@@ -5165,6 +5185,71 @@ class FaceSearchGUI:
         except tk.TclError:
             pass
 
+    def _create_collapsible_group(
+        self,
+        parent,
+        title: str,
+        key: str,
+        *,
+        padding=(10, 8),
+        pady=(0, 8),
+    ):
+        """Создаёт секцию с кликабельным заголовком и сохраняемым состоянием."""
+        if not hasattr(self, "_collapsible_groups"):
+            self._collapsible_groups = {}
+
+        saved_states = self.gui_settings.get("collapsible_sections", {})
+        if not isinstance(saved_states, dict):
+            saved_states = {}
+        expanded = bool(saved_states.get(key, COLLAPSIBLE_SECTION_DEFAULTS.get(key, True)))
+
+        container = ttk.Frame(parent, style="App.TFrame")
+        container.pack(fill="x", pady=pady)
+
+        header = ttk.Button(
+            container,
+            text="",
+            style="SectionHeader.TButton",
+            command=lambda group_key=key: self._toggle_collapsible_group(group_key),
+        )
+        header.configure(anchor="w")
+        header.pack(fill="x")
+
+        content = ttk.LabelFrame(container, padding=padding)
+        self._collapsible_groups[key] = {
+            "title": title,
+            "container": container,
+            "header": header,
+            "content": content,
+            "expanded": expanded,
+        }
+        self._render_collapsible_group(key)
+        return content
+
+    def _render_collapsible_group(self, key: str):
+        """Отображает стрелку и состояние тела одной сворачиваемой секции."""
+        group = getattr(self, "_collapsible_groups", {}).get(key)
+        if not group:
+            return
+        expanded = bool(group.get("expanded", True))
+        arrow = "▾" if expanded else "▸"
+        group["header"].configure(text=f"{arrow}  {group['title']}")
+        content = group["content"]
+        if expanded:
+            if not content.winfo_manager():
+                content.pack(fill="x")
+        else:
+            content.pack_forget()
+
+    def _toggle_collapsible_group(self, key: str):
+        """Переключает секцию и сохраняет её состояние в settings.xml."""
+        group = getattr(self, "_collapsible_groups", {}).get(key)
+        if not group:
+            return
+        group["expanded"] = not bool(group.get("expanded", True))
+        self._render_collapsible_group(key)
+        self._schedule_settings_save()
+
     def _build_ui(self):
         """Создаёт современную компоновку интерфейса, не меняя обработчики приложения."""
         self.style = ttk.Style(self.root)
@@ -5208,10 +5293,10 @@ class FaceSearchGUI:
         # --------------------------------------------------------
         # Источник изображений и действия
         # --------------------------------------------------------
-        source_frame = ttk.LabelFrame(
-            self.page, text="Источник изображений", padding=(10, 8),
+        source_frame = self._create_collapsible_group(
+            self.page, "Источник изображений", "source_images", padding=(10, 8),
+            pady=(0, 8),
         )
-        source_frame.pack(fill="x", pady=(0, 8))
         source_row = ttk.Frame(source_frame)
         source_row.pack(fill="x")
 
@@ -5294,14 +5379,10 @@ class FaceSearchGUI:
         # --------------------------------------------------------
         # Профиль базы данных: выбор/подключение отдельно от управления профилями
         # --------------------------------------------------------
-        db_groups_row = ttk.Frame(self.page, style="App.TFrame")
-        db_groups_row.pack(fill="x", pady=(0, 8))
-        db_groups_row.columnconfigure(0, weight=1)
-
-        db_frame = ttk.LabelFrame(
-            db_groups_row, text="База данных", padding=(10, 8),
+        db_frame = self._create_collapsible_group(
+            self.page, "База данных", "database", padding=(10, 8),
+            pady=(0, 8),
         )
-        db_frame.grid(row=0, column=0, columnspan=2, sticky="nsew")
 
         # Одна строка: выбор и подключение слева, управление профилями справа.
         # Вертикальный разделитель и дополнительный отступ визуально отделяют
@@ -5369,10 +5450,10 @@ class FaceSearchGUI:
         # --------------------------------------------------------
         # Вычисления
         # --------------------------------------------------------
-        backend_frame = ttk.LabelFrame(
-            self.page, text="Вычисления", padding=(10, 6),
+        backend_frame = self._create_collapsible_group(
+            self.page, "Вычисления", "compute", padding=(10, 6),
+            pady=(0, 8),
         )
-        backend_frame.pack(fill="x", pady=(0, 8))
         self.backend_gpu_radio = ttk.Radiobutton(
             backend_frame, text="GPU (CUDA с переходом на CPU при ошибке)",
             value=BACKEND_GPU, variable=self.backend_mode_var, command=self._on_backend_change,
@@ -5390,10 +5471,10 @@ class FaceSearchGUI:
         # --------------------------------------------------------
         # Параметры сканирования. Grid не даёт длинным подписям вытеснять кнопки.
         # --------------------------------------------------------
-        scan_options = ttk.LabelFrame(
-            self.page, text="Параметры обработки", padding=(10, 5),
+        scan_options = self._create_collapsible_group(
+            self.page, "Параметры обработки", "processing", padding=(10, 5),
+            pady=(0, 6),
         )
-        scan_options.pack(fill="x", pady=(0, 6))
         for column in range(3):
             scan_options.columnconfigure(column, weight=1)
 
