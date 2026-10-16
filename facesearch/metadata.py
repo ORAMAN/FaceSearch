@@ -145,5 +145,69 @@ def extract_image_metadata(path: str | Path) -> dict[str, Any]:
     return {key: value for key, value in metadata.items() if value is not None and value != ""}
 
 
+def is_standard_metadata_document(value: Any) -> bool:
+    """True only for the exact import envelope: url_source/name/url_image/info."""
+    if not isinstance(value, dict):
+        return False
+    if set(value.keys()) != {"url_source", "name", "url_image", "info"}:
+        return False
+    return (
+        isinstance(value.get("url_source"), str)
+        and isinstance(value.get("name"), str)
+        and isinstance(value.get("url_image"), str)
+        and isinstance(value.get("info"), dict)
+    )
+
+
+def image_metadata_document(path: str | Path) -> dict[str, Any]:
+    """Builds local-file metadata using the same strict envelope as sidecar JSON."""
+    file_path = Path(path).expanduser().resolve()
+    source_url = ""
+    try:
+        source_url = file_path.as_uri()
+    except (OSError, ValueError):
+        source_url = str(file_path)
+
+    info = extract_image_metadata(file_path)
+    name = str(info.pop("filename", file_path.name) or file_path.name)
+    # All file facts live inside info. The document's top-level shape is fixed.
+    return {
+        "url_source": source_url,
+        "name": name,
+        "url_image": source_url,
+        "info": info,
+    }
+
+
+def normalize_legacy_metadata_document(
+    value: dict[str, Any], source_url: str | None
+) -> dict[str, Any]:
+    """Wraps the former flat EXIF dictionary in the strict import envelope."""
+    if is_standard_metadata_document(value):
+        return value
+
+    info = dict(value)
+    filename = str(info.pop("filename", "") or "").strip()
+    # Prevent malformed/old envelope keys from leaking to the top level of info.
+    for key in ("url_source", "name", "url_image", "info"):
+        info.pop(key, None)
+
+    source = str(source_url or "").strip()
+    if not filename:
+        filename = Path(source.split("?", 1)[0]).name or "Локальное изображение"
+
+    return {
+        "url_source": source,
+        "name": filename,
+        "url_image": source,
+        "info": info,
+    }
+
+
 def metadata_json(path: str | Path) -> str:
-    return json.dumps(extract_image_metadata(path), ensure_ascii=False, separators=(",", ":"))
+    """Serializes local metadata in the canonical four-field JSON format."""
+    return json.dumps(
+        image_metadata_document(path),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
