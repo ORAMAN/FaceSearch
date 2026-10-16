@@ -171,6 +171,7 @@ from facesearch.database_profiles import (
 from facesearch.database.connection import (
     DBResult, DatabaseConnection, _safe_db_identifier, _quote_identifier,
 )
+from facesearch.database.retry import is_transient_database_conflict, database_retry_delay
 from facesearch.metadata import (
     metadata_json as _image_metadata_json,
     is_standard_metadata_document as _is_standard_metadata_document,
@@ -2422,6 +2423,14 @@ def process_local_image(
             for image_id, stored_path in existing_rows
             if not _resolve_db_crop_path(stored_path, image_id=int(image_id)).is_file()
         ]
+        # Close the read-only transaction opened by the initial SELECT before
+        # potentially long image decoding/GPU inference. MySQL connections use
+        # autocommit=False by default, so otherwise every worker can retain a
+        # stale transaction snapshot while other workers perform writes.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         restored_missing_crops = 0
         detected_faces: int | None = None
         if create_crop_files and missing_existing_rows:
@@ -2435,7 +2444,12 @@ def process_local_image(
                     conn, existing_image, existing_faces, existing_rows
                 )
 
-        # Локальные исходные изображения сохраняются даже при повторном сканировании.
+        # Local source photos are preserved even on repeat scans. Crop repair
+        # performs SELECTs only, so close its read transaction before returning.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         deleted = False
         message = "исходник уже есть в БД"
         if restored_missing_crops:
@@ -2447,6 +2461,14 @@ def process_local_image(
             "restored": restored_missing_crops,
             "detected_faces": detected_faces,
         }
+
+    # The existing-source lookup is a read-only preflight; end that transaction
+    # before decoding and inference. This avoids keeping MySQL snapshots open
+    # during relatively expensive CPU/GPU work.
+    try:
+        conn.rollback()
+    except Exception:
+        pass
 
     image = load_image(image_path)
     if image is None:
@@ -6574,7 +6596,7 @@ class FaceSearchGUI:
             # Рабочие потоки ниже открывают свои соединения без повторной миграции.
             init_conn = create_database(maintenance=False, initialize=True)
             try:
-                pass
+                scan_db_backend = str(init_conn.backend)
             finally:
                 init_conn.close()
 
@@ -6771,7 +6793,15 @@ class FaceSearchGUI:
                     # worker-ов одновременно обновляют одну строку profiles. MSSQL
                     # также может возвращать deadlock/lock timeout. Повторяем только
                     # распознанные временные конфликты и ограниченное число раз.
-                    max_attempts = 4 if conn.backend in (DB_TYPE_MYSQL, DB_TYPE_MSSQL) else 1
+                    # MySQL receives more attempts with jittered exponential
+                    # backoff. Synchronized retries from many workers can otherwise
+                    # hit the same InnoDB lock conflict repeatedly.
+                    if conn.backend == DB_TYPE_MYSQL:
+                        max_attempts = 6
+                    elif conn.backend == DB_TYPE_MSSQL:
+                        max_attempts = 4
+                    else:
+                        max_attempts = 1
                 except Exception as exc:
                     # Это исключение раньше выходило из worker до его основного
                     # try/except, после чего интерфейс показывал «<unknown>».
@@ -6892,38 +6922,25 @@ class FaceSearchGUI:
                                 error_code = int(exc.args[0])
                         except (TypeError, ValueError):
                             pass
-                        transient = (
-                            error_code in {1020, 1205, 1206, 1213}
-                            or any(
-                                marker in error_text
-                                for marker in (
-                                    "record has changed since last read",
-                                    "deadlock",
-                                    "1020",
-                                    "1205",
-                                    "1206",
-                                    "1213",
-                                    "lock wait timeout",
-                                    "lock request time out",
-                                    "1222",
-                                    "timeout expired",
-                                    "hyt00",
-                                    "40001",
-                                )
-                            )
-                        )
+                        transient = is_transient_database_conflict(exc)
                         if not transient:
                             return path, 0, exc, {
                                 "faces": 0,
                                 "deleted": False,
                             }
 
+                        delay = database_retry_delay(
+                            attempt,
+                            base_seconds=0.30,
+                            max_seconds=3.0,
+                            jitter_seconds=0.35,
+                        )
                         print(
                             f"[SCAN DB RETRY] {path.name}: временный конфликт БД "
                             f"({error_code or type(exc).__name__}), "
-                            f"повтор {attempt + 2}/{max_attempts}"
+                            f"повтор {attempt + 2}/{max_attempts} через {delay:.2f} с"
                         )
-                        time.sleep(0.15 * (attempt + 1))
+                        time.sleep(delay)
 
                 return path, 0, RuntimeError(
                     "Не удалось завершить запись в БД после повторных попыток."
@@ -6943,6 +6960,31 @@ class FaceSearchGUI:
                 remote_db=remote_db,
                 auto_adjust=auto_workers,
             )
+            # Concurrent MySQL transactions on images/faces can deadlock under
+            # a large scan. The GPU inference pool is already independently capped;
+            # bound active scan workers to four in both auto and manual modes.
+            if scan_db_backend == DB_TYPE_MYSQL:
+                mysql_scan_worker_cap = 4
+                controller.max_workers = min(
+                    max(1, int(controller.max_workers)),
+                    mysql_scan_worker_cap,
+                )
+                controller.min_workers = 1
+                controller.current_workers = min(
+                    max(1, int(controller.current_workers)),
+                    controller.max_workers,
+                )
+                if not auto_workers:
+                    workers = min(max(1, int(workers)), mysql_scan_worker_cap)
+                    controller.current_workers = workers
+                    controller.max_workers = workers
+                else:
+                    workers = controller.current_workers
+                print(
+                    "[SCAN DB] MySQL: ограничение одновременной обработки "
+                    f"до {controller.max_workers} worker-ов для снижения deadlock."
+                )
+
             if auto_workers:
                 workers = controller.current_workers
             limiter = AdaptiveConcurrencyLimiter(controller.current_workers)
