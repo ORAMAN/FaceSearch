@@ -2476,6 +2476,12 @@ def process_local_image(
                     (_relative_crop_db_path(crop_path), crop_path.name, image_id),
                 )
 
+            if store_metadata:
+                conn.execute(
+                    "UPDATE images SET metadata_json = ? WHERE id = ?",
+                    (file_metadata_json, int(image_id)),
+                )
+
             if create_crop_files:
                 crop_dir.mkdir(parents=True, exist_ok=True)
                 if overwrite_existing_crops and crop_path.is_file():
