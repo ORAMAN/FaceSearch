@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 from typing import Any
 from .config import (
     APP_DIR, SETTINGS_FILE, LOCAL_DEFAULT_WORKERS, LOCAL_MAX_WORKERS,
-    AUTO_WORKERS_DEFAULT, DEFAULT_TOP_K,
+    AUTO_WORKERS_DEFAULT, DEFAULT_TOP_K, DEFAULT_SCAN_BATCH_SIZE, MAX_SCAN_BATCH_SIZE,
 )
 
 def _xml_bool(value: Any, default: bool = False) -> bool:
@@ -40,6 +40,7 @@ def _load_gui_settings() -> dict[str, Any]:
         "query_image": "",
         "backend": "",
         "workers": LOCAL_DEFAULT_WORKERS,
+        "scan_batch_size": DEFAULT_SCAN_BATCH_SIZE,
         "auto_workers": AUTO_WORKERS_DEFAULT,
         "delete_processed": False,
         "use_json_metadata": True,
@@ -93,6 +94,13 @@ def _load_gui_settings() -> dict[str, Any]:
                 min(
                     LOCAL_MAX_WORKERS,
                     _xml_int(node.findtext("workers"), LOCAL_DEFAULT_WORKERS),
+                ),
+            )
+            settings["scan_batch_size"] = max(
+                0,
+                min(
+                    MAX_SCAN_BATCH_SIZE,
+                    _xml_int(node.findtext("batch_size"), DEFAULT_SCAN_BATCH_SIZE),
                 ),
             )
             settings["auto_workers"] = _xml_bool(
@@ -185,6 +193,12 @@ def _save_gui_settings_data(settings: dict[str, Any]) -> None:
     ET.SubElement(node, "workers").text = str(
         int(settings.get("workers") or LOCAL_DEFAULT_WORKERS)
     )
+    try:
+        scan_batch_size = int(str(settings.get("scan_batch_size", DEFAULT_SCAN_BATCH_SIZE)).strip() or 0)
+    except (TypeError, ValueError):
+        scan_batch_size = DEFAULT_SCAN_BATCH_SIZE
+    scan_batch_size = max(0, min(MAX_SCAN_BATCH_SIZE, scan_batch_size))
+    ET.SubElement(node, "batch_size").text = str(scan_batch_size)
     ET.SubElement(node, "auto_workers").text = (
         "true" if bool(settings.get("auto_workers")) else "false"
     )
