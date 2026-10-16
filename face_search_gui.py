@@ -5695,6 +5695,38 @@ class FaceSearchGUI:
             query_row, textvariable=self.query_var, width=42,
         )
         self.query_path_entry.pack(side="left", fill="x", expand=True)
+
+        # Явно обрабатываем горячие клавиши: копирование, вставку, вырезание
+        # и выделение всего текста. У ttk.Entry штатного контекстного меню нет.
+        for sequence, handler in (
+            ("<Control-c>", self._query_entry_copy),
+            ("<Control-C>", self._query_entry_copy),
+            ("<Control-v>", self._query_entry_paste),
+            ("<Control-V>", self._query_entry_paste),
+            ("<Control-x>", self._query_entry_cut),
+            ("<Control-X>", self._query_entry_cut),
+            ("<Control-a>", self._query_entry_select_all),
+            ("<Control-A>", self._query_entry_select_all),
+            ("<Shift-F10>", self._show_query_entry_keyboard_menu),
+        ):
+            self.query_path_entry.bind(sequence, handler)
+
+        self.query_entry_context_menu = tk.Menu(self.root, tearoff=False)
+        self.query_entry_context_menu.add_command(
+            label="Вырезать", command=self._query_entry_cut,
+        )
+        self.query_entry_context_menu.add_command(
+            label="Копировать", command=self._query_entry_copy,
+        )
+        self.query_entry_context_menu.add_command(
+            label="Вставить", command=self._query_entry_paste,
+        )
+        self.query_entry_context_menu.add_separator()
+        self.query_entry_context_menu.add_command(
+            label="Выделить всё", command=self._query_entry_select_all,
+        )
+        self.query_path_entry.bind("<Button-3>", self._show_query_entry_context_menu)
+
         self.root.after_idle(self._show_query_path_tail)
         # Проверяем сохранённый путь уже при построении формы: отсутствующий
         # или недоступный файл не должен оставлять кнопку активной.
@@ -7021,6 +7053,94 @@ class FaceSearchGUI:
     # --------------------------------------------------------
     # Query image
     # --------------------------------------------------------
+
+    def _query_entry_copy(self, event=None):
+        """Копирует выделенный текст из поля пути/URL в системный буфер."""
+        entry = getattr(self, "query_path_entry", None)
+        if entry is None:
+            return "break"
+        try:
+            selected = entry.selection_get()
+            self.root.clipboard_clear()
+            self.root.clipboard_append(selected)
+        except tk.TclError:
+            # Нет выделения или системный буфер недоступен.
+            pass
+        return "break"
+
+    def _query_entry_cut(self, event=None):
+        """Вырезает выделенный текст, сохраняя его в системном буфере."""
+        entry = getattr(self, "query_path_entry", None)
+        if entry is None:
+            return "break"
+        try:
+            start = entry.index("sel.first")
+            end = entry.index("sel.last")
+        except tk.TclError:
+            return "break"
+        self._query_entry_copy()
+        entry.delete(start, end)
+        return "break"
+
+    def _query_entry_paste(self, event=None):
+        """Вставляет текст из системного буфера вместо выделенного фрагмента."""
+        entry = getattr(self, "query_path_entry", None)
+        if entry is None:
+            return "break"
+        try:
+            value = self.root.clipboard_get()
+        except tk.TclError:
+            return "break"
+        try:
+            start = entry.index("sel.first")
+            end = entry.index("sel.last")
+            entry.delete(start, end)
+        except tk.TclError:
+            pass
+        entry.insert("insert", value)
+        entry.xview("insert")
+        return "break"
+
+    def _query_entry_select_all(self, event=None):
+        """Выделяет весь текст в поле пути/URL."""
+        entry = getattr(self, "query_path_entry", None)
+        if entry is not None:
+            entry.selection_range(0, "end")
+            entry.icursor("end")
+            entry.focus_set()
+        return "break"
+
+    def _show_query_entry_context_menu(self, event):
+        """Показывает стандартные команды редактирования по правому клику."""
+        entry = getattr(self, "query_path_entry", None)
+        menu = getattr(self, "query_entry_context_menu", None)
+        if entry is None or menu is None:
+            return "break"
+        entry.focus_set()
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except tk.TclError:
+                pass
+        return "break"
+
+    def _show_query_entry_keyboard_menu(self, event=None):
+        """Открывает контекстное меню с клавиатуры (Shift+F10)."""
+        entry = getattr(self, "query_path_entry", None)
+        if entry is None:
+            return "break"
+        try:
+            x = entry.winfo_rootx() + min(entry.winfo_width() - 1, 40)
+            y = entry.winfo_rooty() + entry.winfo_height()
+            self.query_entry_context_menu.tk_popup(x, y)
+        finally:
+            try:
+                self.query_entry_context_menu.grab_release()
+            except tk.TclError:
+                pass
+        return "break"
 
     def _show_query_path_tail(self):
         """Показывает конец длинного пути в однострочном поле выбора файла."""
