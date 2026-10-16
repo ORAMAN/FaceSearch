@@ -58,15 +58,88 @@ from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 
 
-def _iter_batches(iterable, size: int):
-    """Разбивает ленивый итератор на небольшие списки, не загружая весь каталог."""
+def _iter_image_batches(
+    directory: Path,
+    size: int,
+    *,
+    status_callback: Callable[[int, int], None] | None = None,
+    stop_check: Callable[[], bool] | None = None,
+    report_every: int = 5000,
+):
+    """Потоково обходит дерево через scandir и выдаёт ограниченные пакеты изображений.
+
+    В отличие от Path.rglob/os.walk, не материализует весь список содержимого
+    отдельного каталога. Поэтому большая плоская папка с миллионом файлов не
+    требует предварительно прочитать все записи до получения первых изображений.
+    """
     size = max(1, int(size))
-    iterator = iter(iterable)
-    while True:
-        batch = list(islice(iterator, size))
-        if not batch:
-            return
-        yield batch
+    report_every = max(1, int(report_every))
+    batch: list[Path] = []
+    entries_seen = 0
+    images_found = 0
+    stack = []
+
+    try:
+        stack.append(os.scandir(os.fspath(directory)))
+        while stack:
+            if stop_check is not None and stop_check():
+                return
+
+            current = stack[-1]
+            try:
+                entry = next(current)
+            except StopIteration:
+                try:
+                    current.close()
+                finally:
+                    stack.pop()
+                continue
+            except OSError:
+                try:
+                    current.close()
+                finally:
+                    stack.pop()
+                continue
+
+            entries_seen += 1
+            try:
+                # Не следуем за ссылками на каталоги, чтобы избежать циклов.
+                # Для файлов сохраняем прежнее поведение: file-symlink на фото
+                # может быть включён в обработку.
+                if entry.is_dir(follow_symlinks=False):
+                    try:
+                        stack.append(os.scandir(entry.path))
+                    except OSError:
+                        pass
+                elif (
+                    os.path.splitext(entry.name)[1].lower() in IMAGE_EXTENSIONS
+                    and entry.is_file()
+                ):
+                    batch.append(Path(entry.path))
+                    images_found += 1
+            except OSError:
+                # Удалённые/недоступные во время обхода записи пропускаем.
+                pass
+
+            chunk_boundary = entries_seen % report_every == 0
+            if chunk_boundary and status_callback is not None:
+                status_callback(entries_seen, images_found)
+
+            # Отдаём неполный пакет также после каждых нескольких тысяч
+            # записей каталога. Иначе при малом числе изображений среди
+            # множества других файлов первый пакет мог бы собираться слишком долго.
+            if len(batch) >= size or (chunk_boundary and batch):
+                yield batch
+                batch = []
+
+        if batch and not (stop_check is not None and stop_check()):
+            yield batch
+    finally:
+        for iterator in reversed(stack):
+            try:
+                iterator.close()
+            except Exception:
+                pass
 
 
 # Разделённые модули конфигурации, настроек, профилей БД и телеметрии.
@@ -6157,11 +6230,19 @@ class FaceSearchGUI:
                 "scan_startup_status",
                 f"Поиск изображений; подготовка пакета до {effective_batch_size} файлов...",
             ))
-            image_paths = (
-                path for path in directory.rglob("*")
-                if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
-            )
-            batch_iter = iter(_iter_batches(image_paths, effective_batch_size))
+            def report_discovery(entries_seen: int, images_found: int):
+                self.events.put((
+                    "scan_discovery_status",
+                    int(entries_seen),
+                    int(images_found),
+                ))
+
+            batch_iter = iter(_iter_image_batches(
+                directory,
+                effective_batch_size,
+                status_callback=report_discovery,
+                stop_check=self.scan_stop.is_set,
+            ))
             first_batch = next(batch_iter, [])
             total = len(first_batch)
             self.events.put(("scan_total", total))
@@ -8114,6 +8195,14 @@ class FaceSearchGUI:
 
                 elif kind == "scan_startup_status":
                     self.status_var.set(str(event[1]))
+
+                elif kind == "scan_discovery_status":
+                    entries_seen = max(0, int(event[1] or 0))
+                    images_found = max(0, int(event[2] or 0))
+                    self.status_var.set(
+                        "Обход каталога: проверено элементов "
+                        f"{entries_seen:,}; найдено изображений {images_found:,}"
+                    )
 
                 elif kind == "scan_total":
                     total = event[1]
