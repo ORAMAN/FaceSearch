@@ -6981,9 +6981,14 @@ class FaceSearchGUI:
                     vram_model_cap = 12
                 elif total_vram_mb >= 16384:
                     vram_model_cap = 10
-                elif total_vram_mb >= 12288:
-                    # В том числе RTX 3060 12 GB: больше прежнего лимита в 4 модели.
-                    vram_model_cap = 8
+                elif total_vram_mb >= 11264:
+                    # Для GPU класса 12 GB (в частности RTX 3060) держим одну
+                    # CUDA-сессию InsightFace. Несколько независимых ONNX-сессий
+                    # могут одновременно запускать cuDNN FE-графы и приводить
+                    # к CUDNN_STATUS_EXECUTION_FAILED_CUDA_DRIVER. Если после
+                    # проверки на конкретной системе пул окажется устойчивым,
+                    # лимит можно будет увеличить отдельно.
+                    vram_model_cap = 1
                 elif total_vram_mb >= 8192:
                     vram_model_cap = 6
                 elif total_vram_mb >= 6144:
