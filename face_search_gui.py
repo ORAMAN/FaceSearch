@@ -171,6 +171,7 @@ from facesearch.database_profiles import (
 from facesearch.database.connection import (
     DBResult, DatabaseConnection, _safe_db_identifier, _quote_identifier,
 )
+from facesearch.metadata import metadata_json as _image_metadata_json
 from facesearch.database.schema import (
     ensure_columns as _ensure_columns,
     backfill_import_image_urls as _backfill_import_image_urls,
@@ -2025,6 +2026,7 @@ def import_image_bundle(
     if image is None:
         raise RuntimeError(f"Не удалось открыть изображение: {image_path}")
 
+    file_metadata_json = _image_metadata_json(image_path)
     valid_faces = _detect_faces_with_padding(app, image, padding_ratio=0.40)
 
     if not valid_faces:
@@ -2058,6 +2060,15 @@ def import_image_bundle(
             url_image=metadata_image_url,
             fallback_image_url=fallback_image_url,
         )
+    # Метаданные относятся к конкретному файлу, а не к общему профилю.
+    # При обычном сканировании заполняем только отсутствующие; принудительное
+    # обновление обновляет их вместе с CROP, не меняя JSON профиля.
+    for existing_image_id, _existing_path in existing_source_rows:
+        if overwrite_existing_crops:
+            conn.execute("UPDATE images SET metadata_json = ? WHERE id = ?", (file_metadata_json, int(existing_image_id)))
+        else:
+            conn.execute("UPDATE images SET metadata_json = ? WHERE id = ? AND (metadata_json IS NULL OR TRIM(metadata_json) = '')", (file_metadata_json, int(existing_image_id)))
+
     restored_missing_crops = 0
     if create_crop_files and not overwrite_existing_crops and existing_source_rows:
         restored_missing_crops = _restore_missing_source_crops(
@@ -2183,6 +2194,8 @@ def import_image_bundle(
                     "UPDATE images SET path = ?, filename = ?, processed = 1 WHERE id = ?",
                     (_relative_crop_db_path(crop_path), crop_path.name, image_id),
                 )
+
+            conn.execute("UPDATE images SET metadata_json = ? WHERE id = ?", (file_metadata_json, int(image_id)))
 
             if create_crop_files:
                 crop_dir.mkdir(parents=True, exist_ok=True)
@@ -2316,6 +2329,8 @@ def process_local_image(
     except (OSError, ValueError):
         source_url = str(image_path)
 
+    file_metadata_json = _image_metadata_json(image_path)
+
     # Если этот исходник уже был обработан в режиме "без JSON",
     # не создаём новые дубли при повторном сканировании.
     existing_rows = _find_existing_source_crop_rows(
@@ -2325,6 +2340,11 @@ def process_local_image(
     )
 
     if existing_rows and not overwrite_existing_crops:
+        # Повторный проход не распознаёт лица заново: дополняет только
+        # отсутствующие метаданные, сохраняя существующие значения.
+        for existing_image_id, _existing_path in existing_rows:
+            conn.execute("UPDATE images SET metadata_json = ? WHERE id = ? AND (metadata_json IS NULL OR TRIM(metadata_json) = '')", (file_metadata_json, int(existing_image_id)))
+        conn.commit()
         missing_existing_rows = [
             (image_id, stored_path)
             for image_id, stored_path in existing_rows
@@ -2465,6 +2485,8 @@ def process_local_image(
                     "UPDATE images SET path = ?, filename = ?, processed = 1 WHERE id = ?",
                     (_relative_crop_db_path(crop_path), crop_path.name, image_id),
                 )
+
+            conn.execute("UPDATE images SET metadata_json = ? WHERE id = ?", (file_metadata_json, int(image_id)))
 
             if create_crop_files:
                 crop_dir.mkdir(parents=True, exist_ok=True)
