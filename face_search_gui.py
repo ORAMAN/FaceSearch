@@ -57,6 +57,15 @@ from urllib.request import Request, url2pathname, urlopen
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 
+# Необязательная поддержка drag-and-drop. Устанавливается через requirements.txt.
+# Если расширение TkDND недоступно, приложение продолжит запускаться без DnD.
+try:
+    from tkinterdnd2 import DND_FILES, DND_TEXT, TkinterDnD
+    TKINTERDND_IMPORT_ERROR = None
+except Exception as _tkdnd_exc:
+    DND_FILES = DND_TEXT = TkinterDnD = None
+    TKINTERDND_IMPORT_ERROR = str(_tkdnd_exc)
+
 
 def _iter_image_batches(
     directory: Path,
@@ -5671,7 +5680,11 @@ class FaceSearchGUI:
 
         ttk.Label(left, text="Поиск по лицу", style="Section.TLabel").pack(anchor="w")
         ttk.Label(
-            left, text="Выберите фотографию и лицо для поиска похожих изображений.",
+            left,
+            text=(
+                "Выберите фотографию или перетащите сюда файл/ссылку на изображение, "
+                "затем выберите лицо для поиска похожих изображений."
+            ),
             style="SurfaceMuted.TLabel", wraplength=520, justify="left",
         ).pack(anchor="w", pady=(2, 6))
 
@@ -5732,6 +5745,7 @@ class FaceSearchGUI:
             label="Выделить всё", command=self._query_entry_select_all,
         )
         self.query_path_entry.bind("<Button-3>", self._show_query_entry_context_menu)
+        self._setup_query_drag_and_drop()
 
         self.root.after_idle(self._show_query_path_tail)
         # Проверяем сохранённый путь уже при построении формы: отсутствующий
@@ -7104,6 +7118,140 @@ class FaceSearchGUI:
             # Не мешаем другим Ctrl-сочетаниям, например Ctrl+стрелка.
             return None
         return handler(event)
+
+    def _setup_query_drag_and_drop(self):
+        """Регистрирует поле пути/URL как цель для перетаскивания файлов и текста."""
+        entry = getattr(self, "query_path_entry", None)
+        if entry is None:
+            return
+        if DND_FILES is None or DND_TEXT is None:
+            print(
+                "[INFO] Drag-and-drop отключён: tkinterdnd2 не загружен. "
+                "Установите зависимости командой setup.bat."
+                + (f" Причина: {TKINTERDND_IMPORT_ERROR}" if TKINTERDND_IMPORT_ERROR else "")
+            )
+            return
+
+        try:
+            self._query_entry_default_style = str(entry.cget("style") or "TEntry")
+            style = ttk.Style(self.root)
+            style.configure("QueryDrop.TEntry", fieldbackground="#dff3e4")
+
+            # DND_FILES принимает файлы из Проводника, DND_TEXT — текстовые
+            # ссылки, которые браузеры передают при перетаскивании изображения.
+            entry.drop_target_register(DND_FILES, DND_TEXT)
+            entry.dnd_bind("<<DropEnter>>", self._on_query_drop_enter)
+            entry.dnd_bind("<<DropPosition>>", self._on_query_drop_enter)
+            entry.dnd_bind("<<DropLeave>>", self._on_query_drop_leave)
+            entry.dnd_bind("<<Drop>>", self._on_query_drop)
+            self._query_drag_drop_enabled = True
+        except Exception as exc:
+            self._query_drag_drop_enabled = False
+            print(f"[WARN] Не удалось включить drag-and-drop для поля запроса: {exc}")
+
+    @staticmethod
+    def _query_drop_action(event=None):
+        """Возвращает действие drag-and-drop, ожидаемое расширением TkDND."""
+        return (getattr(event, "action", None) or "copy") if event is not None else "copy"
+
+    def _on_query_drop_enter(self, event=None):
+        """Подсвечивает поле, пока над ним находится перетаскиваемый объект."""
+        entry = getattr(self, "query_path_entry", None)
+        if entry is not None:
+            try:
+                entry.configure(style="QueryDrop.TEntry")
+            except tk.TclError:
+                pass
+        try:
+            self.status_var.set("Отпустите изображение, файл или прямую ссылку в поле запроса.")
+        except (AttributeError, tk.TclError):
+            pass
+        return self._query_drop_action(event)
+
+    def _on_query_drop_leave(self, event=None):
+        """Убирает подсветку после выхода перетаскиваемого объекта из поля."""
+        entry = getattr(self, "query_path_entry", None)
+        if entry is not None:
+            try:
+                entry.configure(style=getattr(self, "_query_entry_default_style", "TEntry"))
+            except tk.TclError:
+                pass
+        return self._query_drop_action(event)
+
+    def _query_drop_data_values(self, raw_data):
+        """Разбирает Tcl-список файлов или текстовую ссылку из события Drop."""
+        raw = str(raw_data or "").replace("\\x00", "").strip()
+        if not raw:
+            return []
+        try:
+            values = list(self.root.tk.splitlist(raw))
+        except (tk.TclError, TypeError):
+            values = [raw]
+
+        result = []
+        for value in values:
+            # URL-списки из браузеров могут содержать несколько строк и комментарии.
+            for line in str(value).replace("\\r", "\\n").split("\\n"):
+                candidate = line.strip().strip('"')
+                if not candidate or candidate.startswith("#"):
+                    continue
+                if candidate[:4].lower() == "url=":
+                    candidate = candidate[4:].strip()
+                if candidate:
+                    result.append(candidate)
+        return result
+
+    @staticmethod
+    def _query_drop_file_uri_to_path(value):
+        """Преобразует file:// URI в локальный путь, включая UNC-пути Windows."""
+        parsed = urlparse(value)
+        if parsed.scheme.lower() != "file":
+            return value
+        try:
+            path = url2pathname(parsed.path)
+            if parsed.netloc and parsed.netloc.lower() not in ("", "localhost"):
+                path = "\\\\" + parsed.netloc + path.replace("/", "\\\\")
+            return path
+        except (OSError, TypeError, ValueError):
+            return value
+
+    def _on_query_drop(self, event=None):
+        """Принимает локальный файл или URL и передаёт его в существующий open_query()."""
+        self._on_query_drop_leave(event)
+        raw_data = getattr(event, "data", "") if event is not None else ""
+        candidates = self._query_drop_data_values(raw_data)
+        selected_value = None
+
+        for candidate in candidates:
+            parsed = urlparse(candidate)
+            if parsed.scheme.lower() in ("http", "https") and parsed.netloc:
+                # Прямая URL-ссылка будет загружена и проверена open_query().
+                selected_value = candidate
+                break
+
+            local_value = self._query_drop_file_uri_to_path(candidate)
+            try:
+                path = Path(local_value).expanduser()
+                if path.is_file() and os.access(str(path), os.R_OK):
+                    selected_value = str(path)
+                    break
+            except (OSError, TypeError, ValueError):
+                continue
+
+        if not selected_value:
+            self.status_var.set(
+                "Не удалось распознать перетащенный объект. Перетащите файл изображения "
+                "или прямую HTTP(S)-ссылку на изображение."
+            )
+            return self._query_drop_action(event)
+
+        self.query_var.set(selected_value)
+        self.root.after_idle(self._show_query_path_tail)
+        self._update_open_query_button_state()
+        # Используем единый путь обработки для файлов и URL: проверка формата,
+        # загрузка, кэширование и распознавание лиц остаются в open_query().
+        self.open_query()
+        return self._query_drop_action(event)
 
     def _query_entry_copy(self, event=None):
         """Копирует выделенный текст из поля пути/URL в системный буфер."""
@@ -9001,7 +9149,16 @@ class FaceSearchGUI:
 
 
 def launch_gui():
-    root = tk.Tk()
+    if TkinterDnD is not None:
+        try:
+            # TkinterDnD.Tk инициализирует расширение tkdnd для drag-and-drop.
+            root = TkinterDnD.Tk()
+        except Exception as exc:
+            # Не лишаем пользователя обычного GUI, если расширение не загрузилось.
+            print(f"[WARN] TkDND не загрузился; запускаю обычное окно без drag-and-drop: {exc}")
+            root = tk.Tk()
+    else:
+        root = tk.Tk()
     FaceSearchGUI(root)
     root.mainloop()
 
