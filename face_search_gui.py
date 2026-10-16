@@ -1678,6 +1678,16 @@ def _face_crop_encoded(crop: np.ndarray) -> tuple[bytes, str]:
     return data, hashlib.sha256(data).hexdigest()
 
 
+def _parse_metadata_json_value(value: Any) -> Any:
+    """Parses a DB JSON field defensively without raising during a scan."""
+    if value is None:
+        return None
+    try:
+        return json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def _find_existing_source_crop_rows(
     conn: DatabaseConnection,
     *,
