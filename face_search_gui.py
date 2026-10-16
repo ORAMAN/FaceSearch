@@ -171,7 +171,10 @@ from facesearch.database_profiles import (
 from facesearch.database.connection import (
     DBResult, DatabaseConnection, _safe_db_identifier, _quote_identifier,
 )
-from facesearch.metadata import metadata_json as _image_metadata_json
+from facesearch.metadata import (
+    metadata_json as _image_metadata_json,
+    is_standard_metadata_document as _is_standard_metadata_document,
+)
 from facesearch.database.schema import (
     ensure_columns as _ensure_columns,
     backfill_import_image_urls as _backfill_import_image_urls,
@@ -1951,8 +1954,12 @@ def import_image_bundle(
         except Exception as e:
             raise RuntimeError(f"Ошибка JSON {json_path.name}: {e}") from e
 
-    if not isinstance(metadata, dict):
-        raise RuntimeError(f"JSON {json_path.name} должен содержать объект")
+    if not _is_standard_metadata_document(metadata):
+        raise RuntimeError(
+            f"JSON {json_path.name} имеет неверный формат. "
+            "Ожидаются ровно четыре поля: url_source, name, url_image, info; "
+            "info должен быть объектом."
+        )
 
     source_url = str(metadata.get("url_source") or "").strip() or None
     metadata_image_url = str(metadata.get("url_image") or "").strip() or None
@@ -1994,8 +2001,15 @@ def import_image_bundle(
                     ]
 
                 if not create_crop_files or not missing_rows:
-                    # Обновляем метаданные профиля, как и раньше, но пропускаем
-                    # повторное чтение изображения, inference и проверку SHA crop.
+                    # Стираем EXIF JSON, записанный старыми версиями. Для
+                    # импортированных фотографий источник истины — profiles.raw_json.
+                    for existing_image_id, _stored_path in preexisting_source_rows:
+                        conn.execute(
+                            "UPDATE images SET metadata_json = NULL "
+                            "WHERE id = ? AND metadata_json IS NOT NULL",
+                            (int(existing_image_id),),
+                        )
+                    # Пропускаем повторное чтение изображения и inference.
                     _upsert_import_profile(conn, metadata)
                     conn.commit()
                     deleted = (
@@ -2059,6 +2073,15 @@ def import_image_bundle(
             url_image=metadata_image_url,
             fallback_image_url=fallback_image_url,
         )
+    # EXIF/файловые сведения не хранятся в images.metadata_json для импортов:
+    # оригинальное описание строго сохраняется в profiles.raw_json.
+    for existing_image_id, _stored_path in existing_source_rows:
+        conn.execute(
+            "UPDATE images SET metadata_json = NULL "
+            "WHERE id = ? AND metadata_json IS NOT NULL",
+            (int(existing_image_id),),
+        )
+
     restored_missing_crops = 0
     if create_crop_files and not overwrite_existing_crops and existing_source_rows:
         restored_missing_crops = _restore_missing_source_crops(
@@ -2290,6 +2313,7 @@ def process_local_image(
     create_crop_files: bool = True,
     overwrite_existing_crops: bool = False,
     store_metadata: bool = True,
+    clear_metadata: bool = False,
 ) -> dict[str, int | bool | str]:
     """Сканирует локальную фотографию без JSON-метаданных.
 
@@ -2329,11 +2353,22 @@ def process_local_image(
     )
 
     if existing_rows and not overwrite_existing_crops:
-        # Метаданные извлекаются только для изображений без sidecar JSON.
-        # Для файлов с JSON не меняем metadata_json в БД.
-        if store_metadata:
-            for existing_image_id, _existing_path in existing_rows:
-                conn.execute("UPDATE images SET metadata_json = ? WHERE id = ? AND (metadata_json IS NULL OR TRIM(metadata_json) = '')", (file_metadata_json, int(existing_image_id)))
+        # Для локального файла без JSON приводим существующие записи к новой
+        # строгой оболочке даже если там остался старый плоский EXIF-объект.
+        # При наличии JSON метаданные не читаются и не записываются; старый
+        # некорректный EXIF-объект только очищается.
+        for existing_image_id, _existing_path in existing_rows:
+            if store_metadata:
+                conn.execute(
+                    "UPDATE images SET metadata_json = ? WHERE id = ?",
+                    (file_metadata_json, int(existing_image_id)),
+                )
+            elif clear_metadata:
+                conn.execute(
+                    "UPDATE images SET metadata_json = NULL WHERE id = ? "
+                    "AND metadata_json IS NOT NULL",
+                    (int(existing_image_id),),
+                )
         conn.commit()
         missing_existing_rows = [
             (image_id, stored_path)
@@ -2480,6 +2515,12 @@ def process_local_image(
                 conn.execute(
                     "UPDATE images SET metadata_json = ? WHERE id = ?",
                     (file_metadata_json, int(image_id)),
+                )
+            elif clear_metadata:
+                conn.execute(
+                    "UPDATE images SET metadata_json = NULL WHERE id = ? "
+                    "AND metadata_json IS NOT NULL",
+                    (int(image_id),),
                 )
 
             if create_crop_files:
@@ -6701,13 +6742,7 @@ class FaceSearchGUI:
                             # 2) технические метаданные локального файла (filename, date_taken,
                             #    image_width и т. п.). Второй формат не является профилем
                             #    и должен идти через обычное локальное распознавание.
-                            is_profile_json = (
-                                isinstance(metadata, dict)
-                                and any(
-                                    key in metadata
-                                    for key in ("url_source", "name", "url_image", "info")
-                                )
-                            )
+                            is_profile_json = _is_standard_metadata_document(metadata)
 
                             if is_profile_json:
                                 profile_lock = _import_profile_lock_for_json(
@@ -6762,6 +6797,7 @@ class FaceSearchGUI:
                                 create_crop_files=create_crop_files,
                                 overwrite_existing_crops=overwrite_existing_crops,
                                 store_metadata=False,
+                                clear_metadata=True,
                             )
                             return path, int(result["faces"]), None, result
 
