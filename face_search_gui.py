@@ -6167,7 +6167,7 @@ class FaceSearchGUI:
             self.events.put(("scan_total", total))
             self.events.put((
                 "scan_startup_status",
-                f"Найдено изображений: {total}. Проверка базы данных..."
+                f"Подготовлено в первом пакете изображений: {total}. Проверка базы данных..."
                 if total else "Изображения в выбранной папке не найдены.",
             ))
             if not first_batch:
@@ -6192,7 +6192,7 @@ class FaceSearchGUI:
 
             self.events.put((
                 "scan_startup_status",
-                f"Найдено изображений: {total}. Подготовка модели распознавания...",
+                f"Первый пакет: {total} изображений. Подготовка модели распознавания...",
             ))
 
             # Сначала создаём базовую модель выбранного backend; дополнительные
@@ -8136,7 +8136,7 @@ class FaceSearchGUI:
                     )
 
                     self.status_var.set(
-                        f"Найдено изображений: {total}"
+                        f"Подготовлен первый пакет изображений: {total}"
                     )
 
                 elif kind == "scan_discovered":
@@ -8272,15 +8272,17 @@ class FaceSearchGUI:
                                     f"удалено лишних: {total_removed}; лиц: {total_faces}"
                                 )
                             self.status_var.set(
-                                f"Сканирование остановлено ({completed}/{total}). {summary}"
+                                f"Сканирование остановлено. Обработано: {completed}; "
+                                f"обнаружено: {total}. {summary}"
                             )
                         else:
                             self.status_var.set(
                                 "Сканирование остановлено. "
-                                f"Обработано: {completed}/{total}; добавлено лиц: {total_faces}"
+                                f"Обработано: {completed}; обнаружено: {total}; "
+                                f"добавлено лиц: {total_faces}"
                             )
                         self.scan_control_status_var.set(
-                            f"Остановлено: {completed}/{total}"
+                            f"Остановлено: обработано {completed}; обнаружено {total}"
                         )
                     else:
                         if bool(self.overwrite_existing_crops_var.get()):
