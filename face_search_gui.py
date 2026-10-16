@@ -80,6 +80,12 @@ def _iter_image_batches(
     stack = []
 
     try:
+        # Сразу сообщаем GUI, что именно сейчас начался обход каталога.
+        # Это важно для очень больших или медленных сетевых папок: первый пакет
+        # ещё не собран, но пользователь уже видит текущий этап.
+        if status_callback is not None:
+            status_callback(entries_seen, images_found)
+
         stack.append(os.scandir(os.fspath(directory)))
         while stack:
             if stop_check is not None and stop_check():
@@ -8629,11 +8635,20 @@ class FaceSearchGUI:
 
         except queue.Empty:
             pass
-
-        self.root.after(
-            100,
-            self._poll_events,
-        )
+        except Exception as exc:
+            # Ошибка обработки одного GUI-события не должна навсегда отключать
+            # опрос очереди. Иначе scan worker продолжает работать и ставить
+            # события в очередь, а статус интерфейса остаётся на первом сообщении.
+            print(f"[GUI EVENT POLL ERROR] {exc}")
+            traceback.print_exc()
+        finally:
+            # Всегда планируем следующий опрос, даже если обработчик события
+            # неожиданно выбросил исключение. После закрытия окна after уже не нужен.
+            try:
+                if self.root.winfo_exists():
+                    self.root.after(100, self._poll_events)
+            except (tk.TclError, RuntimeError):
+                pass
 
     def _close(self):
         try:
