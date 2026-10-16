@@ -4205,12 +4205,22 @@ class FaceSearchGUI:
             self._schedule_settings_save()
 
     def _on_paned_sash_release(self, _event=None):
-        """Сохраняет горизонтальный размер панелей после перемещения разделителя."""
-        if self._settings_ready:
-            self._schedule_settings_save()
+        """Сохраняет ширину статистики, в том числе узкую или свёрнутую в ноль."""
+        if not self._settings_ready:
+            return
+
+        try:
+            if int(self.paned.winfo_width()) > 1:
+                stats_position = max(0, int(self.paned.sashpos(0)))
+                self.gui_settings["paned_sash_position"] = stats_position
+                self.gui_settings["paned_stats_hidden"] = stats_position == 0
+        except (tk.TclError, TypeError, ValueError):
+            pass
+
+        self._schedule_settings_save()
 
     def _restore_paned_sash_position(self, attempt: int = 0):
-        """Восстанавливает оба разделителя после расчёта геометрии Tk."""
+        """Восстанавливает размеры панелей, не раскрывая сохранённую свёрнутую статистику."""
         try:
             if not self.paned.winfo_exists():
                 return
@@ -4222,7 +4232,10 @@ class FaceSearchGUI:
                 0,
                 int(self.gui_settings.get("paned_preview_sash_position") or 0),
             )
-            if stats_position <= 0 and preview_position <= 0:
+            stats_hidden = bool(self.gui_settings.get("paned_stats_hidden", False))
+            if not stats_hidden and stats_position <= 0 and preview_position <= 0:
+                # 0 без флага свёрнутой панели означает старую/первичную настройку:
+                # в этом случае оставляем ширину по умолчанию.
                 return
 
             width = int(self.paned.winfo_width())
@@ -4234,21 +4247,25 @@ class FaceSearchGUI:
                     )
                 return
 
-            # Sash 0 разделяет статистику БД и панель поиска. Сохраняем
-            # существующее поведение восстановления этой панели.
-            if stats_position > 0:
-                max_stats_position = max(180, width - 700)
-                target_stats = max(180, min(stats_position, max_stats_position))
+            # Sash 0 разделяет статистику БД и панель поиска. Положение 0
+            # сохраняем как настоящее состояние свёрнутой панели; малые
+            # положительные значения не увеличиваем до минимальных 180 px.
+            if stats_hidden:
+                self.paned.sashpos(0, 0)
+            elif stats_position > 0:
+                max_stats_position = max(1, width - 700)
+                target_stats = max(1, min(stats_position, max_stats_position))
                 self.paned.sashpos(0, target_stats)
 
-            # Sash 1 разделяет поиск и просмотр изображения. Восстанавливаем
-            # его отдельно, оставляя минимальное место для поиска и просмотра.
+            # Sash 1 разделяет поиск и просмотр изображения. Его координата
+            # абсолютная, поэтому учитываем фактическую ширину панели статистики,
+            # включая 0, когда она скрыта.
             if preview_position > 0:
                 try:
                     first_sash = int(self.paned.sashpos(0))
                 except (tk.TclError, TypeError, ValueError):
-                    first_sash = stats_position or 220
-                first_sash = max(180, first_sash)
+                    first_sash = stats_position
+                first_sash = max(0, first_sash)
                 min_preview_sash = first_sash + 220
                 max_preview_sash = max(min_preview_sash, width - 320)
                 target_preview = max(
@@ -4260,17 +4277,21 @@ class FaceSearchGUI:
             pass
 
     def _current_paned_sash_position(self) -> int:
-        """Возвращает координату разделителя статистики или сохранённое значение."""
+        """Возвращает ширину статистики, сохраняя намеренно установленный ноль."""
         fallback = max(0, int(self.gui_settings.get("paned_sash_position") or 0))
         try:
             if not hasattr(self, "paned") or not self.paned.winfo_exists():
                 return fallback
             if int(self.paned.winfo_width()) <= 1:
                 return fallback
-            position = int(self.paned.sashpos(0))
-            # Во время первичной раскладки ttk иногда временно возвращает 0.
-            # Не затираем им корректное значение из settings.xml.
-            return position if position > 0 else fallback
+            position = max(0, int(self.paned.sashpos(0)))
+            # Нулевой sash при запуске/layout может быть временным. Принимаем
+            # его только если пользователь свернул панель и это состояние сохранено.
+            if position == 0 and not bool(
+                self.gui_settings.get("paned_stats_hidden", False)
+            ):
+                return fallback
+            return position
         except (tk.TclError, TypeError, ValueError):
             return fallback
 
@@ -4332,6 +4353,9 @@ class FaceSearchGUI:
                 "window_maximized": maximized,
                 "theme": self.theme_mode,
                 "paned_sash_position": self._current_paned_sash_position(),
+                "paned_stats_hidden": bool(
+                    self.gui_settings.get("paned_stats_hidden", False)
+                ),
                 "paned_preview_sash_position": self._current_paned_preview_sash_position(),
                 "selected_db_profile": str(
                     self.db_profile_var.get() or ""
