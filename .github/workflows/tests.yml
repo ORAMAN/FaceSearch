@@ -41,7 +41,7 @@ jobs:
           scripts = re.findall(r"<script>(.*?)</script>", match.group(1), re.S)
           if not scripts:
               raise SystemExit("No inline JavaScript found in PAGE_TEMPLATE")
-          Path("http-page-check.js").write_text("\\n".join(scripts), encoding="utf-8")
+          Path("http-page-check.js").write_text(chr(10).join(scripts), encoding="utf-8")
           PY
           node --check http-page-check.js
       - name: Run unit tests
