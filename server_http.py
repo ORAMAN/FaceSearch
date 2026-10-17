@@ -23,7 +23,7 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import face_search_gui as face_search
 from facesearch.settings import _load_gui_settings
@@ -197,28 +197,104 @@ PAGE_TEMPLATE = r"""<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>FaceSearch — поиск лиц</title>
+<link rel="icon" href="https://raw.githubusercontent.com/ORAMAN/FaceSearch/refs/heads/main/icons/SearchFace.ico" type="image/x-icon">
 <style>
-:root{color-scheme:dark;--bg:#11151b;--panel:#1b222c;--line:#303b49;--text:#e9eef5;--muted:#9aa8b8;--accent:#4d9cf5}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,"Segoe UI",Arial,sans-serif}
-main{max-width:1500px;margin:0 auto;padding:28px 22px 60px}h1{font-size:26px;margin:0 0 7px}.subtitle{color:var(--muted);margin:0 0 24px}
-.toolbar{display:flex;gap:15px;align-items:end;flex-wrap:wrap;padding:18px;background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-bottom:18px}
-.field{display:flex;flex-direction:column;gap:5px;min-width:150px}.field label{color:var(--muted);font-size:13px}
-input[type=number]{width:145px;background:#10151b;color:var(--text);border:1px solid #465363;border-radius:8px;padding:10px;font:inherit}
-button{border:0;border-radius:9px;padding:11px 17px;background:var(--accent);color:#fff;font:600 14px system-ui;cursor:pointer}
-button:disabled{opacity:.42;cursor:not-allowed}.secondary{background:#303b49}.hint{color:var(--muted);font-size:13px}
-.dropzone{border:1px dashed #53677d;background:#171e27;border-radius:14px;min-height:210px;display:flex;align-items:center;justify-content:center;padding:18px;text-align:center;position:relative}
-.dropzone.drag{border-color:var(--accent);background:#1d2b3a}.dropzone-content{max-width:650px}.dropzone input{display:block;max-width:100%;margin:13px auto}
-#preview{display:none;max-width:100%;max-height:440px;object-fit:contain}#preview-canvas{display:none;max-width:100%;max-height:440px;object-fit:contain;cursor:crosshair}
-.status{min-height:28px;color:var(--muted);padding:10px 2px}.status.error{color:#ff9b9b}
-#search-button{margin:6px 0 18px}.section-title{display:flex;align-items:baseline;gap:12px;margin:23px 0 14px}.section-title h2{font-size:19px;margin:0}.section-title span{color:var(--muted);font-size:13px}
-.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(235px,1fr));gap:16px}
-.card{min-width:0;overflow:hidden;border:1px solid var(--line);background:var(--panel);border-radius:12px}
-.card-image{height:245px;background:#0b0e12;display:flex;align-items:center;justify-content:center}.card-image img{width:100%;height:100%;object-fit:contain}.card-body{padding:13px}.card-title{font-weight:650;word-break:break-word}.score{color:#80bdff;font-weight:700;margin:4px 0 8px}.card-meta{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
-.card a{color:#8dc5ff;text-decoration:none}.card a:hover{text-decoration:underline}
-.empty{color:var(--muted);padding:30px 4px}.footer{margin-top:38px;color:#738194;font-size:12px}
-@media(max-width:600px){main{padding:18px 12px 40px}.toolbar{align-items:stretch}.field{flex:1}.field input{width:100%}.gallery{grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:10px}.card-image{height:190px}}
+:root{
+  color-scheme:dark;
+  --bg:#151515;--panel:#242424;--line:#383838;--text:#eeeeee;--muted:#aaaaaa;
+  --accent:#167ac6;--field:#1c1c1c;--input-line:#515b67;--drop:#1b1b1b;
+  --drop-line:#626b76;--image-bg:#111111;--link:#79bfff;--score:#80bdff;
+  --secondary:#333333;--secondary-hover:#444444;--info-bg:#1e1e1e;--info-line:#353535;
+  --button-text:#eeeeee;--button-line:#484848;--shadow:0 4px 15px rgba(0,0,0,.22)
+}
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#f4f5f7;--panel:#ffffff;--line:#c8cfd8;--text:#202124;--muted:#62666b;
+  --accent:#1479c9;--field:#ffffff;--input-line:#b7c0cb;--drop:#ffffff;
+  --drop-line:#aab4c0;--image-bg:#e9eaec;--link:#075eb5;--score:#075eb5;
+  --secondary:#e5e7eb;--secondary-hover:#d1d5db;--info-bg:#e9edf2;--info-line:#c4ccd5;
+  --button-text:#202124;--button-line:#b7c0cb;--shadow:0 4px 15px rgba(30,40,55,.10)
+}
+*{box-sizing:border-box}
+html{min-height:100%;background:var(--bg)}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,"Segoe UI",Arial,sans-serif;transition:background-color .18s,color .18s}
+main{max-width:1600px;margin:0 auto;padding:28px 22px 60px}
+h1{font-size:28px;line-height:1.2;margin:0 0 8px}
+.subtitle{color:var(--muted);margin:0 0 24px}
+.toolbar{display:flex;gap:14px;align-items:end;flex-wrap:wrap;padding:18px;background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-bottom:18px;box-shadow:var(--shadow)}
+.field{display:flex;flex-direction:column;gap:5px;min-width:150px}
+.field label,.toggle-label{color:var(--muted);font-size:13px}
+input[type=number]{width:145px;max-width:100%;background:var(--field);color:var(--text);border:1px solid var(--input-line);border-radius:8px;padding:10px;font:inherit}
+input:focus-visible,button:focus-visible,a:focus-visible,canvas:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button{border:0;border-radius:9px;padding:11px 17px;background:var(--accent);color:#fff;font:600 14px system-ui;cursor:pointer;min-height:42px;transition:filter .12s}
+button:hover:not(:disabled){filter:brightness(1.08)}
+button:disabled{opacity:.42;cursor:not-allowed}
+.secondary{background:var(--secondary);color:var(--button-text);border:1px solid var(--button-line)}
+.hint{color:var(--muted);font-size:13px}
+.toggle-field{display:flex;flex-direction:column;justify-content:flex-end;gap:7px;min-height:42px}
+.toggle-label{display:flex;align-items:center;gap:8px;min-height:42px;color:var(--text);font-size:14px;cursor:pointer}
+input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);cursor:pointer;flex:0 0 auto}
+.dropzone{border:1px dashed var(--drop-line);background:var(--drop);border-radius:14px;min-height:210px;display:flex;align-items:center;justify-content:center;padding:18px;text-align:center;position:relative}
+.dropzone.drag{border-color:var(--accent);background:var(--panel)}
+.dropzone-content{max-width:650px;width:100%}
+.dropzone input{display:block;max-width:100%;margin:13px auto}
+#preview{display:none;max-width:100%;max-height:440px;object-fit:contain}
+#preview-canvas{display:none;max-width:100%;max-height:440px;width:auto;height:auto;object-fit:contain;cursor:crosshair}
+.status{min-height:28px;color:var(--muted);padding:10px 2px;overflow-wrap:anywhere}
+.status.error{color:#c83e3e}
+#search-button{margin:6px 0 18px}
+.section-title{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin:23px 0 14px}
+.section-title h2{font-size:20px;margin:0}
+.section-title span{color:var(--muted);font-size:13px}
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,265px),1fr));gap:18px}
+.card{position:relative;min-width:0;overflow:hidden;border:1px solid var(--line);background:var(--panel);border-radius:12px;padding-bottom:14px;box-shadow:var(--shadow);transition:transform .14s,box-shadow .14s}
+.card:hover{transform:translateY(-2px)}
+.card-image{height:270px;padding:4px;position:relative;background:var(--image-bg);display:flex;align-items:center;justify-content:center;overflow:hidden}
+.card-image img{display:block;width:100%;height:100%;object-fit:contain;border-radius:3px}
+.no-image{display:flex;align-items:center;justify-content:center;text-align:center;padding:18px;color:var(--muted);font-size:13px}
+.rank,.score{position:absolute;top:10px;z-index:2;padding:5px 9px;color:#fff;background:rgba(0,0,0,.82);border-radius:6px;text-shadow:0 1px 2px rgba(0,0,0,.35);font-size:13px}
+.rank{left:10px}
+.score{right:10px;background:rgba(0,112,205,.92);font-weight:700}
+.card-body{padding:0 15px}
+.card-title{font-weight:700;line-height:1.35;overflow-wrap:anywhere;padding:10px 0;color:var(--text);border-bottom:1px solid var(--line)}
+.card-meta{font-size:12px;color:var(--muted);overflow-wrap:anywhere;margin-top:7px}
+.card-meta a,.source-site a{color:var(--link);text-decoration:none}
+.card-meta a:hover,.source-site a:hover{text-decoration:underline}
+.source-site{display:flex;align-items:center;gap:7px;margin-top:10px;font-size:12px;min-height:22px;min-width:0}
+.source-site a{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.favicon{width:16px;height:16px;object-fit:contain;flex:0 0 16px}
+.card-info{margin:10px 0 12px;padding:10px;background:var(--info-bg);border:1px solid var(--info-line);border-radius:8px;line-height:1.55;font-size:13px;overflow-wrap:anywhere}
+.card-info .info-name{color:var(--link);font-size:15px;font-weight:700;margin-bottom:5px}
+.card-info-row + .card-info-row{margin-top:3px}
+.card-info-row b{font-weight:650}
+.card-buttons{display:flex;gap:7px;margin-top:12px}
+.card-button{display:flex;flex:1 1 0;min-width:0;align-items:center;justify-content:center;text-align:center;overflow-wrap:anywhere;padding:8px 10px;background:var(--secondary);color:var(--button-text);text-decoration:none;border:1px solid var(--button-line);border-radius:6px;font-size:13px}
+.card-button:hover{background:var(--secondary-hover)}
+.empty{color:var(--muted);padding:30px 4px}
+.footer{margin-top:38px;color:var(--muted);font-size:12px}
+@media(max-width:700px){
+  main{padding:20px 14px 42px}
+  .toolbar{align-items:stretch;padding:14px;gap:12px}
+  .field{flex:1 1 145px;min-width:0}
+  .field input[type=number]{width:100%}
+  .toggle-field{flex:1 1 100%;align-items:flex-start}
+  .toggle-label{min-height:36px}
+  .gallery{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+  .card-image{height:clamp(150px,38vw,230px)}
+  .card-body{padding:0 10px}
+  .card-info{padding:8px;margin:8px 0 10px}
+  .card-buttons{flex-direction:column}
+  .card-button{flex:1 1 auto}
+}
+@media(max-width:380px){
+  main{padding:16px 10px 32px}
+  h1{font-size:25px}
+  .gallery{grid-template-columns:minmax(0,1fr)}
+  .card-image{height:230px}
+  .toolbar{padding:12px}
+}
 </style>
 </head>
 <body>
@@ -233,6 +309,14 @@ button:disabled{opacity:.42;cursor:not-allowed}.secondary{background:#303b49}.hi
     <div class="field">
       <label for="top-k">Количество результатов</label>
       <input id="top-k" type="number" min="1" max="500" step="1" value="__DEFAULT_TOP_K__">
+    </div>
+    <div class="toggle-field">
+      <label class="toggle-label" for="use-crop"><input id="use-crop" type="checkbox" checked> Использовать CROP</label>
+      <span class="hint">Показывать локальные вырезки лиц, если они доступны.</span>
+    </div>
+    <div class="field" style="min-width:0">
+      <label>&nbsp;</label>
+      <button type="button" id="theme-button" class="secondary" aria-pressed="false">☀️ Дневная тема</button>
     </div>
     <div class="field" style="min-width:0">
       <label>&nbsp;</label>
@@ -272,12 +356,43 @@ button:disabled{opacity:.42;cursor:not-allowed}.secondary{background:#303b49}.hi
   const resultCount=document.getElementById("result-count");
   const similarityInput=document.getElementById("similarity");
   const topKInput=document.getElementById("top-k");
+  const useCropCheckbox=document.getElementById("use-crop");
+  const themeButton=document.getElementById("theme-button");
   let dataUrl="";
   let imageObject=null;
   let queryId="";
   let faces=[];
   let selectedFace=-1;
   let busy=false;
+
+  function applyTheme(theme){
+    const value=theme==="light"?"light":"dark";
+    document.documentElement.dataset.theme=value;
+    document.documentElement.style.colorScheme=value;
+    themeButton.textContent=value==="dark"?"☀️ Дневная тема":"🌙 Ночная тема";
+    themeButton.setAttribute("aria-pressed",String(value==="light"));
+    try{localStorage.setItem("facesearch-http-theme",value);}catch(e){}
+  }
+  let initialTheme="dark";
+  try{initialTheme=localStorage.getItem("facesearch-http-theme")||"dark";}catch(e){}
+  applyTheme(initialTheme);
+  themeButton.addEventListener("click",function(){
+    applyTheme(document.documentElement.dataset.theme==="dark"?"light":"dark");
+  });
+
+  function faceImageUrl(faceId,useCrop,refresh){
+    return "/api/face/"+encodeURIComponent(faceId)+"/image?crop="+(useCrop?"1":"0")+(refresh?"&refresh="+Date.now():"");
+  }
+  function refreshCardImages(){
+    gallery.querySelectorAll("img[data-face-image='true']").forEach(function(image){
+      const box=image.parentElement;
+      const placeholder=box&&box.querySelector(".no-image");
+      image.style.display="block";
+      if(placeholder)placeholder.hidden=true;
+      image.src=faceImageUrl(image.dataset.faceId,useCropCheckbox.checked,true);
+    });
+  }
+  useCropCheckbox.addEventListener("change",refreshCardImages);
 
   function setStatus(message,isError){
     statusBox.textContent=message;
@@ -407,6 +522,54 @@ button:disabled{opacity:.42;cursor:not-allowed}.secondary{background:#303b49}.hi
     try{const url=new URL(value,window.location.href);return (url.protocol==="http:"||url.protocol==="https:")?url.href:"";}
     catch(e){return "";}
   }
+  const LOCAL_INFO_LABELS={
+    filename:"Файл",date_taken:"Дата съёмки",date_digitized:"Дата оцифровки",
+    file_modified:"Изменён",image_width:"Ширина",image_height:"Высота",
+    file_size_bytes:"Размер файла",camera_make:"Производитель камеры",
+    camera_model:"Камера",lens_model:"Объектив",exposure_time:"Выдержка",
+    f_number:"Диафрагма f/",iso:"ISO",focal_length_mm:"Фокусное расстояние, мм",
+    artist:"Автор",copyright:"Авторские права",description:"Описание",software:"ПО"
+  };
+  function displayValue(value){
+    if(value===null||value===undefined)return "";
+    if(typeof value==="object"){
+      try{return JSON.stringify(value);}catch(e){return String(value);}
+    }
+    return String(value);
+  }
+  function addInfoBox(body,name,info,isLocal){
+    const entries=Object.entries(info&&typeof info==="object"?info:{}).filter(function(pair){
+      return pair[1]!==null&&pair[1]!==undefined&&String(displayValue(pair[1])).trim()!=="";
+    });
+    if(!name&&!entries.length)return;
+    const box=document.createElement("div");box.className="card-info";
+    if(name){
+      const heading=document.createElement("div");heading.className="info-name";
+      heading.textContent=name;box.appendChild(heading);
+    }
+    const ordered=isLocal?entries.sort(function(a,b){
+      const ai=Object.keys(LOCAL_INFO_LABELS).indexOf(a[0]);
+      const bi=Object.keys(LOCAL_INFO_LABELS).indexOf(b[0]);
+      return (ai<0?999:ai)-(bi<0?999:bi);
+    }):entries;
+    ordered.forEach(function(pair){
+      const key=pair[0],value=pair[1];
+      if(isLocal&&!Object.prototype.hasOwnProperty.call(LOCAL_INFO_LABELS,key))return;
+      const row=document.createElement("div");row.className="card-info-row";
+      const label=document.createElement("b");
+      label.textContent=(isLocal?LOCAL_INFO_LABELS[key]:key)+": ";
+      const text=document.createElement("span");
+      let rendered=displayValue(value);
+      if(isLocal&&key==="file_size_bytes"){
+        const size=Number(value);
+        if(Number.isFinite(size))rendered=size>=1048576?(size/1048576).toFixed(2)+" МБ":(size/1024).toFixed(1)+" КБ";
+      }else if(isLocal&&(key==="image_width"||key==="image_height")){
+        rendered+=" px";
+      }
+      text.textContent=rendered;row.append(label,text);box.appendChild(row);
+    });
+    body.appendChild(box);
+  }
   function renderResults(results){
     gallery.replaceChildren();
     resultCount.textContent=results.length?"Совпадений: "+results.length:"Совпадений не найдено";
@@ -415,32 +578,55 @@ button:disabled{opacity:.42;cursor:not-allowed}.secondary{background:#303b49}.hi
       empty.textContent="Нет результатов выше заданного порога сходства.";gallery.appendChild(empty);return;
     }
     results.forEach(function(item){
+      const faceId=String(item.face_id||"");
+      const imported=item.source_type==="import";
+      const displayName=String(item.display_name||"");
       const card=document.createElement("article");card.className="card";
       const imageBox=document.createElement("div");imageBox.className="card-image";
-      const image=document.createElement("img");image.loading="lazy";
-      image.alt=item.filename||("Лицо "+item.face_id);
-      image.src="/api/face/"+encodeURIComponent(item.face_id)+"/image";
-      image.onerror=function(){
-        image.remove();
-        const placeholder=document.createElement("div");placeholder.className="hint";
-        placeholder.textContent="Изображение недоступно";imageBox.appendChild(placeholder);
-      };
-      imageBox.appendChild(image);
+      const rank=document.createElement("div");rank.className="rank";rank.textContent="#"+String(item.rank||"");
+      const score=document.createElement("div");score.className="score";score.textContent=Number(item.similarity||0).toFixed(2)+"%";
+      const image=document.createElement("img");image.loading="lazy";image.dataset.faceImage="true";image.dataset.faceId=faceId;
+      image.alt=displayName||( "Лицо ID "+faceId);
+      const placeholder=document.createElement("div");placeholder.className="no-image";placeholder.textContent="Изображение недоступно";placeholder.hidden=true;
+      image.src=faceImageUrl(faceId,useCropCheckbox.checked,false);
+      image.onerror=function(){image.style.display="none";placeholder.hidden=false;};
+      imageBox.append(image,placeholder,rank,score);
       const body=document.createElement("div");body.className="card-body";
       const title=document.createElement("div");title.className="card-title";
-      title.textContent=item.filename||("Лицо ID "+item.face_id);
-      const score=document.createElement("div");score.className="score";
-      score.textContent=Number(item.similarity).toFixed(2)+"% сходства";
+      title.textContent=imported?(displayName||"Без имени"):("#"+faceId.padStart(8,"0"));
       const meta=document.createElement("div");meta.className="card-meta";
-      meta.textContent="Результат №"+item.rank+" · ID лица "+item.face_id;
-      body.append(title,score,meta);
-      const source=safeLink(item.source_url);
-      if(source){
-        const line=document.createElement("div");line.className="card-meta";
-        line.style.marginTop="8px";
-        const link=document.createElement("a");link.href=source;link.target="_blank";link.rel="noopener noreferrer";
-        link.textContent="Источник";line.appendChild(link);body.appendChild(line);
+      meta.textContent="Результат №"+item.rank+" · ID лица "+faceId+(item.filename?" · "+item.filename:"");
+      body.append(title,meta);
+
+      if(imported){
+        addInfoBox(body,displayName,item.info||{},false);
+      }else{
+        addInfoBox(body,item.metadata_name||"",item.metadata||{},true);
       }
+
+      const source=safeLink(item.source_url||item.profile_url);
+      if(source){
+        const siteRow=document.createElement("div");siteRow.className="source-site";
+        let host=source;
+        try{host=new URL(source).hostname;}catch(e){}
+        const favicon=document.createElement("img");favicon.className="favicon";favicon.alt="";favicon.loading="lazy";
+        try{favicon.src=new URL("/favicon.ico",source).href;}catch(e){favicon.style.display="none";}
+        favicon.onerror=function(){favicon.style.display="none";};
+        const link=document.createElement("a");link.href=source;link.target="_blank";link.rel="noopener noreferrer";
+        link.textContent=host;link.title=source;
+        siteRow.append(favicon,link);body.appendChild(siteRow);
+      }
+
+      const buttons=document.createElement("div");buttons.className="card-buttons";
+      if(imported&&source){
+        const sourceButton=document.createElement("a");sourceButton.className="card-button";
+        sourceButton.href=source;sourceButton.target="_blank";sourceButton.rel="noopener noreferrer";sourceButton.textContent="Источник";
+        buttons.appendChild(sourceButton);
+      }
+      const originalButton=document.createElement("a");originalButton.className="card-button";
+      originalButton.href="/api/face/"+encodeURIComponent(faceId)+"/image?crop=0";
+      originalButton.target="_blank";originalButton.rel="noopener noreferrer";originalButton.textContent="Открыть оригинал";
+      buttons.appendChild(originalButton);body.appendChild(buttons);
       card.append(imageBox,body);gallery.appendChild(card);
     });
   }
@@ -533,7 +719,9 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             self._send(204, b"", "image/x-icon")
             return
         if path.startswith("/api/face/") and path.endswith("/image"):
-            self._serve_face_image(path)
+            query = parse_qs(urlparse(self.path).query)
+            use_crop = query.get("crop", ["1"])[0] != "0"
+            self._serve_face_image(path, use_crop=use_crop)
             return
         if path == "/api/status":
             self._json(200, {
@@ -643,18 +831,64 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         cards = []
         for result in results:
             face_id = int(result.get("face_id") or 0)
+            source_type = str(result.get("source_type") or "local")
+            source_url = str(result.get("source_url") or result.get("profile_url") or "")
+            url_image = str(result.get("url_image") or "").strip()
+            raw_meta = {}
+            metadata_doc = {}
+            metadata_info = {}
+            metadata_name = ""
+            try:
+                value = json.loads(str(result.get("raw_json") or ""))
+                if isinstance(value, dict):
+                    raw_meta = value
+            except (TypeError, ValueError):
+                pass
+            if not source_url:
+                source_url = str(raw_meta.get("url_source") or "")
+            if not url_image:
+                url_image = str(raw_meta.get("url_image") or "").strip()
+
+            display_name = str(raw_meta.get("name") or result.get("first_name") or "").strip()
+            profile_info = raw_meta.get("info") if isinstance(raw_meta.get("info"), dict) else {}
+            try:
+                value = json.loads(str(result.get("metadata_json") or ""))
+                if isinstance(value, dict):
+                    metadata_doc = value
+            except (TypeError, ValueError):
+                pass
+            if (
+                set(metadata_doc.keys()) == {"url_source", "name", "url_image", "info"}
+                and isinstance(metadata_doc.get("info"), dict)
+            ):
+                metadata_info = metadata_doc["info"]
+                metadata_name = str(metadata_doc.get("name") or "")
+            else:
+                metadata_info = metadata_doc
+                metadata_name = str(metadata_doc.get("filename") or "")
+            if source_type == "import":
+                if not display_name:
+                    display_name = "Без имени"
+            else:
+                display_name = ""
+
             cards.append({
                 "rank": int(result.get("rank") or len(cards) + 1),
                 "face_id": face_id,
                 "filename": str(result.get("filename") or ""),
                 "similarity": round(float(result.get("score") or 0.0) * 100.0, 2),
-                "source_url": str(result.get("source_url") or ""),
-                "url_image": str(result.get("url_image") or ""),
-                "source_type": str(result.get("source_type") or "local"),
+                "source_url": source_url,
+                "profile_url": str(result.get("profile_url") or ""),
+                "url_image": url_image,
+                "source_type": source_type,
+                "display_name": display_name,
+                "info": profile_info,
+                "metadata_name": metadata_name,
+                "metadata": metadata_info,
             })
         self._json(200, {"results": cards, "count": len(cards)})
 
-    def _serve_face_image(self, route: str):
+    def _serve_face_image(self, route: str, *, use_crop: bool = True):
         parts = route.strip("/").split("/")
         try:
             face_id = int(parts[2])
@@ -686,7 +920,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         crop_path = face_search._resolve_db_crop_path(
             stored_path, image_id=int(image_id)
         )
-        if crop_path.is_file():
+        if use_crop and crop_path.is_file():
             try:
                 body = crop_path.read_bytes()
                 content_type = mimetypes.guess_type(str(crop_path))[0] or "image/jpeg"
