@@ -23,6 +23,26 @@ jobs:
       - name: Install test dependency
         run: python -m pip install --upgrade pip numpy
       - name: Compile application and test modules
-        run: python -m compileall -q face_search_gui.py facesearch tests
+        run: python -m compileall -q face_search_gui.py server_http.py facesearch tests
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Check HTTP page JavaScript
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          source = Path("server_http.py").read_text(encoding="utf-8")
+          match = re.search(r'PAGE_TEMPLATE = r"""(.*?)"""', source, re.S)
+          if not match:
+              raise SystemExit("PAGE_TEMPLATE was not found in server_http.py")
+          scripts = re.findall(r"<script>(.*?)</script>", match.group(1), re.S)
+          if not scripts:
+              raise SystemExit("No inline JavaScript found in PAGE_TEMPLATE")
+          Path("http-page-check.js").write_text("\\n".join(scripts), encoding="utf-8")
+          PY
+          node --check http-page-check.js
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
