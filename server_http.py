@@ -253,7 +253,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .card:hover{transform:translateY(-2px)}
 .card-image{height:270px;padding:4px;position:relative;background:var(--image-bg);display:flex;align-items:center;justify-content:center;overflow:hidden}
 .card-image img{display:block;width:100%;height:100%;object-fit:contain;border-radius:3px}
-.no-image{display:flex;align-items:center;justify-content:center;text-align:center;padding:18px;color:var(--muted);font-size:13px}
+.no-image[hidden]{display:none}.no-image{display:flex;align-items:center;justify-content:center;text-align:center;padding:18px;color:var(--muted);font-size:13px}
 .rank,.score{position:absolute;top:10px;z-index:2;padding:5px 9px;color:#fff;background:rgba(0,0,0,.82);border-radius:6px;text-shadow:0 1px 2px rgba(0,0,0,.35);font-size:13px}
 .rank{left:10px}
 .score{right:10px;background:rgba(0,112,205,.92);font-weight:700}
