@@ -15,11 +15,15 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import ipaddress
 import json
 import mimetypes
 import secrets
+import socket
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -157,6 +161,74 @@ def _initialize_runtime() -> None:
                 print("[HTTP] GPU-индекс не активирован; будет использован CPU FAISS.")
         except Exception as exc:
             print(f"[HTTP] Не удалось загрузить FAISS в GPU; fallback на CPU: {exc}")
+
+
+def _validate_remote_image_url(value: str) -> str:
+    """Проверяет HTTP(S)-адрес изображения и запрещает обращения к локальным сетям."""
+    raw = str(value or "").strip()
+    if not raw or len(raw) > 4096:
+        raise ValueError("Введите корректный HTTP/HTTPS-адрес изображения.")
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Адрес должен начинаться с http:// или https://.")
+    if parsed.username or parsed.password:
+        raise ValueError("Адрес изображения не должен содержать логин или пароль.")
+    try:
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+    except (OSError, ValueError) as exc:
+        raise ValueError("Не удалось определить адрес сервера изображения.") from exc
+    if not addresses:
+        raise ValueError("Сервер изображения не найден.")
+    for address in addresses:
+        try:
+            ip = ipaddress.ip_address(address[4][0])
+        except ValueError as exc:
+            raise ValueError("Адрес сервера изображения некорректен.") from exc
+        if not ip.is_global:
+            raise ValueError(
+                "Для загрузки по адресу разрешены публичные HTTP/HTTPS-серверы. "
+                "Локальные изображения выбирайте кнопкой «Выбрать файл»."
+            )
+    return raw
+
+
+class _SafeImageRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Повторно проверяет адрес каждого HTTP-перенаправления."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_remote_image_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _fetch_remote_image_data_url(value: str) -> str:
+    """Загружает публичное изображение по URL с лимитом размера и проверкой декодирования."""
+    image_url = _validate_remote_image_url(value)
+    opener = urllib.request.build_opener(_SafeImageRedirectHandler())
+    request = urllib.request.Request(
+        image_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; FaceSearch/1.0)",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.5",
+        },
+    )
+    try:
+        with opener.open(request, timeout=15) as response:
+            content = response.read(MAX_IMAGE_BYTES + 1)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise ValueError(f"Не удалось загрузить изображение по URL: {exc}") from exc
+    if not content:
+        raise ValueError("Сервер вернул пустое изображение.")
+    if len(content) > MAX_IMAGE_BYTES:
+        raise ValueError("Изображение слишком большое. Максимальный размер — 16 МБ.")
+
+    # Декодирование проверяет формат и лимит пикселей до возврата данных браузеру.
+    encoded = base64.b64encode(content).decode("ascii")
+    image = _decode_image("data:application/octet-stream;base64," + encoded)
+    ok, jpg = face_search.cv2.imencode(".jpg", image)
+    if not ok:
+        raise ValueError("Не удалось подготовить изображение для поиска.")
+    return "data:image/jpeg;base64," + base64.b64encode(jpg.tobytes()).decode("ascii")
 
 
 def _decode_image(data_url: str):
@@ -320,6 +392,11 @@ h1{font-size:28px;line-height:1.2;margin:0 0 8px}
 .toolbar{display:flex;gap:14px;align-items:end;flex-wrap:wrap;padding:18px;background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-bottom:18px;box-shadow:var(--shadow)}
 .field{display:flex;flex-direction:column;gap:5px;min-width:150px}
 .field label,.toggle-label{color:var(--muted);font-size:13px}
+.url-field{flex:1 1 100%;min-width:0}
+.url-row{display:flex;gap:10px;align-items:stretch;min-width:0}
+.url-row input{flex:1 1 auto;min-width:0;width:100%;background:var(--field);color:var(--text);border:1px solid var(--input-line);border-radius:8px;padding:10px;font:inherit}
+.url-row button{flex:0 0 auto}
+#file-input{display:none!important}
 input[type=number]{width:145px;max-width:100%;background:var(--field);color:var(--text);border:1px solid var(--input-line);border-radius:8px;padding:10px;font:inherit}
 input:focus-visible,button:focus-visible,a:focus-visible,canvas:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 button{border:0;border-radius:9px;padding:11px 17px;background:var(--accent);color:#fff;font:600 14px system-ui;cursor:pointer;min-height:42px;transition:filter .12s}
@@ -378,8 +455,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 #camera-video{display:block;width:100%;max-height:68vh;object-fit:contain}
 .camera-placeholder{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;text-align:center;color:#fff;background:#101010}
 .camera-placeholder[hidden]{display:none}
-.camera-instruction{margin:12px 0}
-.camera-actions{display:flex;gap:10px;justify-content:flex-end}
+.camera-instruction{display:block;position:relative;clear:both;margin:10px 0 14px;line-height:1.45;overflow-wrap:anywhere}
+.camera-actions{position:relative;clear:both;display:flex;gap:10px;justify-content:flex-end;margin-top:10px;flex-wrap:wrap}
 .camera-actions button{min-width:110px}
 .lightbox{display:none;position:fixed;inset:0;z-index:9999;align-items:center;justify-content:center;padding:58px 20px 70px;background:rgba(0,0,0,.94);backdrop-filter:blur(3px);cursor:zoom-out}
 .lightbox.open{display:flex}
@@ -391,14 +468,19 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 @media(max-width:700px){
   main{padding:20px 14px 42px}
   .toolbar{align-items:stretch;padding:14px;gap:12px}
+  .url-row{display:flex;flex-direction:column;gap:8px}
+  .url-row button{width:100%}
+  .toolbar .url-field{flex:1 1 100%;width:100%;min-width:0}
   .toolbar .numeric-field{flex:1 1 100%;width:100%;min-width:0}
   .toolbar .numeric-field input[type=number]{width:100%;min-width:0}
   .toolbar .action-field{flex:1 1 calc(50% - 12px);min-width:0}
   .toolbar .action-field button{width:100%;height:100%;padding:10px 8px;white-space:normal}
   .toggle-field{flex:1 1 100%;align-items:flex-start}
   .toggle-label{min-height:36px}
-  .format-hint{flex:1 1 100%}
-  .mobile-only{display:block;width:100%;margin:12px auto 0}
+  .format-hint{display:block;position:relative;clear:both;flex:1 1 100%;width:100%;margin-top:7px;line-height:1.45;overflow-wrap:anywhere}
+  .toolbar .mobile-only.action-field{flex:1 1 100%;width:100%;min-width:0}
+  .toolbar .mobile-only.action-field button{width:100%;min-height:44px}
+  .mobile-only{display:block;width:100%;margin:8px auto 0}
   .gallery{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
   .card-image{height:clamp(150px,38vw,230px)}
   .card-body{padding:0 10px}
@@ -409,7 +491,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   .camera-dialog{padding:12px}
   .camera-view{min-height:180px;max-height:62vh}
   #camera-video{max-height:62vh}
-  .camera-actions{display:grid;grid-template-columns:1fr 1fr}
+  .camera-instruction{margin:8px 0 12px;font-size:13px}
+  .camera-actions{display:grid;grid-template-columns:1fr 1fr;position:relative;clear:both;gap:8px}
   .camera-actions button{width:100%;min-width:0}
   .lightbox{padding:64px 10px}
   .lightbox-prev{left:5px}.lightbox-next{right:5px}
@@ -430,6 +513,14 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   <h1>FaceSearch</h1>
   <p class="subtitle">Загрузите изображение — определение лиц и поиск по первому найденному лицу запустятся автоматически. На групповом фото можно выбрать другое лицо и повторить поиск.</p>
   <section class="toolbar" aria-label="Параметры поиска">
+    <div class="field url-field">
+      <label for="image-url">Адрес изображения (HTTP/HTTPS)</label>
+      <div class="url-row">
+        <input id="image-url" type="url" inputmode="url" autocomplete="url" placeholder="https://example.com/photo.jpg">
+        <button type="button" id="load-url-button" class="secondary">Загрузить адрес</button>
+      </div>
+      <span class="hint">Для локального изображения используйте кнопку «Выбрать файл» ниже.</span>
+    </div>
     <div class="field numeric-field">
       <label for="similarity">Минимальное сходство, %</label>
       <input id="similarity" class="numeric-input" type="number" min="0" max="100" step="1" value="__DEFAULT_MIN_SIMILARITY__">
@@ -450,6 +541,11 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       <label>&nbsp;</label>
       <button type="button" id="detect-button" class="secondary">Определить лица</button>
     </div>
+    <div class="field action-field">
+      <label>&nbsp;</label>
+      <button type="button" id="file-button" class="secondary">Выбрать файл</button>
+      <input id="file-input" type="file" accept="image/*" hidden>
+    </div>
     <div class="field action-field mobile-only">
       <label>&nbsp;</label>
       <button type="button" id="camera-button" class="secondary">📷 Сделать снимок</button>
@@ -461,8 +557,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   <section id="dropzone" class="dropzone">
     <div class="dropzone-content" id="drop-copy">
       <strong>Перетащите фотографию сюда</strong><br>
-      <span class="hint">или выберите изображение на устройстве. Также можно вставить изображение из буфера обмена.</span>
-      <input id="file-input" type="file" accept="image/*">
+      <span class="hint">Также можно вставить изображение из буфера обмена.</span>
     </div>
     <canvas id="preview-canvas" aria-label="Предпросмотр. Нажмите на рамку нужного лица, чтобы выбрать его."></canvas>
   </section>
@@ -502,6 +597,9 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 <script>
 (function(){
   const fileInput=document.getElementById("file-input");
+  const fileButton=document.getElementById("file-button");
+  const imageUrlInput=document.getElementById("image-url");
+  const loadUrlButton=document.getElementById("load-url-button");
   const cameraInput=document.getElementById("camera-input");
   const cameraButton=document.getElementById("camera-button");
   const cameraModal=document.getElementById("camera-modal");
@@ -661,8 +759,33 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     detectButton.disabled=value||!dataUrl;
     searchButton.disabled=value||!queryId||selectedFace<0||!faces.length;
     fileInput.disabled=value;
+    fileButton.disabled=value;
+    imageUrlInput.disabled=value;
+    loadUrlButton.disabled=value;
     cameraInput.disabled=value;
     cameraButton.disabled=value||cameraOpening;
+  }
+  function useDataUrl(sourceDataUrl){
+    dataUrl=String(sourceDataUrl||"");
+    imageObject=new Image();
+    imageObject.onload=function(){
+      queryId="";faces=[];selectedFace=-1;
+      canvas.width=imageObject.naturalWidth;
+      canvas.height=imageObject.naturalHeight;
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      ctx.drawImage(imageObject,0,0);
+      canvas.style.display="block";dropCopy.style.display="none";
+      searchButton.disabled=true;
+      gallery.replaceChildren();
+      const empty=document.createElement("div");empty.className="empty";
+      empty.textContent="После поиска здесь появятся совпадения.";
+      gallery.appendChild(empty);resultCount.textContent="";
+      setStatus("Изображение загружено. Автоматически определяю лица...");
+      setBusy(false);
+      detectFaces(true);
+    };
+    imageObject.onerror=function(){setStatus("Не удалось открыть изображение.",true);};
+    imageObject.src=dataUrl;
   }
   function useFile(file){
     if(!file||!file.type||!file.type.startsWith("image/")){
@@ -672,32 +795,32 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       setStatus("Файл слишком большой. Максимальный размер — 16 МБ.",true);return;
     }
     const reader=new FileReader();
-    reader.onload=function(){
-      dataUrl=String(reader.result||"");
-      imageObject=new Image();
-      imageObject.onload=function(){
-        queryId="";faces=[];selectedFace=-1;
-        canvas.width=imageObject.naturalWidth;
-        canvas.height=imageObject.naturalHeight;
-        ctx.clearRect(0,0,canvas.width,canvas.height);
-        ctx.drawImage(imageObject,0,0);
-        canvas.style.display="block";dropCopy.style.display="none";
-        searchButton.disabled=true;
-        gallery.replaceChildren();
-        const empty=document.createElement("div");empty.className="empty";
-        empty.textContent="После поиска здесь появятся совпадения.";
-        gallery.appendChild(empty);resultCount.textContent="";
-        setStatus("Фотография загружена. Автоматически определяю лица...");
-        setBusy(false);
-        detectFaces(true);
-      };
-      imageObject.onerror=function(){setStatus("Не удалось открыть изображение.",true);};
-      imageObject.src=dataUrl;
-    };
+    reader.onload=function(){useDataUrl(String(reader.result||""));};
     reader.onerror=function(){setStatus("Не удалось прочитать файл.",true);};
     reader.readAsDataURL(file);
   }
+  fileButton.addEventListener("click",function(){if(!busy){fileInput.value="";fileInput.click();}});
   fileInput.addEventListener("change",function(){useFile(fileInput.files&&fileInput.files[0]);});
+  async function loadImageFromAddress(){
+    const address=String(imageUrlInput.value||"").trim();
+    if(!address){setStatus("Введите HTTP/HTTPS-адрес изображения.",true);imageUrlInput.focus();return;}
+    if(!/^https?:\/\//i.test(address)){
+      setStatus("Введите полный адрес, начинающийся с http:// или https://. Для локальных изображений нажмите «Выбрать файл».",true);return;
+    }
+    setBusy(true);setStatus("Загружаю изображение по адресу...");
+    try{
+      const response=await postJson("/api/load-image",{url:address});
+      if(!response.image)throw new Error("Сервер не вернул изображение.");
+      useDataUrl(response.image);
+    }catch(error){
+      setStatus(error.message||String(error),true);
+      setBusy(false);
+    }
+  }
+  loadUrlButton.addEventListener("click",loadImageFromAddress);
+  imageUrlInput.addEventListener("keydown",function(event){
+    if(event.key==="Enter"){event.preventDefault();loadImageFromAddress();}
+  });
   cameraInput.addEventListener("change",function(){
     const file=cameraInput.files&&cameraInput.files[0];
     if(file)useFile(file);
@@ -1099,7 +1222,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/api/detect", "/api/search"):
+        if path not in ("/api/detect", "/api/search", "/api/load-image"):
             self._json(404, {"error": "API-метод не найден."})
             return
         if not API_SEMAPHORE.acquire(timeout=15):
@@ -1113,6 +1236,13 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 return
             except ValueError as exc:
                 self._json(400, {"error": str(exc)})
+                return
+            if path == "/api/load-image":
+                try:
+                    image_data_url = _fetch_remote_image_data_url(str(data.get("url") or ""))
+                    self._json(200, {"image": image_data_url})
+                except ValueError as exc:
+                    self._json(400, {"error": str(exc)[:1000]})
                 return
             if path == "/api/detect":
                 self._detect(data)
