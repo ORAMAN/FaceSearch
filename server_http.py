@@ -385,11 +385,11 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   <section class="toolbar" aria-label="Параметры поиска">
     <div class="field numeric-field">
       <label for="similarity">Минимальное сходство, %</label>
-      <input id="similarity" class="numeric-input" type="number min="0" max="100" step="1" value="__DEFAULT_MIN_SIMILARITY__">
+      <input id="similarity" class="numeric-input" type="number" min="0" max="100" step="1" value="__DEFAULT_MIN_SIMILARITY__">
     </div>
     <div class="field numeric-field">
       <label for="top-k">Количество результатов</label>
-      <input id="top-k" class="numeric-input" type="number min="1" max="500" step="1" value="__DEFAULT_TOP_K__">
+      <input id="top-k" class="numeric-input" type="number" min="1" max="500" step="1" value="__DEFAULT_TOP_K__">
     </div>
     <div class="toggle-field">
       <label class="toggle-label" for="use-crop"><input id="use-crop" type="checkbox" __CROP_CHECKED__> Использовать CROP</label>
