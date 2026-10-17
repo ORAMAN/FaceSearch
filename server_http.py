@@ -94,6 +94,17 @@ def _initialize_runtime() -> None:
         0.0, min(100.0, float(gui_settings.get("min_similarity", 43.0)))
     )
 
+    # Не позволяем sqlite3 незаметно создать пустой файл вместо потерянной БД.
+    if str(PROFILE.get("type") or "sqlite").lower() == "sqlite":
+        db_path = Path(str(PROFILE.get("path") or face_search.APP_DIR / "faces.db")).expanduser()
+        if not db_path.is_absolute():
+            db_path = (face_search.APP_DIR / db_path).resolve()
+        if not db_path.is_file():
+            raise FileNotFoundError(
+                f"Файл активной SQLite-базы не найден: {db_path}. "
+                "Откройте GUI и проверьте выбранный профиль."
+            )
+
     # Активируем пути профиля в существующем движке FaceSearch, не меняя схему.
     conn = _open_connection(activate_storage=True)
     try:
