@@ -46,6 +46,13 @@ BACKEND = face_search.BACKEND_GPU
 FACE_APP = None
 DEFAULT_TOP_K = 24
 DEFAULT_MIN_SIMILARITY = 43.0
+DEFAULT_USE_LOCAL_CROPS = True
+DEFAULT_THEME = "dark"
+CREATE_CROPS_ON_HTML = False
+CROP_REPAIR_WORKERS = 4
+CROP_REPAIR_AUTO_WORKERS = False
+_CROP_REPAIR_LOCK = threading.RLock()
+_CROP_REPAIR_ACTIVE_IDS: set[int] = set()
 
 
 def _select_profile() -> tuple[dict, dict]:
@@ -79,6 +86,8 @@ def _open_connection(*, activate_storage: bool = False):
 def _initialize_runtime() -> None:
     global PROFILE, PROFILE_NAME, BACKEND, FACE_APP
     global DEFAULT_TOP_K, DEFAULT_MIN_SIMILARITY
+    global DEFAULT_USE_LOCAL_CROPS, DEFAULT_THEME, CREATE_CROPS_ON_HTML
+    global CROP_REPAIR_WORKERS, CROP_REPAIR_AUTO_WORKERS
 
     PROFILE, gui_settings = _select_profile()
     PROFILE_NAME = str(PROFILE.get("name") or "БД FaceSearch")
@@ -93,6 +102,15 @@ def _initialize_runtime() -> None:
     DEFAULT_MIN_SIMILARITY = max(
         0.0, min(100.0, float(gui_settings.get("min_similarity", 43.0)))
     )
+    DEFAULT_USE_LOCAL_CROPS = bool(gui_settings.get("use_local_crops", True))
+    DEFAULT_THEME = "dark" if str(gui_settings.get("theme") or "").lower() == "dark" else "light"
+    CREATE_CROPS_ON_HTML = bool(gui_settings.get("create_crops_on_html", False))
+    try:
+        CROP_REPAIR_WORKERS = max(1, min(32, int(gui_settings.get("workers", 4))))
+    except (TypeError, ValueError):
+        CROP_REPAIR_WORKERS = 4
+    CROP_REPAIR_AUTO_WORKERS = bool(gui_settings.get("auto_workers", False))
+    print(f"[HTTP] Создавать CROP при поиске: {'да' if CREATE_CROPS_ON_HTML else 'нет'}")
 
     # Не позволяем sqlite3 незаметно создать пустой файл вместо потерянной БД.
     if str(PROFILE.get("type") or "sqlite").lower() == "sqlite":
@@ -193,6 +211,53 @@ def _json_bytes(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def _start_crop_repair(face_ids) -> None:
+    """Восстанавливает отсутствующие CROP для текущей выдачи в фоне, как GUI."""
+    if not CREATE_CROPS_ON_HTML or FACE_APP is None:
+        return
+    try:
+        requested = {int(value) for value in face_ids if int(value) > 0}
+    except (TypeError, ValueError):
+        return
+    if not requested:
+        return
+    with _CROP_REPAIR_LOCK:
+        pending = requested - _CROP_REPAIR_ACTIVE_IDS
+        if not pending:
+            return
+        _CROP_REPAIR_ACTIVE_IDS.update(pending)
+
+    def worker():
+        conn = None
+        try:
+            conn = _open_connection()
+            result = face_search.repair_missing_crops(
+                conn, FACE_APP,
+                workers=CROP_REPAIR_WORKERS,
+                auto_workers=CROP_REPAIR_AUTO_WORKERS,
+                face_ids=pending,
+                delete_unavailable_records=False,
+            )
+            print(
+                "[HTTP][CROP] Проверка завершена: "
+                f"проверено={result.get('checked', 0)}, "
+                f"создано={result.get('repaired', 0)}, "
+                f"ошибок={result.get('failed', 0)}"
+            )
+        except Exception as exc:
+            print(f"[HTTP][CROP] Не удалось восстановить CROP: {exc}")
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            with _CROP_REPAIR_LOCK:
+                _CROP_REPAIR_ACTIVE_IDS.difference_update(pending)
+
+    threading.Thread(target=worker, name="facesearch-http-crop-repair", daemon=True).start()
+
+
 PAGE_TEMPLATE = r"""<!doctype html>
 <html lang="ru">
 <head>
@@ -274,19 +339,35 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .card-button:hover{background:var(--secondary-hover)}
 .empty{color:var(--muted);padding:30px 4px}
 .footer{margin-top:38px;color:var(--muted);font-size:12px}
+.mobile-only{display:none}
+.lightbox{display:none;position:fixed;inset:0;z-index:9999;align-items:center;justify-content:center;padding:58px 20px 70px;background:rgba(0,0,0,.94);backdrop-filter:blur(3px);cursor:zoom-out}
+.lightbox.open{display:flex}
+#lightbox-image{display:block;max-width:96vw;max-height:86vh;width:auto;height:auto;object-fit:contain;border-radius:4px;box-shadow:0 8px 40px rgba(0,0,0,.55);cursor:default}
+.lightbox-close{position:fixed;top:14px;right:18px;z-index:2;width:46px;height:46px;padding:0;border:1px solid rgba(255,255,255,.3);border-radius:50%;color:#fff;background:rgba(35,35,35,.9);font-size:32px;line-height:40px;text-align:center}
+.lightbox-nav{position:fixed;top:50%;z-index:2;width:46px;height:56px;padding:0;border:1px solid rgba(255,255,255,.25);border-radius:9px;color:#fff;background:rgba(45,45,45,.85);font-size:40px;line-height:44px}
+.lightbox-prev{left:12px}.lightbox-next{right:12px}
+.lightbox-counter{position:fixed;bottom:22px;left:0;right:0;color:#fff;text-align:center;font-size:14px;pointer-events:none}
 @media(max-width:700px){
   main{padding:20px 14px 42px}
   .toolbar{align-items:stretch;padding:14px;gap:12px}
-  .field{flex:1 1 145px;min-width:0}
-  .field input[type=number]{width:100%}
+  .toolbar .numeric-field{flex:1 1 100%;width:100%;min-width:0}
+  .toolbar .numeric-field input[type=number]{width:100%;min-width:0}
+  .toolbar .action-field{flex:1 1 calc(50% - 12px);min-width:0}
+  .toolbar .action-field button{width:100%;height:100%;padding:10px 8px;white-space:normal}
   .toggle-field{flex:1 1 100%;align-items:flex-start}
   .toggle-label{min-height:36px}
+  .format-hint{flex:1 1 100%}
+  .mobile-only{display:block;width:100%;margin:12px auto 0}
   .gallery{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
   .card-image{height:clamp(150px,38vw,230px)}
   .card-body{padding:0 10px}
   .card-info{padding:8px;margin:8px 0 10px}
   .card-buttons{flex-direction:column}
   .card-button{flex:1 1 auto}
+  .lightbox{padding:64px 10px}
+  .lightbox-prev{left:5px}.lightbox-next{right:5px}
+  .lightbox-nav{width:36px;height:48px;font-size:34px}
+  #lightbox-image{max-width:98vw;max-height:82vh}
 }
 @media(max-width:380px){
   main{padding:16px 10px 32px}
@@ -302,27 +383,27 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   <h1>FaceSearch</h1>
   <p class="subtitle">Поиск похожих лиц в текущей базе. Выберите фото, при необходимости укажите лицо на снимке и запустите поиск.</p>
   <section class="toolbar" aria-label="Параметры поиска">
-    <div class="field">
+    <div class="field numeric-field">
       <label for="similarity">Минимальное сходство, %</label>
-      <input id="similarity" type="number" min="0" max="100" step="1" value="__DEFAULT_MIN_SIMILARITY__">
+      <input id="similarity" class="numeric-input" type="number min="0" max="100" step="1" value="__DEFAULT_MIN_SIMILARITY__">
     </div>
-    <div class="field">
+    <div class="field numeric-field">
       <label for="top-k">Количество результатов</label>
-      <input id="top-k" type="number" min="1" max="500" step="1" value="__DEFAULT_TOP_K__">
+      <input id="top-k" class="numeric-input" type="number min="1" max="500" step="1" value="__DEFAULT_TOP_K__">
     </div>
     <div class="toggle-field">
-      <label class="toggle-label" for="use-crop"><input id="use-crop" type="checkbox" checked> Использовать CROP</label>
+      <label class="toggle-label" for="use-crop"><input id="use-crop" type="checkbox" __CROP_CHECKED__> Использовать CROP</label>
       <span class="hint">Показывать локальные вырезки лиц, если они доступны.</span>
     </div>
-    <div class="field" style="min-width:0">
+    <div class="field action-field" style="min-width:0">
       <label>&nbsp;</label>
       <button type="button" id="theme-button" class="secondary" aria-pressed="false">☀️ Дневная тема</button>
     </div>
-    <div class="field" style="min-width:0">
+    <div class="field action-field" style="min-width:0">
       <label>&nbsp;</label>
       <button type="button" id="detect-button" class="secondary">Определить лица</button>
     </div>
-    <span class="hint">Поддерживаются JPG, PNG, WEBP и другие форматы изображений.</span>
+    <span class="hint format-hint">Поддерживаются JPG, PNG, WEBP и другие форматы изображений.</span>
   </section>
 
   <section id="dropzone" class="dropzone">
@@ -330,6 +411,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       <strong>Перетащите фотографию сюда</strong><br>
       <span class="hint">или выберите файл на компьютере. Можно также вставить изображение из буфера обмена.</span>
       <input id="file-input" type="file" accept="image/*">
+      <button type="button" id="camera-button" class="secondary mobile-only">📷 Сделать снимок</button>
+      <input id="camera-input" type="file" accept="image/*" capture="environment" hidden>
     </div>
     <canvas id="preview-canvas" aria-label="Предпросмотр. Нажмите на рамку нужного лица, чтобы выбрать его."></canvas>
   </section>
@@ -340,11 +423,20 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     <div class="section-title"><h2>Результаты</h2><span id="result-count"></span></div>
     <div id="gallery" class="gallery"><div class="empty">Здесь появятся найденные совпадения.</div></div>
   </section>
+  <div id="image-lightbox" class="lightbox" aria-hidden="true" role="dialog" aria-modal="true" aria-label="Просмотр изображения">
+    <button type="button" id="lightbox-close" class="lightbox-close" aria-label="Закрыть просмотр">×</button>
+    <button type="button" id="lightbox-previous" class="lightbox-nav lightbox-prev" aria-label="Предыдущее изображение">‹</button>
+    <img id="lightbox-image" alt="Увеличенное изображение">
+    <button type="button" id="lightbox-next" class="lightbox-nav lightbox-next" aria-label="Следующее изображение">›</button>
+    <div id="lightbox-counter" class="lightbox-counter"></div>
+  </div>
   <div class="footer">Процент сходства — мера визуальной близости embeddings, а не подтверждение личности. Доступ к серверу следует ограничивать доверенной сетью.</div>
 </main>
 <script>
 (function(){
   const fileInput=document.getElementById("file-input");
+  const cameraInput=document.getElementById("camera-input");
+  const cameraButton=document.getElementById("camera-button");
   const dropzone=document.getElementById("dropzone");
   const dropCopy=document.getElementById("drop-copy");
   const canvas=document.getElementById("preview-canvas");
@@ -358,12 +450,21 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   const topKInput=document.getElementById("top-k");
   const useCropCheckbox=document.getElementById("use-crop");
   const themeButton=document.getElementById("theme-button");
+  const lightbox=document.getElementById("image-lightbox");
+  const lightboxImage=document.getElementById("lightbox-image");
+  const lightboxClose=document.getElementById("lightbox-close");
+  const lightboxPrevious=document.getElementById("lightbox-previous");
+  const lightboxNext=document.getElementById("lightbox-next");
+  const lightboxCounter=document.getElementById("lightbox-counter");
+  const CREATE_CROPS_ON_HTML=__CREATE_CROPS_ON_HTML__;
   let dataUrl="";
   let imageObject=null;
   let queryId="";
   let faces=[];
   let selectedFace=-1;
   let busy=false;
+  let lightboxItems=[];
+  let lightboxIndex=-1;
 
   function applyTheme(theme){
     const value=theme==="light"?"light":"dark";
@@ -373,8 +474,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     themeButton.setAttribute("aria-pressed",String(value==="light"));
     try{localStorage.setItem("facesearch-http-theme",value);}catch(e){}
   }
-  let initialTheme="dark";
-  try{initialTheme=localStorage.getItem("facesearch-http-theme")||"dark";}catch(e){}
+  let initialTheme="__DEFAULT_THEME__";
+  try{initialTheme=localStorage.getItem("facesearch-http-theme")||initialTheme;}catch(e){}
   applyTheme(initialTheme);
   themeButton.addEventListener("click",function(){
     applyTheme(document.documentElement.dataset.theme==="dark"?"light":"dark");
@@ -383,16 +484,98 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   function faceImageUrl(faceId,useCrop,refresh){
     return "/api/face/"+encodeURIComponent(faceId)+"/image?crop="+(useCrop?"1":"0")+(refresh?"&refresh="+Date.now():"");
   }
-  function refreshCardImages(){
-    gallery.querySelectorAll("img[data-face-image='true']").forEach(function(image){
-      const box=image.parentElement;
-      const placeholder=box&&box.querySelector(".no-image");
+  function showImageFailure(image){
+    const box=image.parentElement;
+    const placeholder=box&&box.querySelector(".no-image");
+    image.style.display="none";
+    if(placeholder)placeholder.hidden=false;
+  }
+  function configureCardImage(image,faceId,useCrop,refresh){
+    image.dataset.faceId=String(faceId);
+    image.dataset.cropEnabled=String(Boolean(useCrop));
+    image.dataset.cropRetryCount="0";
+    image.style.display="block";
+    const box=image.parentElement;
+    const placeholder=box&&box.querySelector(".no-image");
+    if(placeholder)placeholder.hidden=true;
+    if(image._cropRetryTimer){clearTimeout(image._cropRetryTimer);image._cropRetryTimer=null;}
+    image.onload=function(){
       image.style.display="block";
       if(placeholder)placeholder.hidden=true;
-      image.src=faceImageUrl(image.dataset.faceId,useCropCheckbox.checked,true);
+      if(image._cropRetryTimer){clearTimeout(image._cropRetryTimer);image._cropRetryTimer=null;}
+    };
+    image.onerror=function(){
+      if(image.dataset.cropEnabled==="true"&&CREATE_CROPS_ON_HTML){
+        const retries=Number(image.dataset.cropRetryCount||"0");
+        if(retries<180){
+          image.dataset.cropRetryCount=String(retries+1);
+          if(image._cropRetryTimer)clearTimeout(image._cropRetryTimer);
+          image._cropRetryTimer=setTimeout(function(){
+            if(image.dataset.cropEnabled!=="true")return;
+            image.src=faceImageUrl(image.dataset.faceId,true,true)+"&crop_retry="+Date.now();
+          },1500);
+          return;
+        }
+        // Как в HTML-отчёте, после ожидания переключаемся на оригинал.
+        image.dataset.cropEnabled="false";
+        image.src=faceImageUrl(image.dataset.faceId,false,true);
+        return;
+      }
+      showImageFailure(image);
+    };
+    image.onclick=function(){openLightboxForImage(image);};
+    image.src=faceImageUrl(faceId,useCrop,refresh);
+  }
+  function refreshCardImages(){
+    gallery.querySelectorAll("img[data-face-image='true']").forEach(function(image){
+      configureCardImage(image,image.dataset.faceId,useCropCheckbox.checked,true);
     });
   }
   useCropCheckbox.addEventListener("change",refreshCardImages);
+
+  function openLightboxForImage(image){
+    lightboxItems=Array.from(gallery.querySelectorAll("img[data-face-image='true']"));
+    lightboxIndex=lightboxItems.indexOf(image);
+    if(lightboxIndex<0)return;
+    displayLightboxImage();
+    lightbox.classList.add("open");
+    lightbox.setAttribute("aria-hidden","false");
+    document.body.style.overflow="hidden";
+    lightboxClose.focus();
+  }
+  function displayLightboxImage(){
+    if(lightboxIndex<0||lightboxIndex>=lightboxItems.length)return;
+    const current=lightboxItems[lightboxIndex];
+    lightboxImage.alt=current.alt||"Увеличенное изображение";
+    // В HTML-отчёте просмотр открывает оригинал, а не только локальную вырезку.
+    lightboxImage.src=faceImageUrl(current.dataset.faceId,false,true);
+    lightboxCounter.textContent=(lightboxIndex+1)+" / "+lightboxItems.length;
+    const navigation=lightboxItems.length>1;
+    lightboxPrevious.hidden=!navigation;
+    lightboxNext.hidden=!navigation;
+  }
+  function moveLightbox(step){
+    if(!lightboxItems.length)return;
+    lightboxIndex=(lightboxIndex+step+lightboxItems.length)%lightboxItems.length;
+    displayLightboxImage();
+  }
+  function closeLightbox(){
+    lightbox.classList.remove("open");
+    lightbox.setAttribute("aria-hidden","true");
+    lightboxImage.removeAttribute("src");
+    document.body.style.overflow="";
+    lightboxIndex=-1;
+  }
+  lightboxClose.addEventListener("click",closeLightbox);
+  lightboxPrevious.addEventListener("click",function(){moveLightbox(-1);});
+  lightboxNext.addEventListener("click",function(){moveLightbox(1);});
+  lightbox.addEventListener("click",function(event){if(event.target===lightbox)closeLightbox();});
+  document.addEventListener("keydown",function(event){
+    if(!lightbox.classList.contains("open"))return;
+    if(event.key==="Escape")closeLightbox();
+    else if(event.key==="ArrowLeft")moveLightbox(-1);
+    else if(event.key==="ArrowRight")moveLightbox(1);
+  });
 
   function setStatus(message,isError){
     statusBox.textContent=message;
@@ -403,6 +586,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     detectButton.disabled=value||!dataUrl;
     searchButton.disabled=value||!queryId||selectedFace<0||!faces.length;
     fileInput.disabled=value;
+    cameraInput.disabled=value;
+    cameraButton.disabled=value;
   }
   function useFile(file){
     if(!file||!file.type||!file.type.startsWith("image/")){
@@ -427,8 +612,9 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
         const empty=document.createElement("div");empty.className="empty";
         empty.textContent="После поиска здесь появятся совпадения.";
         gallery.appendChild(empty);resultCount.textContent="";
-        setStatus("Фотография загружена. Нажмите «Определить лица».");
+        setStatus("Фотография загружена. Автоматически определяю лица...");
         setBusy(false);
+        detectFaces(true);
       };
       imageObject.onerror=function(){setStatus("Не удалось открыть изображение.",true);};
       imageObject.src=dataUrl;
@@ -437,6 +623,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     reader.readAsDataURL(file);
   }
   fileInput.addEventListener("change",function(){useFile(fileInput.files&&fileInput.files[0]);});
+  cameraInput.addEventListener("change",function(){useFile(cameraInput.files&&cameraInput.files[0]);});
+  cameraButton.addEventListener("click",function(){if(!busy)cameraInput.click();});
   ["dragenter","dragover"].forEach(function(name){
     dropzone.addEventListener(name,function(event){event.preventDefault();dropzone.classList.add("drag");});
   });
@@ -502,8 +690,9 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     if(!response.ok)throw new Error(data.error||("Ошибка HTTP "+response.status));
     return data;
   }
-  detectButton.addEventListener("click",async function(){
+  async function detectFaces(autoSearch){
     if(!dataUrl||busy)return;
+    let detected=false;
     setBusy(true);setStatus("Определение лиц...");
     try{
       const data=await postJson("/api/detect",{image:dataUrl});
@@ -512,10 +701,13 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       if(!faces.length){
         queryId="";setStatus("Лица не обнаружены. Попробуйте другое изображение.");return;
       }
-      setStatus("Обнаружено лиц: "+faces.length+". Нажмите на рамку нужного лица, затем запустите поиск.");
+      detected=true;
+      setStatus("Обнаружено лиц: "+faces.length+". "+(autoSearch?"Запускаю поиск по первому лицу...":"Выберите рамку лица и запустите поиск."));
     }catch(error){setStatus(error.message||String(error),true);queryId="";faces=[];selectedFace=-1;}
     finally{setBusy(false);}
-  });
+    if(detected&&autoSearch)await searchSimilar();
+  }
+  detectButton.addEventListener("click",function(){detectFaces(false);});
 
   function safeLink(value){
     if(!value)return "";
@@ -585,12 +777,11 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       const imageBox=document.createElement("div");imageBox.className="card-image";
       const rank=document.createElement("div");rank.className="rank";rank.textContent="#"+String(item.rank||"");
       const score=document.createElement("div");score.className="score";score.textContent=Number(item.similarity||0).toFixed(2)+"%";
-      const image=document.createElement("img");image.loading="lazy";image.dataset.faceImage="true";image.dataset.faceId=faceId;
-      image.alt=displayName||( "Лицо ID "+faceId);
+      const image=document.createElement("img");image.loading="lazy";image.dataset.faceImage="true";
+      image.alt=displayName||("Лицо ID "+faceId);
       const placeholder=document.createElement("div");placeholder.className="no-image";placeholder.textContent="Изображение недоступно";placeholder.hidden=true;
-      image.src=faceImageUrl(faceId,useCropCheckbox.checked,false);
-      image.onerror=function(){image.style.display="none";placeholder.hidden=false;};
       imageBox.append(image,placeholder,rank,score);
+      configureCardImage(image,faceId,useCropCheckbox.checked,false);
       const body=document.createElement("div");body.className="card-body";
       const title=document.createElement("div");title.className="card-title";
       title.textContent="#"+faceId.padStart(8,"0");
@@ -630,7 +821,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       card.append(imageBox,body);gallery.appendChild(card);
     });
   }
-  searchButton.addEventListener("click",async function(){
+  async function searchSimilar(){
     if(!queryId||selectedFace<0||busy)return;
     const minimum=Number(similarityInput.value);
     const topK=Number(topKInput.value);
@@ -650,7 +841,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       setStatus("Поиск завершён. Найдено результатов: "+(data.results||[]).length+".");
     }catch(error){setStatus(error.message||String(error),true);}
     finally{setBusy(false);}
-  });
+  }
+  searchButton.addEventListener("click",searchSimilar);
 })();
 </script>
 </body>
@@ -712,6 +904,12 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 "__DEFAULT_TOP_K__", str(DEFAULT_TOP_K)
             ).replace(
                 "__DEFAULT_MIN_SIMILARITY__", str(DEFAULT_MIN_SIMILARITY)
+            ).replace(
+                "__CROP_CHECKED__", "checked" if DEFAULT_USE_LOCAL_CROPS else ""
+            ).replace(
+                "__CREATE_CROPS_ON_HTML__", "true" if CREATE_CROPS_ON_HTML else "false"
+            ).replace(
+                "__DEFAULT_THEME__", DEFAULT_THEME
             )
             self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             return
@@ -727,6 +925,8 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             self._json(200, {
                 "ok": True, "profile": PROFILE_NAME, "backend": BACKEND,
                 "index_exists": Path(face_search.INDEX_FILE).is_file(),
+                "create_crops_on_html": CREATE_CROPS_ON_HTML,
+                "crop_repair_active": bool(_CROP_REPAIR_ACTIVE_IDS),
             })
             return
         self._json(404, {"error": "Страница не найдена."})
@@ -886,6 +1086,8 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 "metadata_name": metadata_name,
                 "metadata": metadata_info,
             })
+        if CREATE_CROPS_ON_HTML and cards:
+            _start_crop_repair(card["face_id"] for card in cards)
         self._json(200, {"results": cards, "count": len(cards)})
 
     def _serve_face_image(self, route: str, *, use_crop: bool = True):
@@ -928,6 +1130,10 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 return
             except OSError:
                 pass
+        elif use_crop and CREATE_CROPS_ON_HTML:
+            # Браузерный скрипт будет повторять запрос, пока CROP формируется.
+            self._json(404, {"error": "CROP ещё формируется."})
+            return
 
         # Если CROP не создавался/утерян, показываем сохранённый оригинал.
         local_source = face_search._source_url_to_local_path(source_url)
