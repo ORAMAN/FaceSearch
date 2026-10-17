@@ -44,5 +44,25 @@ jobs:
           Path("http-page-check.js").write_text(chr(10).join(scripts), encoding="utf-8")
           PY
           node --check http-page-check.js
+      - name: Check camera capture flow
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path("server_http.py").read_text(encoding="utf-8")
+          required = (
+              'id="camera-video"',
+              'id="camera-capture"',
+              "navigator.mediaDevices.getUserMedia",
+              "function captureCameraPhoto()",
+              "snapshot.toBlob(",
+              "useFile(photo);",
+              'capture="environment"',
+          )
+          missing = [item for item in required if item not in source]
+          if missing:
+              raise SystemExit("Camera capture flow missing: " + ", ".join(missing))
+          print("Camera capture UI and automatic image-processing flow are present.")
+          PY
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
