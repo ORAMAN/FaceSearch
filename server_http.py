@@ -593,9 +593,9 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       imageBox.append(image,placeholder,rank,score);
       const body=document.createElement("div");body.className="card-body";
       const title=document.createElement("div");title.className="card-title";
-      title.textContent=imported?(displayName||"Без имени"):("#"+faceId.padStart(8,"0"));
+      title.textContent="#"+faceId.padStart(8,"0");
       const meta=document.createElement("div");meta.className="card-meta";
-      meta.textContent="Результат №"+item.rank+" · ID лица "+faceId+(item.filename?" · "+item.filename:"");
+      meta.textContent="Результат №"+item.rank+" · ID лица "+faceId+(!imported&&item.filename?" · "+item.filename:"");
       body.append(title,meta);
 
       if(imported){
