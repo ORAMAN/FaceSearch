@@ -403,6 +403,11 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       <label>&nbsp;</label>
       <button type="button" id="detect-button" class="secondary">Определить лица</button>
     </div>
+    <div class="field action-field mobile-only">
+      <label>&nbsp;</label>
+      <button type="button" id="camera-button" class="secondary">📷 Сделать снимок</button>
+      <input id="camera-input" type="file" accept="image/*" capture="environment" hidden>
+    </div>
     <span class="hint format-hint">Поддерживаются JPG, PNG, WEBP и другие форматы изображений.</span>
   </section>
 
@@ -411,8 +416,6 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       <strong>Перетащите фотографию сюда</strong><br>
       <span class="hint">или выберите файл на компьютере. Можно также вставить изображение из буфера обмена.</span>
       <input id="file-input" type="file" accept="image/*">
-      <button type="button" id="camera-button" class="secondary mobile-only">📷 Сделать снимок</button>
-      <input id="camera-input" type="file" accept="image/*" capture="environment" hidden>
     </div>
     <canvas id="preview-canvas" aria-label="Предпросмотр. Нажмите на рамку нужного лица, чтобы выбрать его."></canvas>
   </section>
