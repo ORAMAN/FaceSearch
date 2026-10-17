@@ -369,6 +369,18 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .empty{color:var(--muted);padding:30px 4px}
 .footer{margin-top:38px;color:var(--muted);font-size:12px}
 .mobile-only{display:none}
+.camera-modal{display:none;position:fixed;inset:0;z-index:9998;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.88)}
+.camera-modal.open{display:flex}
+.camera-dialog{width:min(720px,100%);max-height:94vh;overflow:auto;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:14px;padding:16px;box-shadow:var(--shadow)}
+.camera-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;font-size:18px}
+.camera-close{width:42px;height:42px;padding:0;font-size:26px}
+.camera-view{position:relative;display:flex;align-items:center;justify-content:center;min-height:200px;max-height:68vh;background:#050505;border-radius:10px;overflow:hidden}
+#camera-video{display:block;width:100%;max-height:68vh;object-fit:contain}
+.camera-placeholder{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;text-align:center;color:#fff;background:#101010}
+.camera-placeholder[hidden]{display:none}
+.camera-instruction{margin:12px 0}
+.camera-actions{display:flex;gap:10px;justify-content:flex-end}
+.camera-actions button{min-width:110px}
 .lightbox{display:none;position:fixed;inset:0;z-index:9999;align-items:center;justify-content:center;padding:58px 20px 70px;background:rgba(0,0,0,.94);backdrop-filter:blur(3px);cursor:zoom-out}
 .lightbox.open{display:flex}
 #lightbox-image{display:block;max-width:96vw;max-height:86vh;width:auto;height:auto;object-fit:contain;border-radius:4px;box-shadow:0 8px 40px rgba(0,0,0,.55);cursor:default}
@@ -393,6 +405,12 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   .card-info{padding:8px;margin:8px 0 10px}
   .card-buttons{flex-direction:column}
   .card-button{flex:1 1 auto}
+  .camera-modal{padding:8px}
+  .camera-dialog{padding:12px}
+  .camera-view{min-height:180px;max-height:62vh}
+  #camera-video{max-height:62vh}
+  .camera-actions{display:grid;grid-template-columns:1fr 1fr}
+  .camera-actions button{width:100%;min-width:0}
   .lightbox{padding:64px 10px}
   .lightbox-prev{left:5px}.lightbox-next{right:5px}
   .lightbox-nav{width:36px;height:48px;font-size:34px}
@@ -448,6 +466,23 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     </div>
     <canvas id="preview-canvas" aria-label="Предпросмотр. Нажмите на рамку нужного лица, чтобы выбрать его."></canvas>
   </section>
+  <div id="camera-modal" class="camera-modal" aria-hidden="true" role="dialog" aria-modal="true" aria-label="Съёмка фотографии">
+    <div class="camera-dialog">
+      <div class="camera-header">
+        <strong>Сделать снимок</strong>
+        <button type="button" id="camera-close" class="secondary camera-close" aria-label="Закрыть камеру">×</button>
+      </div>
+      <div class="camera-view">
+        <video id="camera-video" autoplay playsinline muted></video>
+        <div id="camera-placeholder" class="camera-placeholder">Подключение к камере…</div>
+      </div>
+      <p class="hint camera-instruction">Расположите лицо в кадре и нажмите «Снять фото». Снимок автоматически загрузится и запустит поиск.</p>
+      <div class="camera-actions">
+        <button type="button" id="camera-cancel" class="secondary">Отмена</button>
+        <button type="button" id="camera-capture">Снять фото</button>
+      </div>
+    </div>
+  </div>
   <div id="status" class="status" role="status">Выберите изображение, затем нажмите «Определить лица».</div>
   <button type="button" id="search-button" disabled>Искать похожее лицо</button>
 
@@ -469,6 +504,12 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   const fileInput=document.getElementById("file-input");
   const cameraInput=document.getElementById("camera-input");
   const cameraButton=document.getElementById("camera-button");
+  const cameraModal=document.getElementById("camera-modal");
+  const cameraVideo=document.getElementById("camera-video");
+  const cameraPlaceholder=document.getElementById("camera-placeholder");
+  const cameraCaptureButton=document.getElementById("camera-capture");
+  const cameraCloseButton=document.getElementById("camera-close");
+  const cameraCancelButton=document.getElementById("camera-cancel");
   const dropzone=document.getElementById("dropzone");
   const dropCopy=document.getElementById("drop-copy");
   const canvas=document.getElementById("preview-canvas");
@@ -497,6 +538,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   let busy=false;
   let lightboxItems=[];
   let lightboxIndex=-1;
+  let cameraStream=null;
+  let cameraOpening=false;
 
   function applyTheme(theme){
     const value=theme==="light"?"light":"dark";
@@ -619,7 +662,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     searchButton.disabled=value||!queryId||selectedFace<0||!faces.length;
     fileInput.disabled=value;
     cameraInput.disabled=value;
-    cameraButton.disabled=value;
+    cameraButton.disabled=value||cameraOpening;
   }
   function useFile(file){
     if(!file||!file.type||!file.type.startsWith("image/")){
@@ -655,8 +698,98 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     reader.readAsDataURL(file);
   }
   fileInput.addEventListener("change",function(){useFile(fileInput.files&&fileInput.files[0]);});
-  cameraInput.addEventListener("change",function(){useFile(cameraInput.files&&cameraInput.files[0]);});
-  cameraButton.addEventListener("click",function(){if(!busy)cameraInput.click();});
+  cameraInput.addEventListener("change",function(){
+    const file=cameraInput.files&&cameraInput.files[0];
+    if(file)useFile(file);
+    else setStatus("Съёмка отменена. Можно попробовать ещё раз.");
+  });
+
+  function stopCameraStream(){
+    if(cameraStream){
+      cameraStream.getTracks().forEach(function(track){try{track.stop();}catch(e){}});
+      cameraStream=null;
+    }
+    cameraVideo.srcObject=null;
+  }
+  function closeCamera(){
+    stopCameraStream();
+    cameraModal.classList.remove("open");
+    cameraModal.setAttribute("aria-hidden","true");
+    cameraOpening=false;
+    cameraCaptureButton.disabled=false;
+    cameraButton.focus();
+  }
+  async function openCamera(){
+    if(busy||cameraOpening)return;
+    // getUserMedia is available only in secure contexts (HTTPS or localhost).
+    // On a phone opening the server over plain HTTP by LAN IP, use the system
+    // camera/file input as a safe fallback; the returned photo still auto-searches.
+    if(!window.isSecureContext||!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+      setStatus("Для камеры внутри страницы нужен HTTPS. Открываю системную камеру: сделайте снимок и подтвердите его — он автоматически попадёт в поиск.");
+      cameraInput.value="";
+      cameraInput.click();
+      return;
+    }
+    cameraOpening=true;
+    cameraButton.disabled=true;
+    cameraPlaceholder.hidden=false;
+    cameraPlaceholder.textContent="Подключение к камере…";
+    cameraModal.classList.add("open");
+    cameraModal.setAttribute("aria-hidden","false");
+    try{
+      try{
+        cameraStream=await navigator.mediaDevices.getUserMedia({
+          audio:false,video:{facingMode:{ideal:"environment"}}
+        });
+      }catch(firstError){
+        // Older mobile browsers may not understand facingMode constraints.
+        cameraStream=await navigator.mediaDevices.getUserMedia({audio:false,video:true});
+      }
+      cameraVideo.srcObject=cameraStream;
+      await cameraVideo.play();
+      cameraPlaceholder.hidden=true;
+      cameraCaptureButton.disabled=false;
+      cameraCaptureButton.focus();
+      setStatus("Камера готова. Нажмите «Снять фото», чтобы передать снимок в поиск.");
+    }catch(error){
+      closeCamera();
+      const reason=error&&error.name==="NotAllowedError"
+        ?"Доступ к камере запрещён. Разрешите доступ в настройках браузера."
+        :error&&error.name==="NotFoundError"
+          ?"Камера не найдена на устройстве."
+          :"Не удалось запустить камеру: "+(error&&error.message?error.message:"неизвестная ошибка");
+      setStatus(reason,true);
+    }
+  }
+  function captureCameraPhoto(){
+    if(!cameraStream||!cameraVideo.videoWidth||!cameraVideo.videoHeight){
+      setStatus("Камера ещё не готова. Подождите немного и повторите.",true);return;
+    }
+    const snapshot=document.createElement("canvas");
+    snapshot.width=cameraVideo.videoWidth;
+    snapshot.height=cameraVideo.videoHeight;
+    const snapshotContext=snapshot.getContext("2d");
+    if(!snapshotContext){setStatus("Не удалось подготовить снимок.",true);return;}
+    snapshotContext.drawImage(cameraVideo,0,0,snapshot.width,snapshot.height);
+    cameraCaptureButton.disabled=true;
+    snapshot.toBlob(function(blob){
+      if(!blob){
+        cameraCaptureButton.disabled=false;
+        setStatus("Не удалось получить снимок с камеры.",true);return;
+      }
+      const photo=new File([blob],"facesearch-camera-"+Date.now()+".jpg",{type:"image/jpeg",lastModified:Date.now()});
+      closeCamera();
+      useFile(photo);
+    },"image/jpeg",0.92);
+  }
+  cameraButton.addEventListener("click",openCamera);
+  cameraCaptureButton.addEventListener("click",captureCameraPhoto);
+  cameraCloseButton.addEventListener("click",closeCamera);
+  cameraCancelButton.addEventListener("click",closeCamera);
+  cameraModal.addEventListener("click",function(event){if(event.target===cameraModal)closeCamera();});
+  document.addEventListener("keydown",function(event){
+    if(cameraModal.classList.contains("open")&&event.key==="Escape")closeCamera();
+  });
   ["dragenter","dragover"].forEach(function(name){
     dropzone.addEventListener(name,function(event){event.preventDefault();dropzone.classList.add("drag");});
   });
