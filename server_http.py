@@ -410,7 +410,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 <body>
 <main>
   <h1>FaceSearch</h1>
-  <p class="subtitle">Поиск похожих лиц в текущей базе. Выберите фото, при необходимости укажите лицо на снимке и запустите поиск.</p>
+  <p class="subtitle">Загрузите изображение — определение лиц и поиск по первому найденному лицу запустятся автоматически. На групповом фото можно выбрать другое лицо и повторить поиск.</p>
   <section class="toolbar" aria-label="Параметры поиска">
     <div class="field numeric-field">
       <label for="similarity">Минимальное сходство, %</label>
@@ -443,7 +443,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   <section id="dropzone" class="dropzone">
     <div class="dropzone-content" id="drop-copy">
       <strong>Перетащите фотографию сюда</strong><br>
-      <span class="hint">или выберите файл на компьютере. Можно также вставить изображение из буфера обмена.</span>
+      <span class="hint">или выберите изображение на устройстве. Также можно вставить изображение из буфера обмена.</span>
       <input id="file-input" type="file" accept="image/*">
     </div>
     <canvas id="preview-canvas" aria-label="Предпросмотр. Нажмите на рамку нужного лица, чтобы выбрать его."></canvas>
