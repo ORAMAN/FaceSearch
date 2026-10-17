@@ -53,6 +53,9 @@ CROP_REPAIR_WORKERS = 4
 CROP_REPAIR_AUTO_WORKERS = False
 _CROP_REPAIR_LOCK = threading.RLock()
 _CROP_REPAIR_ACTIVE_IDS: set[int] = set()
+_FACE_IMAGE_CACHE_LOCK = threading.RLock()
+_FACE_IMAGE_CACHE: dict[int, tuple] = {}
+_FACE_IMAGE_CACHE_MAX = 5000
 
 
 def _select_profile() -> tuple[dict, dict]:
@@ -209,6 +212,32 @@ def _prune_sessions() -> None:
 
 def _json_bytes(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _remember_face_image_rows(rows) -> None:
+    """Кэширует связку face.id -> CROP/source, чтобы повторные image-запросы не били по БД."""
+    with _FACE_IMAGE_CACHE_LOCK:
+        for row in rows:
+            # Input layout: face.id, images.id, path, filename, source_url, url_image.
+            try:
+                face_id = int(row[0])
+                cached = (
+                    int(row[1]),
+                    str(row[2] or ""),
+                    str(row[3] or ""),
+                    str(row[4] or ""),
+                    str(row[5] or ""),
+                )
+            except (TypeError, ValueError, IndexError):
+                continue
+            _FACE_IMAGE_CACHE[face_id] = cached
+        while len(_FACE_IMAGE_CACHE) > _FACE_IMAGE_CACHE_MAX:
+            _FACE_IMAGE_CACHE.pop(next(iter(_FACE_IMAGE_CACHE)))
+
+
+def _get_face_image_row(face_id: int):
+    with _FACE_IMAGE_CACHE_LOCK:
+        return _FACE_IMAGE_CACHE.get(int(face_id))
 
 
 def _start_crop_repair(face_ids) -> None:
@@ -1028,6 +1057,30 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 min_similarity=minimum_percent / 100.0,
                 backend=BACKEND,
             )
+            # Cache all displayed image rows once per search. The CROP retry script
+            # can then poll for several minutes without opening a DB connection for
+            # every failed image request (important for PostgreSQL connection limits).
+            result_ids = []
+            for result in results:
+                try:
+                    result_id = int(result.get("face_id") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if result_id > 0:
+                    result_ids.append(result_id)
+            result_ids = list(dict.fromkeys(result_ids))
+            for offset in range(0, len(result_ids), 500):
+                chunk = result_ids[offset:offset + 500]
+                if not chunk:
+                    continue
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    "SELECT f.id, i.id, i.path, i.filename, i.source_url, i.url_image "
+                    "FROM faces f JOIN images i ON i.id = f.image_id "
+                    f"WHERE f.id IN ({placeholders})",
+                    tuple(chunk),
+                ).fetchall()
+                _remember_face_image_rows(rows)
         finally:
             conn.close()
 
@@ -1104,19 +1157,24 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": "Некорректный ID лица."})
             return
 
-        conn = _open_connection()
-        try:
-            row = conn.execute(
-                """
-                SELECT i.id, i.path, i.filename, i.source_url, i.url_image
-                FROM faces f
-                JOIN images i ON i.id = f.image_id
-                WHERE f.id = ?
-                """,
-                (face_id,),
-            ).fetchone()
-        finally:
-            conn.close()
+        row = _get_face_image_row(face_id)
+        if row is None:
+            conn = _open_connection()
+            try:
+                db_row = conn.execute(
+                    """
+                    SELECT f.id, i.id, i.path, i.filename, i.source_url, i.url_image
+                    FROM faces f
+                    JOIN images i ON i.id = f.image_id
+                    WHERE f.id = ?
+                    """,
+                    (face_id,),
+                ).fetchone()
+                if db_row:
+                    _remember_face_image_rows([db_row])
+                    row = _get_face_image_row(face_id)
+            finally:
+                conn.close()
 
         if not row:
             self._json(404, {"error": "Изображение не найдено."})
