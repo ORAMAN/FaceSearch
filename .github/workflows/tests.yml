@@ -58,11 +58,19 @@ jobs:
               "snapshot.toBlob(",
               "useFile(photo);",
               'capture="environment"',
+              'id="image-url"',
+              'id="load-url-button"',
+              'id="file-button"',
+              'id="file-input" type="file" accept="image/*" hidden',
+              '_fetch_remote_image_data_url',
+              '"/api/load-image"',
           )
           missing = [item for item in required if item not in source]
           if missing:
-              raise SystemExit("Camera capture flow missing: " + ", ".join(missing))
-          print("Camera capture UI and automatic image-processing flow are present.")
+              raise SystemExit("Image source UI/processing flow missing: " + ", ".join(missing))
+          if source.index('id="file-input"') > source.index('id="drop-copy"'):
+              raise SystemExit("File chooser must be outside the hideable dropzone instructions.")
+          print("Camera, persistent local file chooser, and HTTP image URL flows are present.")
           PY
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
