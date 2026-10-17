@@ -717,6 +717,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     cameraModal.setAttribute("aria-hidden","true");
     cameraOpening=false;
     cameraCaptureButton.disabled=false;
+    cameraButton.disabled=busy;
     cameraButton.focus();
   }
   async function openCamera(){
