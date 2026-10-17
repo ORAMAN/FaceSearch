@@ -548,8 +548,8 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         if path not in ("/api/detect", "/api/search"):
             self._json(404, {"error": "API-метод не найден."})
             return
-        if not API_SEMAPHORE.acquire(blocking=False):
-            self._json(503, {"error": "Сервер занят. Повторите запрос через несколько секунд."})
+        if not API_SEMAPHORE.acquire(timeout=15):
+            self._json(503, {"error": "Сервер перегружен. Повторите запрос через несколько секунд."})
             return
         try:
             try:
