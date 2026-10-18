@@ -23,6 +23,7 @@ vk_token.txt
 # Локальные настройки приложения / профили подключений
 settings.xml
 database_profiles.json
+ok_downloader_settings.json
 
 # Локальные базы данных и журналы SQLite
 *.db
@@ -41,6 +42,7 @@ CROP/
 CROPS/
 *.faiss
 *.index
+loaders/ok/OK_Browser_Profile
 
 # Временные и системные файлы Windows
 *.tmp
