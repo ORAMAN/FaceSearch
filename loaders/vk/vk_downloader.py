@@ -246,6 +246,7 @@ def _save_pending_silent_token(payload: dict) -> None:
         "user_id": user.get("id"),
         "first_name": user.get("first_name", ""),
         "last_name": user.get("last_name", ""),
+        "ttl": max(1, int(payload.get("ttl") or 600)),
         "saved_at": int(time.time()),
     }
     VK_SILENT_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -263,6 +264,16 @@ def load_pending_silent_token() -> dict:
     payload = json.loads(VK_SILENT_TOKEN_FILE.read_text(encoding="utf-8-sig"))
     if not isinstance(payload, dict) or not payload.get("token"):
         raise ValueError(f"В {VK_SILENT_TOKEN_FILE.name} нет корректного silent_token.")
+    saved_at = int(payload.get("saved_at") or 0)
+    ttl = max(1, int(payload.get("ttl") or 600))
+    if not saved_at or time.time() - saved_at > ttl:
+        try:
+            VK_SILENT_TOKEN_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ValueError(
+            "Срок действия silent_token истёк. Нажмите «Войти через Chrome автоматически» и выполните вход повторно."
+        )
     return payload
 
 
@@ -1595,7 +1606,7 @@ def main():
 
     root = tk.Tk()
     root.title("VK.ru — загрузчик фотографий")
-    root.geometry("1100x970")
+    root.geometry("1100x1120")
     root.minsize(900, 780)
 
     original_stdout, original_stderr = sys.stdout, sys.stderr
@@ -1711,7 +1722,7 @@ def main():
     token_count_var = tk.StringVar(value=f"Токенов в {VK_TOKEN_FILE.name}: {len(_read_token_file())}")
     ttk.Label(auth_frame, textvariable=token_count_var).grid(row=0, column=0, sticky="w", pady=(0, 4))
     auth_buttons = ttk.Frame(auth_frame)
-    auth_buttons.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+    auth_buttons.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 8))
 
     def load_gui_settings():
         defaults = {
@@ -1802,7 +1813,7 @@ def main():
         auth_frame,
         text="Авторизация VK ID выполняется в отдельном профиле Chrome. Программа автоматически разбирает ответ blank.html: старый access_token сохраняется напрямую, а silent_token обменивается на API access_token.",
         wraplength=980,
-    ).grid(row=2, column=0, sticky="ew")
+    ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 6))
 
     ttk.Label(auth_frame, text="Профиль Chrome:").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
     ttk.Entry(auth_frame, textvariable=browser_profile_var).grid(row=3, column=1, sticky="ew", pady=3)
