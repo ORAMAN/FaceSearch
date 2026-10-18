@@ -2003,6 +2003,81 @@ def import_image_bundle(
     except (OSError, ValueError):
         fallback_image_url = str(image_path.resolve())
 
+    # Исправление повторного импорта: фотография могла быть просканирована как
+    # локальная до включения «Использовать JSON-описание». Её CROP и embeddings
+    # уже находятся в БД, поэтому повторная вставка упирается в SHA-256-дубликаты,
+    # а rollback отменяет и создание профиля. Если CROP на месте, перепривязываем
+    # существующие строки к JSON-профилю без повторного inference.
+    local_source_rows_result = conn.execute(
+        """
+        SELECT i.id, i.path
+        FROM images i
+        WHERE i.source_type = 'local'
+          AND i.source_url = ?
+          AND EXISTS (
+              SELECT 1 FROM faces f WHERE f.image_id = i.id
+          )
+        ORDER BY i.id
+        """,
+        (fallback_image_url,),
+    ).fetchall()
+    local_source_rows = [
+        (int(row[0]), str(row[1] or ""))
+        for row in local_source_rows_result
+    ]
+
+    local_crops_missing = False
+    if create_crop_files and local_source_rows:
+        local_crops_missing = any(
+            not _resolve_db_storage_path(stored_path).is_file()
+            for _image_id, stored_path in local_source_rows
+        )
+
+    if (
+        local_source_rows
+        and not overwrite_existing_crops
+        and not local_crops_missing
+    ):
+        profile_id = _upsert_import_profile(conn, metadata)
+        image_url = metadata_image_url or fallback_image_url
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        updated = conn.execute(
+            """
+            UPDATE images
+            SET source_type = 'import',
+                source_url = ?,
+                url_image = ?,
+                profile_id = ?,
+                source_updated_at = ?,
+                metadata_json = NULL
+            WHERE source_type = 'local'
+              AND source_url = ?
+              AND EXISTS (
+                  SELECT 1 FROM faces f WHERE f.image_id = images.id
+              )
+            """,
+            (source_url, image_url, profile_id, timestamp, fallback_image_url),
+        )
+        promoted_count = int(updated.rowcount or len(local_source_rows))
+        conn.commit()
+        deleted = (
+            _delete_processed_source_files(image_path, json_path)
+            if delete_source else False
+        )
+        return {
+            "faces": 0,
+            "deleted": deleted,
+            "message": (
+                "исправлена привязка локальных CROP к JSON-профилю; "
+                f"переиспользовано записей: {promoted_count}"
+            ),
+            "updated": promoted_count,
+            "added": 0,
+            "removed": 0,
+            "restored": 0,
+            "detected_faces": None,
+        }
+
     # Повторное сканирование уже импортированных изображений не должно заново
     # загружать картинку и запускать InsightFace, если исходник уже представлен
     # в БД и все его CROP на месте. Это особенно важно для удалённого MySQL.
@@ -2107,6 +2182,17 @@ def import_image_bundle(
             url_image=metadata_image_url,
             fallback_image_url=fallback_image_url,
         )
+
+    # Если CROP отсутствовали и выше нельзя было выполнить быстрый путь, но
+    # исходник уже есть как локальная запись, переиспользуем эти ID при
+    # восстановлении или обновлении вместо создания SHA-256-дубликатов.
+    if local_source_rows:
+        existing_ids = {int(row[0]) for row in existing_source_rows}
+        existing_source_rows.extend(
+            row for row in local_source_rows if int(row[0]) not in existing_ids
+        )
+        existing_source_rows.sort(key=lambda row: int(row[0]))
+
     # EXIF/файловые сведения не хранятся в images.metadata_json для импортов:
     # оригинальное описание строго сохраняется в profiles.raw_json.
     for existing_image_id, _stored_path in existing_source_rows:
@@ -2126,6 +2212,33 @@ def import_image_bundle(
     # images/faces для того же самого источника.
     old_crop_rows = existing_source_rows if overwrite_existing_crops else []
     if existing_source_rows and not overwrite_existing_crops:
+        # Если локальные записи требовали восстановления отсутствующих CROP,
+        # теперь связываем их с импортированным профилем в той же транзакции.
+        if local_source_rows:
+            conn.execute(
+                """
+                UPDATE images
+                SET source_type = 'import',
+                    source_url = ?,
+                    url_image = ?,
+                    profile_id = ?,
+                    source_updated_at = ?,
+                    metadata_json = NULL
+                WHERE source_type = 'local'
+                  AND source_url = ?
+                  AND EXISTS (
+                      SELECT 1 FROM faces f WHERE f.image_id = images.id
+                  )
+                """,
+                (
+                    source_url,
+                    metadata_image_url or fallback_image_url,
+                    profile_id,
+                    time.strftime("%Y-%m-%d %H:%M:%S"),
+                    fallback_image_url,
+                ),
+            )
+
         # _upsert_import_profile мог обновить профиль. Фиксируем транзакцию до
         # выхода из функции, пока блокировка данного url_source ещё удерживается.
         conn.commit()
