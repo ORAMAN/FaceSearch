@@ -1707,6 +1707,7 @@ def _find_existing_source_crop_rows(
     profile_id: int | None = None,
     url_image: str | None = None,
     fallback_image_url: str | None = None,
+    source_key: str | None = None,
     include_metadata: bool = False,
 ) -> list[tuple]:
     """Находит CROP-записи; для локального fast-path может вернуть metadata_json."""
@@ -1732,18 +1733,39 @@ def _find_existing_source_crop_rows(
     else:
         if profile_id is None:
             return []
-        if url_image:
+        rows = []
+        if source_key:
             rows = conn.execute(
                 """
-                SELECT id, path
-                FROM images
-                WHERE source_type = 'import'
-                  AND profile_id = ? AND url_image = ?
+                SELECT id, path FROM images
+                WHERE source_type = 'import' AND profile_id = ? AND source_key = ?
                 ORDER BY id
                 """,
-                (int(profile_id), url_image),
+                (int(profile_id), source_key),
             ).fetchall()
-        else:
+        # Legacy rows without source_key may be claimed only via the exact prior
+        # URL inside the same profile. Never steal rows already assigned elsewhere.
+        if not rows and url_image:
+            if source_key:
+                rows = conn.execute(
+                    """
+                    SELECT id, path FROM images
+                    WHERE source_type = 'import' AND profile_id = ? AND url_image = ?
+                      AND (source_key IS NULL OR source_key = '')
+                    ORDER BY id
+                    """,
+                    (int(profile_id), url_image),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, path FROM images
+                    WHERE source_type = 'import' AND profile_id = ? AND url_image = ?
+                    ORDER BY id
+                    """,
+                    (int(profile_id), url_image),
+                ).fetchall()
+        if not rows and not url_image:
             # Без url_image профильная ссылка source_url не позволяет определить,
             # какая исходная фотография породила CROP: у одного профиля может быть
             # сотни фотографий. Нельзя связывать все строки с NULL url_image с
@@ -1976,6 +1998,7 @@ def import_image_bundle(
     create_crop_files: bool = True,
     overwrite_existing_crops: bool = False,
     metadata: Any | None = None,
+    source_key: str | None = None,
 ) -> dict[str, int | bool | str]:
 
     delete_source = bool(delete_source)
@@ -1997,6 +2020,7 @@ def import_image_bundle(
 
     source_url = str(metadata.get("url_source") or "").strip() or None
     metadata_image_url = str(metadata.get("url_image") or "").strip() or None
+    source_key = str(source_key or "").strip() or None
     fallback_image_url = ""
     try:
         fallback_image_url = image_path.resolve().as_uri()
@@ -2047,6 +2071,7 @@ def import_image_bundle(
             SET source_type = 'import',
                 source_url = ?,
                 url_image = ?,
+                source_key = COALESCE(?, source_key),
                 profile_id = ?,
                 source_updated_at = ?,
                 metadata_json = NULL
@@ -2056,7 +2081,7 @@ def import_image_bundle(
                   SELECT 1 FROM faces f WHERE f.image_id = images.id
               )
             """,
-            (source_url, image_url, profile_id, timestamp, fallback_image_url),
+            (source_url, image_url, source_key, profile_id, timestamp, fallback_image_url),
         )
         promoted_count = int(updated.rowcount or len(local_source_rows))
         conn.commit()
@@ -2098,6 +2123,7 @@ def import_image_bundle(
                 profile_id=pre_profile_id,
                 url_image=metadata_image_url,
                 fallback_image_url=fallback_image_url,
+                source_key=source_key,
             )
 
             if preexisting_source_rows:
@@ -2112,14 +2138,22 @@ def import_image_bundle(
                 if not create_crop_files or not missing_rows:
                     # Стираем EXIF JSON, записанный старыми версиями. Для
                     # импортированных фотографий источник истины — profiles.raw_json.
+                    # Обновляем метаданные и URL на существующих строках, сохраняя
+                    # идентификаторы, файлы CROP и связанные embeddings.
+                    profile_id = _upsert_import_profile(conn, metadata)
+                    image_url = metadata_image_url or fallback_image_url
+                    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
                     for existing_image_id, _stored_path in preexisting_source_rows:
                         conn.execute(
-                            "UPDATE images SET metadata_json = NULL "
-                            "WHERE id = ? AND metadata_json IS NOT NULL",
-                            (int(existing_image_id),),
+                            """UPDATE images
+                               SET source_key = COALESCE(?, source_key),
+                                   source_url = ?, url_image = ?, profile_id = ?,
+                                   source_updated_at = ?, metadata_json = NULL
+                               WHERE id = ?""",
+                            (source_key, source_url, image_url, profile_id, timestamp,
+                             int(existing_image_id)),
                         )
                     # Пропускаем повторное чтение изображения и inference.
-                    _upsert_import_profile(conn, metadata)
                     conn.commit()
                     deleted = (
                         _delete_processed_source_files(image_path, json_path)
@@ -2181,6 +2215,7 @@ def import_image_bundle(
             profile_id=profile_id,
             url_image=metadata_image_url,
             fallback_image_url=fallback_image_url,
+            source_key=source_key,
         )
 
     # Если CROP отсутствовали и выше нельзя было выполнить быстрый путь, но
@@ -2221,6 +2256,7 @@ def import_image_bundle(
                 SET source_type = 'import',
                     source_url = ?,
                     url_image = ?,
+                    source_key = COALESCE(?, source_key),
                     profile_id = ?,
                     source_updated_at = ?,
                     metadata_json = NULL
@@ -2233,10 +2269,25 @@ def import_image_bundle(
                 (
                     source_url,
                     metadata_image_url or fallback_image_url,
+                    source_key,
                     profile_id,
                     time.strftime("%Y-%m-%d %H:%M:%S"),
                     fallback_image_url,
                 ),
+            )
+
+        # Синхронизируем URL и идентификатор источника на существующих строках.
+        # ID, пути CROP и embeddings не удаляются и не пересоздаются.
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        for existing_image_id, _stored_path in existing_source_rows:
+            conn.execute(
+                """UPDATE images
+                   SET source_key = COALESCE(?, source_key), source_url = ?,
+                       url_image = ?, profile_id = ?, source_updated_at = ?,
+                       metadata_json = NULL
+                   WHERE id = ?""",
+                (source_key, source_url, metadata_image_url or fallback_image_url,
+                 profile_id, timestamp, int(existing_image_id)),
             )
 
         # _upsert_import_profile мог обновить профиль. Фиксируем транзакцию до
@@ -2321,13 +2372,14 @@ def import_image_bundle(
                     UPDATE images
                     SET path = ?, filename = ?, sha256 = ?, width = ?, height = ?,
                         processed = 1, source_type = 'import', source_url = ?,
-                        url_image = ?, profile_id = ?, source_updated_at = ?
+                        url_image = ?, source_key = COALESCE(?, source_key),
+                        profile_id = ?, source_updated_at = ?
                     WHERE id = ?
                     """,
                     (
                         _relative_crop_db_path(crop_path), crop_path.name, sha256,
                         int(crop.shape[1]), int(crop.shape[0]), source_url,
-                        image_url, profile_id, timestamp, image_id,
+                        image_url, source_key, profile_id, timestamp, image_id,
                     ),
                 )
             else:
@@ -2338,13 +2390,13 @@ def import_image_bundle(
                     """
                     INSERT INTO images (
                         path, filename, sha256, width, height, processed,
-                        source_type, source_url, url_image, profile_id, source_updated_at
+                        source_type, source_url, url_image, source_key, profile_id, source_updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, 0, 'import', ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, 0, 'import', ?, ?, ?, ?, ?)
                     """,
                     (
                         temp_name, temp_name, sha256, int(crop.shape[1]),
-                        int(crop.shape[0]), source_url, image_url, profile_id, timestamp,
+                        int(crop.shape[0]), source_url, image_url, source_key, profile_id, timestamp,
                     ),
                 )
                 image_id = int(cur.lastrowid)
