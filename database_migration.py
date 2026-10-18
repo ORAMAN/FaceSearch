@@ -553,7 +553,7 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
                 if pending:
                     insert_cols = [c for c in (
                         "path", "filename", "sha256", "width", "height", "processed",
-                        "source_type", "source_url", "url_image", "profile_id", "source_updated_at",
+                        "source_type", "source_url", "url_image", "source_key", "profile_id", "source_updated_at",
                     ) if c in dest_image_cols]
                     payload = []
                     for row in pending:
