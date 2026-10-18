@@ -440,6 +440,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .card-info .info-name{color:var(--link);font-size:15px;font-weight:700;margin-bottom:5px}
 .card-info-row + .card-info-row{margin-top:3px}
 .card-info-row b{font-weight:650}
+.card-info-row a{color:var(--link);text-decoration:underline;text-underline-offset:2px}
+.card-info-row a:hover{text-decoration-thickness:2px}
 .card-buttons{display:flex;gap:7px;margin-top:12px}
 .card-button{display:flex;flex:1 1 0;min-width:0;align-items:center;justify-content:center;text-align:center;overflow-wrap:anywhere;padding:8px 10px;background:var(--secondary);color:var(--button-text);text-decoration:none;border:1px solid var(--button-line);border-radius:6px;font-size:13px}
 .card-button:hover{background:var(--secondary-hover)}
@@ -1009,6 +1011,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     file_size_bytes:"Размер файла",camera_make:"Производитель камеры",
     camera_model:"Камера",lens_model:"Объектив",exposure_time:"Выдержка",
     f_number:"Диафрагма f/",iso:"ISO",focal_length_mm:"Фокусное расстояние, мм",
+    gps_latitude:"Широта",gps_longitude:"Долгота",gps_altitude_m:"Высота над уровнем моря",
     artist:"Автор",copyright:"Авторские права",description:"Описание",software:"ПО"
   };
   function displayValue(value){
@@ -1017,6 +1020,87 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       try{return JSON.stringify(value);}catch(e){return String(value);}
     }
     return String(value);
+  }
+  function normalizedGeoKey(key){
+    return String(key||"").toLowerCase().replace(/[^a-z0-9а-яё]/gi,"");
+  }
+  function geoFieldType(key){
+    const normalized=normalizedGeoKey(key);
+    if(["gpslatitude","latitude","lat","широта","gpsширота"].includes(normalized))return "latitude";
+    if(["gpslongitude","longitude","long","lon","lng","долгота","gpsдолгота"].includes(normalized))return "longitude";
+    if([
+      "gpsaltitudem","gpsaltitude","altitudem","altitude","elevation","elevationm",
+      "heightabovesealevel","высота","gpsвысота","высотанадуровнемморя","высотанадморем"
+    ].includes(normalized))return "altitude";
+    if([
+      "gpscoordinates","gpscoordinate","coordinates","coordinate","coords",
+      "координаты","координатыgps","геокоординаты","географическиекоординаты"
+    ].includes(normalized))return "coordinates";
+    return "";
+  }
+  function geoNumber(value){
+    if(typeof value==="number")return Number.isFinite(value)?value:null;
+    if(typeof value!=="string"||!value.trim())return null;
+    const number=Number(value.trim().replace(",","."));
+    return Number.isFinite(number)?number:null;
+  }
+  function parseCoordinatePair(value){
+    if(Array.isArray(value)&&value.length>=2){
+      return {latitude:geoNumber(value[0]),longitude:geoNumber(value[1])};
+    }
+    if(value&&typeof value==="object"){
+      const latitude=value.latitude??value.lat??value.gps_latitude;
+      const longitude=value.longitude??value.lon??value.lng??value.gps_longitude;
+      return {latitude:geoNumber(latitude),longitude:geoNumber(longitude)};
+    }
+    const text=String(value??"").trim();
+    const semicolonParts=text.split(/[;|]/).map(function(part){return part.trim();});
+    if(semicolonParts.length===2){
+      const latitude=geoNumber(semicolonParts[0]),longitude=geoNumber(semicolonParts[1]);
+      if(latitude!==null&&longitude!==null)return {latitude,longitude};
+    }
+    const matches=text.match(/[+-]?\d+(?:\.\d+)?/g)||[];
+    return {
+      latitude:matches.length>=2?geoNumber(matches[0]):null,
+      longitude:matches.length>=2?geoNumber(matches[1]):null
+    };
+  }
+  function getGeoInfo(entries){
+    let latitude=null,longitude=null,altitude=null;
+    let latitudeKey="",longitudeKey="",altitudeKey="";
+    const coordinateEntries=[];
+    entries.forEach(function(pair){
+      const key=pair[0],value=pair[1],type=geoFieldType(key);
+      if(type==="latitude"){
+        latitude=geoNumber(value);
+        latitudeKey=key;
+      }else if(type==="longitude"){
+        longitude=geoNumber(value);
+        longitudeKey=key;
+      }else if(type==="altitude"){
+        altitude=geoNumber(value);
+        altitudeKey=key;
+      }else if(type==="coordinates"){
+        coordinateEntries.push([key,value]);
+      }
+    });
+    if(latitude===null||longitude===null){
+      for(const pair of coordinateEntries){
+        const parsed=parseCoordinatePair(pair[1]);
+        if(parsed.latitude!==null&&parsed.longitude!==null){
+          latitude=parsed.latitude;
+          longitude=parsed.longitude;
+          break;
+        }
+      }
+    }
+    const validCoordinates=latitude!==null&&longitude!==null&&
+      latitude>=-90&&latitude<=90&&longitude>=-180&&longitude<=180;
+    return {
+      latitude,longitude,altitude,latitudeKey,longitudeKey,altitudeKey,
+      coordinateKeys:coordinateEntries.map(function(pair){return pair[0];}),
+      validCoordinates
+    };
   }
   function addInfoBox(body,name,info,isLocal){
     const entries=Object.entries(info&&typeof info==="object"?info:{}).filter(function(pair){
@@ -1028,20 +1112,38 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       const heading=document.createElement("div");heading.className="info-name";
       heading.textContent=name;box.appendChild(heading);
     }
+    const geo=getGeoInfo(entries);
+    if(geo.validCoordinates){
+      const row=document.createElement("div");row.className="card-info-row";
+      const label=document.createElement("b");label.textContent="Координаты: ";
+      const link=document.createElement("a");
+      const lat=geo.latitude.toFixed(6),lon=geo.longitude.toFixed(6);
+      link.href="https://www.openstreetmap.org/?mlat="+encodeURIComponent(lat)+
+        "&mlon="+encodeURIComponent(lon)+"#map=16/"+lat+"/"+lon;
+      link.target="_blank";link.rel="noopener noreferrer";
+      link.textContent=lat+", "+lon+" · открыть карту";
+      link.title="Показать координаты на карте OpenStreetMap";
+      row.append(label,link);box.appendChild(row);
+    }
     const ordered=isLocal?entries.sort(function(a,b){
       const ai=Object.keys(LOCAL_INFO_LABELS).indexOf(a[0]);
       const bi=Object.keys(LOCAL_INFO_LABELS).indexOf(b[0]);
       return (ai<0?999:ai)-(bi<0?999:bi);
     }):entries;
     ordered.forEach(function(pair){
-      const key=pair[0],value=pair[1];
+      const key=pair[0],value=pair[1],type=geoFieldType(key);
       if(isLocal&&!Object.prototype.hasOwnProperty.call(LOCAL_INFO_LABELS,key))return;
+      if(geo.validCoordinates&&(type==="latitude"||type==="longitude"||type==="coordinates"))return;
       const row=document.createElement("div");row.className="card-info-row";
       const label=document.createElement("b");
-      label.textContent=(isLocal?LOCAL_INFO_LABELS[key]:key)+": ";
+      const labelText=type==="altitude"?"Высота над уровнем моря":(isLocal?LOCAL_INFO_LABELS[key]:key);
+      label.textContent=labelText+": ";
       const text=document.createElement("span");
       let rendered=displayValue(value);
-      if(isLocal&&key==="file_size_bytes"){
+      if(type==="altitude"){
+        const altitude=geoNumber(value);
+        if(altitude!==null)rendered=String(altitude)+" м";
+      }else if(isLocal&&key==="file_size_bytes"){
         const size=Number(value);
         if(Number.isFinite(size))rendered=size>=1048576?(size/1048576).toFixed(2)+" МБ":(size/1024).toFixed(1)+" КБ";
       }else if(isLocal&&(key==="image_width"||key==="image_height")){
