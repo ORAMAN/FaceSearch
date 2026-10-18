@@ -1030,7 +1030,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     if(["gpslongitude","longitude","long","lon","lng","долгота","gpsдолгота"].includes(normalized))return "longitude";
     if([
       "gpsaltitudem","gpsaltitude","altitudem","altitude","elevation","elevationm",
-      "heightabovesealevel","высота","gpsвысота","высотанадуровнемморя","высотанадморем"
+      "height","heightm","heightabovesealevel","gpsвысота","высота","высотанадуровнемморя","высотанадморем"
     ].includes(normalized))return "altitude";
     if([
       "gpscoordinates","gpscoordinate","coordinates","coordinate","coords",
@@ -1113,13 +1113,15 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       heading.textContent=name;box.appendChild(heading);
     }
     const geo=getGeoInfo(entries);
+    let mapUrl="";
     if(geo.validCoordinates){
       const row=document.createElement("div");row.className="card-info-row";
       const label=document.createElement("b");label.textContent="Координаты: ";
       const link=document.createElement("a");
       const lat=geo.latitude.toFixed(6),lon=geo.longitude.toFixed(6);
-      link.href="https://www.openstreetmap.org/?mlat="+encodeURIComponent(lat)+
+      mapUrl="https://www.openstreetmap.org/?mlat="+encodeURIComponent(lat)+
         "&mlon="+encodeURIComponent(lon)+"#map=16/"+lat+"/"+lon;
+      link.href=mapUrl;
       link.target="_blank";link.rel="noopener noreferrer";
       link.textContent=lat+", "+lon+" · открыть карту";
       link.title="Показать координаты на карте OpenStreetMap";
@@ -1132,7 +1134,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     }):entries;
     ordered.forEach(function(pair){
       const key=pair[0],value=pair[1],type=geoFieldType(key);
-      if(isLocal&&!Object.prototype.hasOwnProperty.call(LOCAL_INFO_LABELS,key))return;
+      if(isLocal&&!Object.prototype.hasOwnProperty.call(LOCAL_INFO_LABELS,key)&&type!=="altitude")return;
       if(geo.validCoordinates&&(type==="latitude"||type==="longitude"||type==="coordinates"))return;
       const row=document.createElement("div");row.className="card-info-row";
       const label=document.createElement("b");
@@ -1149,7 +1151,15 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       }else if(isLocal&&(key==="image_width"||key==="image_height")){
         rendered+=" px";
       }
-      text.textContent=rendered;row.append(label,text);box.appendChild(row);
+      if(type==="altitude"&&geo.validCoordinates){
+        const altitudeLink=document.createElement("a");
+        altitudeLink.href=mapUrl;altitudeLink.target="_blank";altitudeLink.rel="noopener noreferrer";
+        altitudeLink.textContent=rendered;altitudeLink.title="Показать место съёмки на карте OpenStreetMap";
+        row.append(label,altitudeLink);
+      }else{
+        text.textContent=rendered;row.append(label,text);
+      }
+      box.appendChild(row);
     });
     body.appendChild(box);
   }
