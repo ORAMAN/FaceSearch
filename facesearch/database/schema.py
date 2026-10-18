@@ -355,6 +355,7 @@ def initialize_schema(
                 source_type {short_type} NOT NULL DEFAULT 'local',
                 source_url {path_type},
                 url_image {path_type},
+                source_key {short_type},
                 profile_id BIGINT,
                 source_updated_at {short_type},
                 metadata_json {json_type},
@@ -387,8 +388,9 @@ def initialize_schema(
         ensure_columns(conn, "images", IMAGE_COLUMNS)
         backfill_import_image_urls(conn)
 
-    # Метаданные изображения добавляются и в уже существующие базы всех СУБД.
-    ensure_columns(conn, "images", {"metadata_json": json_type})
+    # Добавляем служебные поля во все существующие СУБД.
+    # source_key связывает фотографию источника с её CROP независимо от CDN URL.
+    ensure_columns(conn, "images", {"metadata_json": json_type, "source_key": short_type})
 
     # Приводим ранее записанные плоские EXIF-объекты к единой оболочке JSON.
     # Миграция помечается как выполненная и не повторяется при каждом запуске.
@@ -403,6 +405,7 @@ def initialize_schema(
         ("idx_faces_image_id", "faces", "image_id"),
         ("idx_images_profile_id", "images", "profile_id"),
         ("idx_images_source_type", "images", "source_type"),
+        ("idx_images_source_key", "images", "source_key"),
         ("idx_profiles_vk_user_id", "profiles", "vk_user_id"),
         ("idx_profiles_city", "profiles", "city_title"),
     ]
