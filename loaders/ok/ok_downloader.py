@@ -690,32 +690,47 @@ def find_photos_page(context):
 # ============================ Сбор photo_id + preview + href ============================
 
 def collect_photo_entries(page) -> dict[str, dict]:
-    """Возвращает {photo_id: {"preview": url, "href": "/dk?..."}}.
-    href — готовый URL лайтбокса со всеми параметрами."""
-    return page.evaluate("""() => {
+    """Возвращает {photo_id: {preview, href}} для старой и новой разметки OK.ru.
+
+    У страниц друзей часто используется .photo-card, а у фотографий
+    авторизованного пользователя — React-разметка .photo_stream_photo-card.
+    У обеих карточек берём data-id, URL изображения и ссылку на PopLayerPhoto.
+    """
+    return page.evaluate(r"""() => {
         const out = {};
-        for (const card of document.querySelectorAll('.photo-card')) {
-            const id = card.getAttribute('data-id');
+        const cardSelector = '.photo-card[data-id], .photo_stream_photo-card[data-id]';
+        const root = document.querySelector('div.photo-stream')
+            || document.querySelector('photo-stream')
+            || document.querySelector('[data-tsid="photo_stream_block"]');
+        const cards = root
+            ? root.querySelectorAll(cardSelector)
+            : document.querySelectorAll(cardSelector);
+
+        for (const card of cards) {
+            const id = (card.getAttribute('data-id') || '').trim();
             if (!id) continue;
 
-            const img = card.querySelector('img.va_target, img');
-
-            let a = card.querySelector('a[href*="PopLayerPhoto"]');
-            if (!a) a = card.querySelector('a.photo-card_cnt');
-            if (!a) a = card.querySelector('a');
+            const img = card.querySelector('img.va_target, img.photo_stream_photo-img2, img');
+            const a = card.querySelector(
+                'a[href*="PopLayerPhoto"], a[href*="poplayerphoto"], a.photo-card_cnt, a'
+            );
 
             const entry = {};
             if (img) {
-                entry.preview = img.currentSrc || img.getAttribute('data-original') || img.getAttribute('data-original-src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('src') || img.getAttribute('data-url') || '';
+                entry.preview = img.currentSrc
+                    || img.getAttribute('data-original')
+                    || img.getAttribute('data-original-src')
+                    || img.getAttribute('data-src')
+                    || img.getAttribute('data-lazy-src')
+                    || img.getAttribute('data-url')
+                    || img.getAttribute('src')
+                    || '';
             }
-            if (a) {
-                entry.href = a.getAttribute('href') || '';
-            }
+            if (a) entry.href = a.getAttribute('href') || '';
             if (entry.preview || entry.href) out[id] = entry;
         }
         return out;
     }""")
-
 
 def collect_photo_entries_with_scroll(page, status_callback=None) -> dict[str, dict]:
     """Собирает фотографии с ленивой подгрузкой и рано заканчивает на простое."""
@@ -748,7 +763,9 @@ def collect_photo_entries_with_scroll(page, status_callback=None) -> dict[str, d
             # Ждём появления следующего photo_id, но не блокируемся надолго на медленной сети.
             try:
                 page.wait_for_function("""(known) => {
-                    for (const card of document.querySelectorAll('.photo-card')) {
+                    for (const card of document.querySelectorAll(
+                        '.photo-card[data-id], .photo_stream_photo-card[data-id]'
+                    )) {
                         const id = card.getAttribute('data-id');
                         if (id && !known.includes(id)) return true;
                     }
@@ -1564,7 +1581,7 @@ def collect_photos(
     entries = collect_photo_entries_with_scroll(page, status_callback)
 
     if not entries:
-        status_callback("Не удалось собрать photo_id с .photo-card.")
+        status_callback("Не удалось собрать фотографии: не найдены карточки .photo-card или .photo_stream_photo-card.")
         report_progress(0, 1, "Операция не выполнена: фотографии не найдены")
         return
 
