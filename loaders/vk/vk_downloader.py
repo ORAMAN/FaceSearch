@@ -1,0 +1,1812 @@
+# Получить токен:
+# https://id.vk.ru/auth?return_auth_hash=1f3f97d3e974a20acf&redirect_uri=https%3A%2F%2Foauth.vk.ru%2Fblank.html&redirect_uri_hash=96188d4fed90d04a34&force_hash=1&app_id=8101047&response_type=token&code_challenge=&code_challenge_method=&scope=327684&state=
+
+import os
+import re
+import sys
+import json
+import time
+import queue
+import threading
+import webbrowser
+import importlib
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from urllib.parse import urlparse, urlsplit, parse_qs, unquote
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import requests
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+
+# === ПАРАМЕТРЫ === #
+APP_DIR = Path(__file__).resolve().parent
+VK_TOKEN_FILE = APP_DIR / "vk_token.txt"
+LOG_FILE = APP_DIR / "Log.txt"
+DEFAULT_OUTPUT_DIR = APP_DIR / "VK_Downloads"
+APP_SETTINGS_PATH = APP_DIR / "vk_downloader_settings.json"
+DEFAULT_FACESEARCH_DIR = Path(r"C:\FaceSearch")
+_META_RESOLUTION = "_url_resolution"
+_META_VERSION = "_resolution_version"
+_META_DUPLICATE_OF = "_duplicate_of"
+_META_DUPLICATE_REASON = "_duplicate_reason"
+API_VERSION = "5.199"
+BASE_URL = "https://api.vk.com/method"
+FRIENDS_PAGE_SIZE = 5000
+
+# Старый URL VK ID, предоставленный пользователем. response_type=token — implicit flow;
+# если VK изменит параметры авторизации, токен можно будет вставить вручную в диалог.
+AUTH_URL = (
+    "https://id.vk.ru/auth?return_auth_hash=1f3f97d3e974a20acf"
+    "&redirect_uri=https%3A%2F%2Foauth.vk.ru%2Fblank.html"
+    "&redirect_uri_hash=96188d4fed90d04a34&force_hash=1&app_id=8101047"
+    "&response_type=token&code_challenge=&code_challenge_method=&scope=327684&state="
+)
+UI_EVENTS = None
+STOP_REQUESTED = threading.Event()
+_TOKEN_FILE_LOCK = threading.Lock()
+# === ========= === #
+
+# ============================================================
+# ACCESS_TOKENS
+# ============================================================
+
+count_tokens = 0
+current_token = 0
+_TOKEN_LIST = []
+_TOKEN_LOCK = threading.Lock()
+
+
+def _read_token_file() -> list[str]:
+    """Читает токены из vk_token.txt без дублирования и пустых строк."""
+    if not VK_TOKEN_FILE.exists():
+        return []
+    tokens = []
+    seen = set()
+    for line in VK_TOKEN_FILE.read_text(encoding="utf-8-sig").splitlines():
+        token = line.strip()
+        if not token or token.startswith("#") or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+    return tokens
+
+
+def reload_token_cache() -> int:
+    """Сбрасывает кэш токенов, например после добавления нового токена."""
+    global _TOKEN_LIST, count_tokens, current_token
+    tokens = _read_token_file()
+    with _TOKEN_LOCK:
+        _TOKEN_LIST = tokens
+        count_tokens = len(tokens)
+        current_token = 0
+    return len(tokens)
+
+
+def _load_tokens_if_needed():
+    """Загружает токены из файла только тогда, когда кэш пуст."""
+    global _TOKEN_LIST, count_tokens, current_token
+    if _TOKEN_LIST:
+        return
+    tokens = _read_token_file()
+    if not tokens:
+        raise RuntimeError(
+            f"В {VK_TOKEN_FILE.name} нет токенов. Добавьте токен через кнопку авторизации."
+        )
+    with _TOKEN_LOCK:
+        if not _TOKEN_LIST:
+            _TOKEN_LIST = tokens
+            count_tokens = len(tokens)
+            current_token = 0
+
+
+def reload_tokens():
+    """Возвращает следующий токен из vk_token.txt по кругу."""
+    global current_token
+    _load_tokens_if_needed()
+    with _TOKEN_LOCK:
+        token = _TOKEN_LIST[current_token]
+        current_token = (current_token + 1) % len(_TOKEN_LIST)
+        return token
+
+
+def extract_access_token(value: str) -> str:
+    """Извлекает access_token из redirect URL или принимает токен как обычную строку."""
+    value = unquote((value or "").strip())
+    if not value:
+        return ""
+
+    # Сначала разбираем URL целиком: VK обычно возвращает токен во fragment после #.
+    try:
+        parsed = urlsplit(value)
+        for query in (parsed.fragment, parsed.query):
+            params = parse_qs(query, keep_blank_values=False)
+            if params.get("access_token"):
+                return params["access_token"][0].strip()
+            # Поддержка имён access_token_<community_id>.
+            for key, values in params.items():
+                if key.startswith("access_token_") and values:
+                    return values[0].strip()
+    except Exception:
+        pass
+
+    match = re.search(r"(?:^|[&#?\s])access_token(?:_[^=&#\s]+)?=([^&#\s]+)", value)
+    if match:
+        return unquote(match.group(1)).strip()
+
+    # Если вставили именно токен, а не URL/параметр.
+    if " " not in value and "access_token=" not in value and "://" not in value:
+        return value
+    return ""
+
+
+def validate_access_token(token: str) -> str:
+    """Проверяет токен небольшим запросом users.get и возвращает имя пользователя."""
+    response = requests.get(
+        f"{BASE_URL}/users.get",
+        params={"access_token": token, "v": API_VERSION},
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    error = payload.get("error")
+    if error:
+        raise RuntimeError(
+            f"VK API отклонил токен: {error.get('error_msg', error)} "
+            f"(код {error.get('error_code', '?')})."
+        )
+    users = payload.get("response") or []
+    if not users:
+        raise RuntimeError("VK API не вернул пользователя для проверки токена.")
+    user = users[0]
+    return f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or str(user.get("id", ""))
+
+
+def save_access_token(token: str) -> tuple[bool, int]:
+    """Добавляет токен в vk_token.txt, не создавая повторов."""
+    token = (token or "").strip()
+    if not token:
+        raise ValueError("Токен пустой.")
+    with _TOKEN_FILE_LOCK:
+        existing = _read_token_file()
+        if token in existing:
+            reload_token_cache()
+            return False, len(existing)
+        VK_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = VK_TOKEN_FILE.with_suffix(VK_TOKEN_FILE.suffix + ".tmp")
+        temp_path.write_text("\n".join(existing + [token]) + "\n", encoding="utf-8")
+        temp_path.replace(VK_TOKEN_FILE)
+    count = reload_token_cache()
+    return True, count
+
+
+def post_ui_event(*event):
+    """Передаёт событие в GUI-поток, если интерфейс запущен."""
+    if UI_EVENTS is not None:
+        UI_EVENTS.put(event)
+
+
+# ============================================================
+# УТИЛИТЫ
+# ============================================================
+
+def sanitize_filename(name: str) -> str:
+    """Очистка строки от недопустимых символов (Windows)."""
+    name = re.sub(r'[<>:"/\\|?*]', '_', name)
+    name = name.strip().strip('.')
+    return name[:150]
+
+
+def write_json(path: str, data: dict) -> None:
+    """Атомарно записывает JSON-файл в UTF-8."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def build_entity_json(entity: dict, url_image: str,
+                    album_title: str = None,
+                    album_id: int = None,
+                    is_group: bool = False) -> dict:
+    """
+    Собирает JSON-структуру для пользователя или группы.
+    Структура: url_source, name, url_image, info.
+    """
+    if is_group:
+        gid = abs(int(entity.get("id", 0)))
+        url_source = f"https://vk.com/club{gid}"
+        name = entity.get("name", "") or ""
+
+        info = {}
+        if entity.get("screen_name"):
+            info["Короткое имя"] = entity["screen_name"]
+        if entity.get("members_count") is not None:
+            info["Участников"] = entity["members_count"]
+        if entity.get("status"):
+            info["Статус"] = entity["status"]
+        if entity.get("description"):
+            info["Описание"] = entity["description"]
+    else:
+        uid = entity.get("id")
+        url_source = f"https://vk.com/id{uid}"
+        first = entity.get("first_name", "")
+        last = entity.get("last_name", "")
+        name = f"{first} {last}".strip()
+
+        info = {}
+        bdate = entity.get("bdate")
+        if bdate:
+            info["Дата рождения"] = bdate
+
+        city = entity.get("city", {})
+        if city and city.get("title"):
+            info["Город"] = city["title"]
+
+        home_town = entity.get("home_town")
+        if home_town:
+            info["Страна"] = home_town
+
+        sex = entity.get("sex")
+        if sex == 1:
+            info["Пол"] = "Ж"
+        elif sex == 2:
+            info["Пол"] = "М"
+
+        is_closed = entity.get("is_closed")
+        deactivated = entity.get("deactivated")
+        if deactivated == "deleted":
+            info["Статус"] = "Удалён"
+        elif deactivated == "banned":
+            info["Статус"] = "Заблокирован"
+        elif is_closed:
+            info["Статус"] = "Закрыт"
+        else:
+            info["Статус"] = "Открыт"
+
+    if album_title is not None:
+        info["Альбом"] = album_title
+    if album_id is not None:
+        info["ID альбома"] = album_id
+
+    return {
+        "url_source": url_source,
+        "name": name,
+        "url_image": url_image.replace("&cs=240x240",""),
+        "info": info,
+    }
+
+
+# ============================================================
+# VK API
+# ============================================================
+
+def get_group_info(group_id_or_screen_name: str, session: requests.Session):
+    url = (
+        f"https://api.vk.com/method/groups.getById"
+        f"?group_ids={group_id_or_screen_name}"
+        f"&fields=photo_max_orig,screen_name,description,members_count,status"
+        f"&access_token={reload_tokens()}"
+        f"&v={API_VERSION}"
+    )
+    time.sleep(0.35)
+    resp = session.post(url, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+
+    if "error" in data:
+        raise RuntimeError(
+            f"API error: {data['error']['error_msg']} "
+            f"(code {data['error']['error_code']})"
+        )
+
+    response = data.get("response", {})
+
+    if isinstance(response, dict) and "groups" in response:
+        groups = response["groups"]
+    elif isinstance(response, list):
+        groups = response
+    else:
+        groups = []
+
+    if not groups:
+        raise ValueError(
+            f"Group '{group_id_or_screen_name}' not found, private, or deleted"
+        )
+
+    return groups[0]
+
+
+def get_user_info(user_ids: str, session: requests.Session):
+    url = (
+        f"https://api.vk.com/method/users.get"
+        f"?user_ids={user_ids}"
+        f"&fields=photo_max_orig,city,home_town,sex,bdate,screen_name,deactivated,is_closed"
+        f"&access_token={reload_tokens()}"
+        f"&v={API_VERSION}"
+    )
+    time.sleep(0.35)
+    resp = session.get(url, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    if "error" in data:
+        raise RuntimeError(f"API error: {data['error']}")
+    return data["response"]
+
+
+def get_user_friends(user_id: int, session: requests.Session):
+    """Возвращает доступных друзей пользователя постранично через friends.get.
+
+    Метод friends.get с параметром fields возвращает объекты пользователей.
+    Поля выбраны из поддерживаемого friends.get списка. Список страниц
+    читается через offset, а при ответе только с ID карточки запрашиваются
+    пачками через users.get.
+    """
+    all_items = []
+    offset = 0
+    fields = "bdate,city,sex,status,photo_200_orig,photo_200,photo_50,screen_name"
+
+    while True:
+        params = {
+            "user_id": int(user_id),
+            "offset": offset,
+            "count": FRIENDS_PAGE_SIZE,
+            "fields": fields,
+            "access_token": reload_tokens(),
+            "v": API_VERSION,
+        }
+
+        page_data = None
+        for attempt in range(3):
+            if attempt:
+                time.sleep(0.8 * attempt)
+                params["access_token"] = reload_tokens()
+            else:
+                time.sleep(0.35)
+            resp = session.get(f"{BASE_URL}/friends.get", params=params, timeout=25)
+            resp.raise_for_status()
+            payload = resp.json()
+            error = payload.get("error")
+            if error:
+                code = error.get("error_code")
+                if code in (5, 6, 29) and attempt < 2:
+                    print(f"⚠️ friends.get({user_id}): {error.get('error_msg', error)}; повтор {attempt + 1}/2")
+                    continue
+                raise RuntimeError(
+                    f"friends.get для ID {user_id}: "
+                    f"{error.get('error_msg', error)} (код {code})"
+                )
+            page_data = payload.get("response", {})
+            break
+
+        if page_data is None:
+            break
+
+        # Обычно response — объект {count, items}. Оставляем поддержку
+        # упрощённого ответа со списком на случай отличий API/моков.
+        if isinstance(page_data, list):
+            items = page_data
+            total = len(items)
+        else:
+            items = page_data.get("items", []) or []
+            total = int(page_data.get("count", 0) or 0)
+
+        if not items:
+            break
+
+        if isinstance(items[0], dict):
+            all_items.extend(item for item in items if item.get("id") is not None)
+        else:
+            ids = [str(item) for item in items if str(item).isdigit()]
+            for start in range(0, len(ids), 1000):
+                batch = ids[start:start + 1000]
+                if batch:
+                    all_items.extend(get_user_info(",".join(batch), session))
+
+        offset += len(items)
+        if (total and offset >= total) or len(items) < FRIENDS_PAGE_SIZE:
+            break
+
+    return all_items
+
+
+def get_albums(owner_id: int, session: requests.Session):
+    url = (
+        f"https://api.vk.com/method/photos.getAlbums"
+        f"?owner_id={owner_id}"
+        f"&need_system=1"
+        f"&access_token={reload_tokens()}"
+        f"&v={API_VERSION}"
+    )
+    time.sleep(0.35)
+    resp = session.get(url, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    if "error" in data:
+        raise RuntimeError(f"Albums error: {data['error']}")
+    return data["response"]["items"]
+
+
+def get_user_photos(owner_id: int, session: requests.Session):
+    all_items = []
+    offset = 0
+    while True:
+        url = (
+            f"https://api.vk.com/method/photos.getUserPhotos"
+            f"?user_id={owner_id}"
+            f"&count=1000"
+            f"&offset={offset}"
+            f"&extended=0"
+            f"&access_token={reload_tokens()}"
+            f"&v={API_VERSION}"
+        )
+        time.sleep(0.35)
+        resp = session.get(url, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        if "error" in data:
+            print(f"⚠️ getUserPhotos error: {data['error']}")
+            break
+        items = data["response"]["items"]
+        all_items.extend(items)
+        if len(items) < 1000:
+            break
+        offset += 1000
+    return all_items
+
+
+def get_photos_by_album(owner_id: int, album_id: int, session: requests.Session):
+    all_items = []
+    offset = 0
+    while True:
+        url = (
+            f"https://api.vk.com/method/photos.get"
+            f"?owner_id={owner_id}"
+            f"&album_id={album_id}"
+            f"&count=200"
+            f"&offset={offset}"
+            f"&rev=0"
+            f"&extended=0"
+            f"&photo_sizes=1"
+            f"&access_token={reload_tokens()}"
+            f"&v={API_VERSION}"
+        )
+        time.sleep(0.35)
+        resp = session.post(url, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        if "error" in data:
+            print(f"⚠️ Album {album_id} error: {data['error']}")
+            break
+        items = data["response"]["items"]
+        all_items.extend(items)
+        if len(items) < 200:
+            break
+        offset += 200
+    return all_items
+
+
+def extract_best_url(photo: dict) -> str:
+    if "orig_photo" in photo and "url" in photo["orig_photo"]:
+        return photo["orig_photo"]["url"]
+    if "sizes" in photo and photo["sizes"]:
+        return photo["sizes"][-1]["url"]
+    raise ValueError("No photo URL found")
+
+
+# ============================================================
+# СКАЧИВАНИЕ
+# ============================================================
+
+def download_image(args):
+    """
+    args = (NameUser, user_id, album_name, photo_id, url, base_dir, json_data)
+    Скачивает фото и кладёт рядом одноимённый .json.
+    Возвращает (успех, ошибка, путь_изображения, путь_json).
+    """
+    NameUser, user_id, album_name, photo_id, url, base_dir, json_data = args
+    try:
+        folder = os.path.join(base_dir, album_name)
+        os.makedirs(folder, exist_ok=True)
+
+        parsed = urlparse(url)
+        orig_name = os.path.basename(parsed.path)
+        if not re.search(r"\.(jpg|jpeg|png)$", orig_name, re.I):
+            ext = ".jpg"
+        else:
+            ext = ""
+        safe_name = sanitize_filename(f"{photo_id}_{orig_name}{ext}")
+        filepath = os.path.join(folder, safe_name)
+        json_path = os.path.splitext(filepath)[0] + ".json"
+
+        # Защита от дублей: файл уже есть — не качаем, но JSON допишем.
+        if os.path.exists(filepath) and os.path.getsize(filepath) > 1024:
+            if json_data is not None:
+                try:
+                    write_json(json_path, json_data)
+                except Exception as e:
+                    return False, f"JSON write error: {e}", filepath, json_path
+            return True, None, filepath, json_path
+
+        resp = requests.get(url, timeout=25, stream=True)
+        if resp.status_code != 200:
+            return False, f"HTTP {resp.status_code}", filepath, json_path
+        ct = resp.headers.get("content-type", "").lower()
+        if "image" not in ct and "octet-stream" not in ct:
+            return False, f"Invalid content-type: {ct}", filepath, json_path
+
+        with open(filepath, "wb") as f:
+            for chunk in resp.iter_content(65536):
+                f.write(chunk)
+
+        # JSON рядом с картинкой
+        if json_data is not None:
+            try:
+                write_json(json_path, json_data)
+            except Exception as e:
+                return False, f"JSON write error: {e}", filepath, json_path
+
+        return True, None, filepath, json_path
+
+    except Exception as e:
+        return False, str(e), None, None
+
+
+def save_avatar_to_root(entity: dict, base_dir: str, is_group: bool = False) -> bool:
+    """
+    Сохраняет аватар в корень папки как Avatar.jpg
+    и рядом кладёт Avatar.json.
+    """
+    avatar_url = (
+        entity.get("photo_max_orig") or
+        entity.get("photo_400_orig") or
+        entity.get("photo_200_orig") or
+        entity.get("photo_512") or
+        entity.get("photo_200") or
+        entity.get("photo_100") or
+        ""
+    ).strip()
+
+    if " " in avatar_url:
+        avatar_url = avatar_url.split(" ")[0].strip()
+
+    stubs = [
+        "https://vk.com/images/camera_200.png",
+        "https://vk.com/images/camera_100.png",
+        "https://vk.com/images/deactivated_200.png",
+        "https://vk.com/images/deactivated_cropped_200.png",
+        "https://vk.com/images/question_200.png",
+        "https://vk.com/images/community_200.png",
+    ]
+
+    if not avatar_url or any(avatar_url.startswith(stub) for stub in stubs):
+        return False
+
+    avatar_path = os.path.join(base_dir, "Avatar.jpg")
+    try:
+        resp = requests.get(avatar_url, timeout=20, stream=True)
+        if resp.status_code == 200:
+            ct = resp.headers.get("content-type", "").lower()
+            if "image" in ct or "octet-stream" in ct:
+                with open(avatar_path, "wb") as f:
+                    for chunk in resp.iter_content(65536):
+                        if chunk:
+                            f.write(chunk)
+
+                # JSON для аватара
+                avatar_json = build_entity_json(
+                    entity,
+                    avatar_url,
+                    album_title="Аватар",
+                    album_id=-6,
+                    is_group=is_group,
+                )
+                json_path = os.path.join(base_dir, "Avatar.json")
+                write_json(json_path, avatar_json)
+                return True
+    except Exception as e:
+        print(f"⚠️ Ошибка сохранения аватара: {e}")
+    return False
+
+
+def log_user_processed(NameUser: str, user_id: str, groupe: bool = False):
+    if groupe:
+        user_id = user_id.replace("-", "")
+    log_file = str(LOG_FILE)
+    try:
+        if os.path.exists(log_file):
+            with open(log_file, "r", encoding="utf-8") as f:
+                if groupe:
+                    if any(f"http://vk.com/club{user_id}" in line for line in f):
+                        return
+                else:
+                    if any(f"http://vk.com/id{user_id}" in line for line in f):
+                        return
+        with open(log_file, "a", encoding="utf-8") as f:
+            if groupe:
+                f.write(f"{NameUser}, http://vk.com/club{user_id}\n")
+            else:
+                f.write(f"{NameUser}, http://vk.com/id{user_id}\n")
+    except Exception as e:
+        print(f"⚠️ Log error: {e}")
+
+
+# ============================================================
+# ОПРЕДЕЛЕНИЕ ТИПА СУЩНОСТИ
+# ============================================================
+
+def get_vk_entity(identifier):
+    """
+    Определяет тип сущности по ID (число или строка) или screen_name.
+    Возвращает dict: {'type': 'user'|'group'|'unknown', 'id': ..., 'name': ...}
+    """
+    headers = {'User-Agent': 'VKEntityResolver/1.0'}
+
+    # --- Шаг 1: попытка как число ---
+    try:
+        user_or_group_id = int(identifier)
+        if user_or_group_id < 0:
+            resp = requests.get(f'{BASE_URL}/groups.getById', params={
+                'group_ids': str(-user_or_group_id),
+                'v': API_VERSION,
+                'access_token': reload_tokens(),
+                'fields': 'screen_name'
+            }, headers=headers).json()
+            if 'response' in resp and resp['response']:
+                group = resp['response'][0]
+                return {
+                    'type': 'group',
+                    'id': -group['id'],
+                    'name': group.get('name') or group.get('screen_name')
+                }
+            return {'type': 'unknown', 'id': user_or_group_id, 'name': None}
+        else:
+            resp = requests.get(f'{BASE_URL}/users.get', params={
+                'user_ids': str(user_or_group_id),
+                'v': API_VERSION,
+                'access_token': reload_tokens(),
+                'fields': 'screen_name'
+            }, headers=headers).json()
+            if 'response' in resp and resp['response']:
+                user = resp['response'][0]
+                return {
+                    'type': 'user',
+                    'id': user['id'],
+                    'name': f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or user.get('screen_name')
+                }
+            resp = requests.get(f'{BASE_URL}/groups.getById', params={
+                'group_ids': str(user_or_group_id),
+                'v': API_VERSION,
+                'access_token': reload_tokens(),
+                'fields': 'screen_name'
+            }, headers=headers).json()
+            if 'response' in resp and resp['response']:
+                group = resp['response'][0]
+                return {
+                    'type': 'group',
+                    'id': -group['id'],
+                    'name': group.get('name') or group.get('screen_name')
+                }
+            return {'type': 'unknown', 'id': user_or_group_id, 'name': None}
+    except (ValueError, TypeError):
+        pass
+
+    # --- Шаг 2: resolveScreenName ---
+    resolve_resp = requests.get(f'{BASE_URL}/utils.resolveScreenName', params={
+        'screen_name': str(identifier),
+        'v': API_VERSION,
+        'access_token': reload_tokens()
+    }, headers=headers).json()
+
+    obj = resolve_resp.get('response', {})
+    if obj:
+        obj_type = obj.get('type')
+        obj_id = obj.get('object_id')
+        if obj_type == 'user':
+            return {'type': 'user', 'id': obj_id, 'name': str(identifier)}
+        elif obj_type == 'group':
+            return {'type': 'group', 'id': -obj_id, 'name': str(identifier)}
+        elif obj_type == 'application':
+            return {'type': 'application', 'id': obj_id, 'name': str(identifier)}
+        else:
+            return {'type': 'unknown', 'id': None, 'name': str(identifier)}
+
+    # --- Шаг 3: явно как группа ---
+    group_resp = requests.get(f'{BASE_URL}/groups.getById', params={
+        'group_ids': str(identifier),
+        'v': API_VERSION,
+        'access_token': reload_tokens(),
+        'fields': 'screen_name'
+    }, headers=headers).json()
+    if 'response' in group_resp and group_resp['response']:
+        group = group_resp['response'][0]
+        return {
+            'type': 'group',
+            'id': -group['id'],
+            'name': group.get('name') or group.get('screen_name')
+        }
+
+    # --- Шаг 4: явно как пользователь ---
+    user_resp = requests.get(f'{BASE_URL}/users.get', params={
+        'user_ids': str(identifier),
+        'v': API_VERSION,
+        'access_token': reload_tokens(),
+        'fields': 'screen_name'
+    }, headers=headers).json()
+    if 'response' in user_resp and user_resp['response']:
+        user = user_resp['response'][0]
+        return {
+            'type': 'user',
+            'id': user['id'],
+            'name': f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or user.get('screen_name')
+        }
+
+    return {'type': 'unknown', 'id': None, 'name': str(identifier)}
+
+
+# ============================================================
+# СБОР И СКАЧИВАНИЕ ФОТО (для пользователя или группы)
+# ============================================================
+
+def process_entity(
+    entity: dict, base_dir: str, is_group: bool, MAX_WORKERS: int,
+    importer=None, delete_processed_files: bool = False,
+):
+    """
+    Собирает все фото во всех альбомах + фото с отметками,
+    скачивает их и создаёт JSON к каждому фото и к аватару.
+    """
+    uid = entity.get("id")
+    if is_group:
+        uid = -abs(int(uid))
+        NameUser = entity.get("name", f"group_{uid}")
+        display_id = str(uid)
+    else:
+        uid = int(uid)
+        NameUser = f"{entity.get('last_name', '')} {entity.get('first_name', '')}".strip()
+        display_id = str(uid)
+
+    print(f"\n{'=' * 60}")
+    print(f"👤 {NameUser} | ID: {display_id}")
+
+    # Сохраняем аватар + JSON
+    if save_avatar_to_root(entity, base_dir, is_group=is_group):
+        print("🖼️ Аватар → Avatar.jpg + Avatar.json")
+        if importer is not None:
+            avatar_path = Path(base_dir) / "Avatar.jpg"
+            avatar_json = Path(base_dir) / "Avatar.json"
+            try:
+                importer.import_image(avatar_path, avatar_json, source_key=f"vk:{display_id}:avatar")
+                if delete_processed_files:
+                    avatar_path.unlink(missing_ok=True)
+                    avatar_json.unlink(missing_ok=True)
+            except Exception as exc:
+                print(f"⚠️ Не удалось импортировать аватар в FaceSearch: {exc}")
+    else:
+        print("🖼️ Аватар отсутствует")
+
+    all_photos = []
+
+    with requests.Session() as session:
+        try:
+            albums = get_albums(uid, session)
+        except Exception as e:
+            print(f"⚠️ Не удалось получить альбомы: {e}")
+            albums = []
+
+        for album in albums:
+            if STOP_REQUESTED.is_set():
+                print("🛑 Пропускаем оставшиеся альбомы по запросу остановки.")
+                break
+            aid = album["id"]
+            title = str(album.get("title", f"album_{aid}")).strip()
+
+            # Не загружаем системный альбом «Сохранённые».
+            # Проверяем и системный ID (-15), и название на случай различий в ответе API.
+            if aid == -15 or title.casefold() == "сохранённые":
+                print(f"   ⏭️ Пропускаем системный альбом '{title or 'Сохранённые'}' (ID {aid})")
+                continue
+
+            size = album.get("size", 0)
+            if size == 0:
+                continue
+
+            if aid == -6:
+                title = "Аватар"
+            elif aid == -7:
+                title = "Фотографии со страницы"
+            elif aid == -17:
+                title = "Видео обложки"
+            elif aid == -9000:
+                title = "Фото с отметками"
+
+            album_name_clean = sanitize_filename(title) or f"album_{aid}"
+
+            print(f"   📁 '{title}' — {size} фото")
+            photos = get_photos_by_album(uid, aid, session)
+            for p in photos:
+                try:
+                    url = extract_best_url(p)
+                except Exception:
+                    continue
+
+                json_data = build_entity_json(
+                    entity, url,
+                    album_title=title,
+                    album_id=aid,
+                    is_group=is_group,
+                )
+                all_photos.append((
+                    NameUser, display_id, album_name_clean,
+                    str(p["id"]), url, base_dir, json_data,
+                ))
+
+        # Фото с отметками
+        print("👥 Загружаем фото с отметками...")
+        try:
+            user_photos = get_user_photos(uid, session)
+        except Exception as e:
+            print(f"⚠️ getUserPhotos: {e}")
+            user_photos = []
+
+        if user_photos:
+            marked_name = sanitize_filename("Фото с отметками")
+            for p in user_photos:
+                try:
+                    url = extract_best_url(p)
+                except Exception:
+                    continue
+
+                json_data = build_entity_json(
+                    entity, url,
+                    album_title="Фото с отметками",
+                    album_id=None,
+                    is_group=is_group,
+                )
+                all_photos.append((
+                    NameUser, display_id, marked_name,
+                    str(p["id"]), url, base_dir, json_data,
+                ))
+
+    print(f"\n📥 Всего к загрузке: {len(all_photos)} фото")
+
+    if not all_photos:
+        log_user_processed(NameUser, display_id, is_group)
+        return
+
+    success = 0
+    completed = 0
+    total = len(all_photos)
+    post_ui_event("progress", 0, total, f"[{display_id}] — загрузка фотографий")
+    with ThreadPoolExecutor(max_workers=max(1, int(MAX_WORKERS))) as executor:
+        futures = {executor.submit(download_image, args): args for args in all_photos}
+        for future in as_completed(futures):
+            try:
+                ok, error, image_path, json_path = future.result()
+            except Exception as exc:
+                ok, error, image_path, json_path = False, str(exc), None, None
+            if ok:
+                success += 1
+                if importer is not None and image_path and json_path:
+                    source_key = f"vk:{display_id}:{futures[future][3]}"
+                    try:
+                        importer.import_image(Path(image_path), Path(json_path), source_key=source_key)
+                        if delete_processed_files:
+                            Path(image_path).unlink(missing_ok=True)
+                            Path(json_path).unlink(missing_ok=True)
+                    except Exception as exc:
+                        print(f"⚠️ Фото скачано, но не удалось импортировать его в FaceSearch ({Path(image_path).name}): {exc}")
+            elif error:
+                print(f"⚠️ Не удалось скачать фото: {error}")
+            completed += 1
+            post_ui_event(
+                "progress", completed, total,
+                f"[{display_id}] {NameUser}: загружено {completed} из {total}; успешно {success}"
+            )
+            if STOP_REQUESTED.is_set():
+                for pending in futures:
+                    pending.cancel()
+
+    print(f"\n✅ {NameUser}: {success} / {len(all_photos)}")
+    log_user_processed(NameUser, display_id, is_group)
+
+
+def process_users_with_friends(
+    root_users: list, depth: int, MAX_WORKERS: int,
+    base_output_dir: str | Path | None = None, importer=None,
+    delete_processed_files: bool = False,
+):
+    """Скачивает корневых пользователей и их друзей до заданной глубины.
+
+    depth=0 — только введённые ID; depth=1 — также друзья этих пользователей;
+    depth=2 — дополнительно друзья друзей и т. д. Каждый ID обрабатывается один раз.
+    """
+    output_root = Path(base_output_dir or DEFAULT_OUTPUT_DIR).expanduser().resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    visited = set()
+    current_level = []
+    root_ids = set()
+    for user in root_users:
+        try:
+            uid = int(user.get("id"))
+        except (TypeError, ValueError):
+            continue
+        if uid > 0 and uid not in root_ids:
+            user["_friend_depth"] = 0
+            current_level.append(user)
+            root_ids.add(uid)
+
+    for level in range(depth + 1):
+        if STOP_REQUESTED.is_set():
+            print("🛑 Остановка запрошена; обход друзей прекращается.")
+            break
+        # Убираем повторы на текущем уровне и профили, уже встреченные выше.
+        unique_level = []
+        level_ids = set()
+        for user in current_level:
+            try:
+                uid = int(user.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if uid <= 0 or uid in visited or uid in level_ids:
+                continue
+            level_ids.add(uid)
+            visited.add(uid)
+            unique_level.append(user)
+
+        if not unique_level:
+            print(f"\nℹ️ На уровне {level} новых пользователей нет.")
+            break
+
+        print("\n" + "=" * 68)
+        print(f"👥 Уровень вложенности {level}: пользователей к обработке — {len(unique_level)}")
+        print("=" * 68)
+
+        for index, user in enumerate(unique_level, start=1):
+            if STOP_REQUESTED.is_set():
+                print("🛑 Обработка уровня остановлена по запросу пользователя.")
+                break
+            uid = int(user["id"])
+            user["_friend_depth"] = level
+            name = f"{user.get('last_name', '')} {user.get('first_name', '')}".strip()
+            name = name or user.get("screen_name") or f"user_{uid}"
+            folder_name = sanitize_filename(f"{name} ({uid})")
+            base_dir = str(output_root / folder_name)
+            os.makedirs(base_dir, exist_ok=True)
+            print(f"\n[{index}/{len(unique_level)}] Уровень {level}: {name} (ID {uid})")
+            try:
+                process_entity(
+                    user, base_dir, is_group=False, MAX_WORKERS=MAX_WORKERS,
+                    importer=importer, delete_processed_files=delete_processed_files,
+                )
+            except Exception as e:
+                print(f"💥 Ошибка обработки пользователя {uid}: {e}")
+
+        if level >= depth:
+            break
+
+        next_level = {}
+        print(f"\n🔎 Получаем друзей пользователей уровня {level}...")
+        for index, user in enumerate(unique_level, start=1):
+            if STOP_REQUESTED.is_set():
+                print("🛑 Обработка уровня остановлена по запросу пользователя.")
+                break
+            uid = int(user["id"])
+            try:
+                with requests.Session() as session:
+                    friends = get_user_friends(uid, session)
+                added = 0
+                for friend in friends:
+                    try:
+                        friend_id = int(friend.get("id"))
+                    except (AttributeError, TypeError, ValueError):
+                        continue
+                    if friend_id > 0 and friend_id not in visited and friend_id not in next_level:
+                        friend["_friend_depth"] = level + 1
+                        next_level[friend_id] = friend
+                        added += 1
+                print(f"   [{index}/{len(unique_level)}] ID {uid}: друзей получено {len(friends)}, новых {added}")
+            except Exception as e:
+                print(f"⚠️ Не удалось получить друзей ID {uid}: {e}")
+
+        print(f"✅ Уровень {level + 1}: уникальных пользователей найдено — {len(next_level)}")
+        current_level = list(next_level.values())
+
+    print(f"\n🏁 Обход завершён. Уникальных пользователей обработано: {len(visited)}")
+
+
+# ============================================================
+# ИНТЕГРАЦИЯ С FACESEARCH (необязательная)
+# ============================================================
+
+
+def load_face_search_config(settings_xml: str | Path, profiles_json: str | Path) -> dict:
+    """Определяет активный профиль FaceSearch по settings.xml и database_profiles.json."""
+    settings_path = Path(settings_xml).expanduser().resolve()
+    profiles_path = Path(profiles_json).expanduser().resolve()
+    if not settings_path.is_file():
+        raise FileNotFoundError(f"Не найден settings.xml: {settings_path}")
+    if not profiles_path.is_file():
+        raise FileNotFoundError(f"Не найден database_profiles.json: {profiles_path}")
+    xml_root = ET.parse(settings_path).getroot()
+    data = json.loads(profiles_path.read_text(encoding="utf-8-sig"))
+    profiles = data.get("profiles") if isinstance(data, dict) else None
+    if not isinstance(profiles, list):
+        raise ValueError("В database_profiles.json отсутствует список profiles.")
+    profiles = [item for item in profiles if isinstance(item, dict) and str(item.get("name") or "").strip()]
+    if not profiles:
+        raise ValueError("В database_profiles.json нет профилей.")
+    selected = str(xml_root.findtext("database/profile") or "").strip()
+    active = str(data.get("active") or "").strip()
+    by_name = {str(item.get("name")): item for item in profiles}
+    if active not in by_name:
+        active = selected if selected in by_name else str(profiles[0]["name"])
+    backend = str(xml_root.findtext("compute/backend") or "gpu").strip().lower()
+    root_dir = find_face_search_root(settings_path, profiles_path)
+    return {
+        "settings_path": settings_path,
+        "profiles_path": profiles_path,
+        "active_name": active,
+        "profile": dict(by_name[active]),
+        "backend": backend,
+        "root": root_dir,
+    }
+
+
+def find_face_search_root(settings_path: Path, profiles_path: Path) -> Path:
+    candidates = []
+    for base in (profiles_path.parent, settings_path.parent, APP_DIR):
+        for candidate in (base, *base.parents):
+            if candidate not in candidates:
+                candidates.append(candidate)
+    for candidate in candidates:
+        if (candidate / "face_search_gui.py").is_file() and (candidate / "facesearch").is_dir():
+            return candidate.resolve()
+    raise FileNotFoundError(
+        "Не найден корневой каталог FaceSearch (нужны face_search_gui.py и папка facesearch)."
+    )
+
+
+class FaceSearchImporter:
+    """Импортирует скачанные изображения через штатную функцию FaceSearch."""
+    def __init__(self, facesearch_dir: str | Path, status_callback, create_crop_files: bool = True):
+        self.status_callback = status_callback
+        self.create_crop_files = bool(create_crop_files)
+        directory = Path(facesearch_dir).expanduser()
+        self.config = load_face_search_config(directory / "settings.xml", directory / "database_profiles.json")
+        self.module = self._load_module(self.config["root"])
+        self.conn = None
+        self.app = None
+        self.imported_count = 0
+        profile = self.config["profile"]
+        profile_type = str(profile.get("type") or "sqlite").strip().lower()
+        if profile_type == "sqlite":
+            database_path = Path(str(profile.get("path") or self.config["root"] / "faces.db")).expanduser()
+            if not database_path.is_absolute():
+                database_path = self.config["root"] / database_path
+            if not database_path.is_file():
+                raise FileNotFoundError(f"Активная SQLite-база FaceSearch не найдена: {database_path}")
+            profile["path"] = str(database_path.resolve())
+        target = str(profile.get("database") or profile.get("path") or "")
+        self.status_callback(f"Подключение к FaceSearch: {self.config['active_name']} ({profile_type}: {target})…")
+        try:
+            self.conn = self.module.create_database_for_profile(
+                profile,
+                maintenance=False,
+                create_if_missing=False,
+                activate_storage=True,
+                initialize=False,
+                check_crop_migration=False,
+            )
+            ensure_columns = getattr(self.module, "_ensure_columns", None)
+            if callable(ensure_columns):
+                ensure_columns(self.conn, "images", {"source_key": "VARCHAR(255)"})
+                self.conn.commit()
+            self.conn.execute("SELECT id, source_type, url_image, source_key FROM images WHERE 1 = 0").fetchall()
+        except Exception:
+            if self.conn is not None:
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+                self.conn = None
+            raise
+
+    @staticmethod
+    def _load_module(root: Path):
+        root = root.resolve()
+        existing = sys.modules.get("face_search_gui")
+        if existing is not None and Path(getattr(existing, "__file__", "")).resolve().parent != root:
+            raise RuntimeError("Уже загружен другой face_search_gui.py. Перезапустите загрузчик.")
+        if existing is None:
+            root_text = str(root)
+            if root_text not in sys.path:
+                sys.path.insert(0, root_text)
+            existing = importlib.import_module("face_search_gui")
+        if Path(existing.__file__).resolve().parent != root:
+            raise RuntimeError("FaceSearch загружен не из выбранного каталога.")
+        return existing
+
+    def import_image(self, image_path: Path, json_path: Path, source_key: str):
+        if self.conn is None:
+            raise RuntimeError("Соединение с базой FaceSearch закрыто.")
+        if not image_path.is_file() or not json_path.is_file():
+            raise FileNotFoundError(f"Не найдена пара изображения и JSON: {image_path}")
+        metadata = json.loads(json_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(metadata, dict):
+            raise ValueError(f"Некорректные метаданные: {json_path.name}")
+        if self.app is None:
+            self.status_callback("Инициализация модели распознавания FaceSearch…")
+            backend_value = self.config.get("backend", "gpu")
+            backend = self.module.BACKEND_CPU if backend_value in {"cpu", "processor", "процессор"} else self.module.BACKEND_GPU
+            self.app = self.module.create_face_app(backend=backend)
+        self.status_callback(f"Импорт в FaceSearch: {image_path.name}…")
+        clean = dict(metadata)
+        info = dict(metadata.get("info") or {}) if isinstance(metadata.get("info"), dict) else {}
+        for key in (_META_RESOLUTION, _META_VERSION):
+            info.pop(key, None)
+        clean["info"] = info
+        result = self.module.import_image_bundle(
+            self.conn,
+            self.app,
+            image_path,
+            json_path,
+            delete_source=False,
+            create_crop_files=self.create_crop_files,
+            overwrite_existing_crops=False,
+            metadata=clean,
+            source_key=source_key,
+        )
+        self.imported_count += 1
+        return result
+
+    def build_index(self):
+        if self.conn is None:
+            raise RuntimeError("Соединение с базой FaceSearch закрыто.")
+        builder = getattr(self.module, "build_faiss_index", None)
+        if not callable(builder):
+            raise RuntimeError("В загруженном FaceSearch нет build_faiss_index().")
+        self.status_callback("Создание индекса FAISS…")
+        builder(self.conn)
+        self.status_callback("Индекс FAISS создан.")
+
+    def close(self):
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            finally:
+                self.conn = None
+
+
+# ============================================================
+# GUI + ОРКЕСТРАЦИЯ ЗАДАНИЯ
+# ============================================================
+
+
+def normalize_vk_identifier(value: str) -> str:
+    """Нормализует VK URL, короткое имя или ID для последующего разрешения сущности."""
+    value = (value or "").strip().strip(",; ")
+    if not value:
+        return ""
+    if value.lower().startswith(("http://", "https://")):
+        parsed = urlparse(value)
+        path = unquote(parsed.path).strip("/")
+        parts = [part for part in path.split("/") if part]
+        if not parts:
+            return ""
+        item = parts[0]
+        if item.lower().startswith("id") and item[2:].isdigit():
+            return item[2:]
+        for prefix in ("club", "public", "group"):
+            if item.lower().startswith(prefix) and item[len(prefix):].isdigit():
+                return str(-int(item[len(prefix):]))
+        if item.isdigit():
+            return item
+        return item
+    low = value.lower()
+    if low.startswith("id") and value[2:].isdigit():
+        return value[2:]
+    for prefix in ("club", "public", "group"):
+        if low.startswith(prefix) and value[len(prefix):].isdigit():
+            return str(-int(value[len(prefix):]))
+    return value
+
+
+def run_download_job(raw_input: str, depth: int, max_workers: int, output_dir: str, importer=None, delete_processed_files: bool = False):
+    """Обрабатывает введённые сущности; вызывается из фонового GUI-потока."""
+    _load_tokens_if_needed()
+    identifiers = []
+    seen_inputs = set()
+    for raw in re.split(r"[,;\s]+", raw_input.strip()):
+        item = normalize_vk_identifier(raw)
+        if item and item not in seen_inputs:
+            seen_inputs.add(item)
+            identifiers.append(item)
+    if not identifiers:
+        raise ValueError("Не указаны ID, ссылки или короткие имена VK.")
+
+    output_root = Path(output_dir).expanduser().resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    print(f"🖼️ VK Photo Downloader — каталог: {output_root}")
+    print(f"🔢 Значений для проверки: {len(identifiers)}; глубина: {depth}; потоков скачивания: {max_workers}")
+    post_ui_event("status", "Проверка ID и ссылок VK…")
+
+    users = []
+    groups = []
+    unknowns = []
+    for index, identifier in enumerate(identifiers, start=1):
+        if STOP_REQUESTED.is_set():
+            print("🛑 Задание остановлено до завершения проверки сущностей.")
+            break
+        try:
+            entity = get_vk_entity(identifier)
+            kind = entity.get("type")
+            if kind == "user":
+                try:
+                    uid = int(entity.get("id"))
+                    if uid > 0 and uid not in {int(x) for x in users}:
+                        users.append(str(uid))
+                except (TypeError, ValueError):
+                    unknowns.append(identifier)
+            elif kind == "group":
+                try:
+                    gid = abs(int(entity.get("id")))
+                    if gid and str(gid) not in {str(x) for x in groups}:
+                        groups.append(str(gid))
+                except (TypeError, ValueError):
+                    unknowns.append(identifier)
+            else:
+                unknowns.append(identifier)
+        except Exception as exc:
+            print(f"⚠️ Не удалось определить '{identifier}': {exc}")
+            unknowns.append(identifier)
+        post_ui_event("progress", index, len(identifiers), f"Проверка сущностей: {index}/{len(identifiers)}")
+
+    print(f"✅ Пользователей: {len(users)}; групп: {len(groups)}; не найдено: {len(unknowns)}")
+    if unknowns:
+        print("   Не распознаны: " + ", ".join(unknowns))
+
+    if users and not STOP_REQUESTED.is_set():
+        post_ui_event("status", "Получение данных корневых пользователей…")
+        try:
+            with requests.Session() as session:
+                root_users = get_user_info(",".join(dict.fromkeys(users)), session)
+        except Exception as exc:
+            print(f"❌ Ошибка получения пользователей: {exc}")
+            root_users = []
+        if root_users:
+            process_users_with_friends(
+                root_users,
+                depth=max(0, int(depth)),
+                MAX_WORKERS=max(1, int(max_workers)),
+                base_output_dir=output_root,
+                importer=importer,
+                delete_processed_files=delete_processed_files,
+            )
+        else:
+            print("❌ Пользователи не найдены или API не вернул их данные.")
+
+    if groups and not STOP_REQUESTED.is_set():
+        if depth > 0:
+            print("ℹ️ Глубина вложенности применяется только к пользователям; группы обрабатываются без обхода друзей.")
+        for index, group_id in enumerate(groups, start=1):
+            if STOP_REQUESTED.is_set():
+                break
+            try:
+                post_ui_event("status", f"Получение данных группы {index}/{len(groups)}…")
+                with requests.Session() as session:
+                    group = get_group_info(group_id, session)
+                gid = -abs(int(group["id"]))
+                name = group.get("name") or f"group_{abs(gid)}"
+                folder_name = sanitize_filename(f"{name} ({gid})")
+                base_dir = str(output_root / folder_name)
+                os.makedirs(base_dir, exist_ok=True)
+                process_entity(
+                    group, base_dir, is_group=True, MAX_WORKERS=max_workers,
+                    importer=importer, delete_processed_files=delete_processed_files,
+                )
+            except Exception as exc:
+                print(f"💥 Ошибка обработки группы '{group_id}': {exc}")
+    if STOP_REQUESTED.is_set():
+        print("🛑 Работа остановлена. Уже скачанные файлы сохранены.")
+    else:
+        print("🏁 Задание завершено.")
+
+
+class QueueStream:
+    """Перенаправляет stdout/stderr в очередь GUI без обращения к Tkinter из потоков."""
+    def __init__(self, events, kind="log"):
+        self.events = events
+        self.kind = kind
+        self.local = threading.local()
+
+    def write(self, text):
+        if not text:
+            return 0
+        buffer = getattr(self.local, "buffer", "") + str(text)
+        chunks = re.split(r"(?<=\n)", buffer)
+        if chunks and not chunks[-1].endswith("\n"):
+            self.local.buffer = chunks.pop()
+        else:
+            self.local.buffer = ""
+        for chunk in chunks:
+            if chunk:
+                self.events.put((self.kind, chunk))
+        return len(text)
+
+    def flush(self):
+        buffer = getattr(self.local, "buffer", "")
+        if buffer:
+            self.events.put((self.kind, buffer))
+            self.local.buffer = ""
+
+    def isatty(self):
+        return False
+
+
+def main():
+    global UI_EVENTS
+    events = queue.Queue()
+    UI_EVENTS = events
+
+    root = tk.Tk()
+    root.title("VK.ru — загрузчик фотографий")
+    root.geometry("1100x970")
+    root.minsize(900, 780)
+
+    original_stdout, original_stderr = sys.stdout, sys.stderr
+    sys.stdout = QueueStream(events, "log")
+    sys.stderr = QueueStream(events, "log")
+
+    outer = ttk.Frame(root, padding=12)
+    outer.pack(fill="both", expand=True)
+    outer.columnconfigure(0, weight=1)
+
+    ttk.Label(
+        outer,
+        text="Введите ID, короткие имена или ссылки VK. Для пользователей можно обходить друзей на заданную глубину; скачивание фотографий выполняется многопоточно.",
+        wraplength=980,
+    ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+    source_frame = ttk.LabelFrame(outer, text="Пользователи и группы", padding=8)
+    source_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+    source_frame.columnconfigure(0, weight=1)
+    input_text = tk.Text(source_frame, height=4, wrap="word", undo=True)
+    input_text.grid(row=0, column=0, sticky="ew")
+    input_text.insert("1.0", "")
+    ttk.Label(
+        source_frame,
+        text="Можно вставить несколько значений, разделяя их пробелами, запятыми или переводами строк.",
+    ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+    settings_frame = ttk.LabelFrame(outer, text="Параметры загрузки", padding=8)
+    settings_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+    settings_frame.columnconfigure(1, weight=1)
+    ttk.Label(settings_frame, text="Глубина обхода друзей:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+    depth_var = tk.StringVar(value="0")
+    ttk.Spinbox(settings_frame, from_=0, to=10, textvariable=depth_var, width=8).grid(row=0, column=1, sticky="w", pady=3)
+    ttk.Label(settings_frame, text="0 — только введённые пользователи; 1 — также их друзья; 2 — друзья друзей и т. д. На группы глубина не распространяется.", wraplength=850).grid(row=0, column=2, sticky="w", padx=(12, 0), pady=3)
+    ttk.Label(settings_frame, text="Потоков загрузки:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+    workers_var = tk.StringVar(value="8")
+    ttk.Spinbox(settings_frame, from_=1, to=64, textvariable=workers_var, width=8).grid(row=1, column=1, sticky="w", pady=3)
+    ttk.Label(settings_frame, text="Количество одновременных потоков скачивания фотографий.").grid(row=1, column=2, sticky="w", padx=(12, 0), pady=3)
+
+    output_frame = ttk.LabelFrame(outer, text="Каталог сохранения", padding=8)
+    output_frame.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+    output_frame.columnconfigure(0, weight=1)
+    output_var = tk.StringVar(value=str(DEFAULT_OUTPUT_DIR))
+    ttk.Entry(output_frame, textvariable=output_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+    def browse_output():
+        current = output_var.get().strip()
+        selected = filedialog.askdirectory(
+            parent=root,
+            title="Выберите каталог для скачанных фотографий",
+            initialdir=current if current and Path(current).expanduser().is_dir() else str(APP_DIR),
+            mustexist=False,
+        )
+        if selected:
+            output_var.set(selected)
+
+    ttk.Button(output_frame, text="Обзор…", command=browse_output).grid(row=0, column=1)
+
+    face_frame = ttk.LabelFrame(outer, text="Интеграция с FaceSearch", padding=8)
+    face_frame.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+    face_frame.columnconfigure(1, weight=1)
+    facesearch_dir_var = tk.StringVar(value=str(DEFAULT_FACESEARCH_DIR))
+    auto_import_var = tk.BooleanVar(value=True)
+    create_crop_var = tk.BooleanVar(value=True)
+    build_index_var = tk.BooleanVar(value=False)
+    delete_processed_var = tk.BooleanVar(value=False)
+    ttk.Label(face_frame, text="Каталог FaceSearch:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+    ttk.Entry(face_frame, textvariable=facesearch_dir_var).grid(row=0, column=1, sticky="ew", pady=3)
+
+    def browse_facesearch():
+        current = facesearch_dir_var.get().strip()
+        selected = filedialog.askdirectory(
+            parent=root,
+            title="Выберите каталог FaceSearch",
+            initialdir=current if current and Path(current).expanduser().is_dir() else str(APP_DIR.parent.parent),
+            mustexist=True,
+        )
+        if selected:
+            facesearch_dir_var.set(selected)
+            save_gui_settings()
+
+    ttk.Button(face_frame, text="Обзор…", command=browse_facesearch).grid(row=0, column=2, padx=(8, 0), pady=3)
+    auto_import_check = ttk.Checkbutton(
+        face_frame,
+        text="Автоматически импортировать загруженные фотографии в активный профиль FaceSearch",
+        variable=auto_import_var,
+        command=lambda: (update_import_state(), save_gui_settings()),
+    )
+    auto_import_check.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 2))
+    create_crop_check = ttk.Checkbutton(
+        face_frame, text="Создавать CROP-файлы", variable=create_crop_var,
+        command=lambda: save_gui_settings(),
+    )
+    create_crop_check.grid(row=2, column=0, columnspan=3, sticky="w", pady=1)
+    build_index_check = ttk.Checkbutton(
+        face_frame, text="Построить индекс FAISS после завершения импорта", variable=build_index_var,
+        command=lambda: save_gui_settings(),
+    )
+    build_index_check.grid(row=3, column=0, columnspan=3, sticky="w", pady=1)
+    delete_processed_check = ttk.Checkbutton(
+        face_frame, text="Удалять исходные изображения и JSON после успешного импорта", variable=delete_processed_var,
+        command=lambda: save_gui_settings(),
+    )
+    delete_processed_check.grid(row=4, column=0, columnspan=3, sticky="w", pady=1)
+
+    auth_frame = ttk.LabelFrame(outer, text="Авторизация VK", padding=8)
+    auth_frame.grid(row=5, column=0, sticky="ew", pady=(0, 8))
+    auth_frame.columnconfigure(0, weight=1)
+    auth_frame.rowconfigure(2, weight=1)
+    token_count_var = tk.StringVar(value=f"Токенов в {VK_TOKEN_FILE.name}: {len(_read_token_file())}")
+    ttk.Label(auth_frame, textvariable=token_count_var).grid(row=0, column=0, sticky="w", pady=(0, 4))
+    auth_buttons = ttk.Frame(auth_frame)
+    auth_buttons.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+    def load_gui_settings():
+        defaults = {
+            "output_dir": str(DEFAULT_OUTPUT_DIR),
+            "facesearch_dir": str(DEFAULT_FACESEARCH_DIR),
+            "auto_import": True,
+            "create_crop_files": True,
+            "build_index_after": False,
+            "delete_processed_files": False,
+            "depth": 0,
+            "workers": 8,
+        }
+        try:
+            if APP_SETTINGS_PATH.is_file():
+                saved = json.loads(APP_SETTINGS_PATH.read_text(encoding="utf-8"))
+                if isinstance(saved, dict):
+                    for key in defaults:
+                        if key in saved:
+                            defaults[key] = saved[key]
+        except Exception as exc:
+            print(f"[WARN] Не удалось прочитать настройки загрузчика: {exc}")
+        output_var.set(str(defaults["output_dir"]))
+        facesearch_dir_var.set(str(defaults["facesearch_dir"]))
+        auto_import_var.set(bool(defaults["auto_import"]))
+        create_crop_var.set(bool(defaults["create_crop_files"]))
+        build_index_var.set(bool(defaults["build_index_after"]))
+        delete_processed_var.set(bool(defaults["delete_processed_files"]))
+        depth_var.set(str(defaults["depth"]))
+        workers_var.set(str(defaults["workers"]))
+
+    def save_gui_settings():
+        payload = {
+            "output_dir": output_var.get().strip(),
+            "facesearch_dir": facesearch_dir_var.get().strip(),
+            "auto_import": bool(auto_import_var.get()),
+            "create_crop_files": bool(create_crop_var.get()),
+            "build_index_after": bool(build_index_var.get()),
+            "delete_processed_files": bool(delete_processed_var.get()),
+            "depth": depth_var.get().strip(),
+            "workers": workers_var.get().strip(),
+        }
+        try:
+            temp_path = APP_SETTINGS_PATH.with_suffix(".tmp")
+            temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp_path.replace(APP_SETTINGS_PATH)
+        except Exception as exc:
+            print(f"[WARN] Не удалось сохранить настройки загрузчика: {exc}")
+
+    def update_import_state():
+        state = "normal" if auto_import_var.get() else "disabled"
+        for control in (create_crop_check, build_index_check, delete_processed_check):
+            control.configure(state=state)
+
+    load_gui_settings()
+    update_import_state()
+    for variable in (output_var, facesearch_dir_var, depth_var, workers_var):
+        variable.trace_add("write", lambda *_args: save_gui_settings())
+
+    def refresh_token_count():
+        count = reload_token_cache()
+        token_count_var.set(f"Токенов в {VK_TOKEN_FILE.name}: {count}")
+
+    def open_token_file():
+        VK_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if not VK_TOKEN_FILE.exists():
+            VK_TOKEN_FILE.write_text("", encoding="utf-8")
+        try:
+            if os.name == "nt":
+                os.startfile(str(VK_TOKEN_FILE))
+            else:
+                webbrowser.open(VK_TOKEN_FILE.as_uri())
+        except Exception as exc:
+            messagebox.showerror("Файл токенов", f"Не удалось открыть файл:\n{exc}", parent=root)
+
+    ttk.Button(auth_buttons, text="Открыть VK ID и добавить токен…", command=lambda: open_auth_dialog()).pack(side="left", padx=(0, 6))
+    ttk.Button(auth_buttons, text="Открыть vk_token.txt", command=open_token_file).pack(side="left", padx=(0, 6))
+    ttk.Button(auth_buttons, text="Обновить список токенов", command=refresh_token_count).pack(side="left")
+
+    ttk.Label(
+        auth_frame,
+        text="Кнопка авторизации откроет старый URL VK ID. После перенаправления на blank.html скопируйте весь адрес из строки браузера (с #access_token=…) либо вставьте сам токен в диалог. Токен будет проверен через VK API и только затем сохранён.",
+        wraplength=980,
+    ).grid(row=2, column=0, sticky="ew")
+
+    def open_auth_dialog():
+        try:
+            webbrowser.open(AUTH_URL, new=2)
+        except Exception as exc:
+            messagebox.showwarning("VK ID", f"Не удалось автоматически открыть браузер:\n{exc}\n\nОткройте URL вручную:", parent=root)
+
+        dialog = tk.Toplevel(root)
+        dialog.title("Добавить токен VK")
+        dialog.transient(root)
+        dialog.geometry("720x390")
+        dialog.minsize(620, 330)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
+        ttk.Label(
+            dialog,
+            text="После успешного входа скопируйте URL страницы перенаправления (в нём токен обычно находится после #access_token=) или вставьте сам токен:",
+            wraplength=680,
+        ).grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
+        token_input = tk.Text(dialog, height=6, wrap="word", undo=True)
+        token_input.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=2, column=0, sticky="e", padx=10, pady=(0, 10))
+        save_button = ttk.Button(buttons, text="Проверить и сохранить")
+        save_button.pack(side="right", padx=(6, 0))
+        ttk.Button(buttons, text="Отмена", command=dialog.destroy).pack(side="right")
+
+        def submit_token():
+            token = extract_access_token(token_input.get("1.0", "end").strip())
+            if not token:
+                messagebox.showerror("Токен VK", "Не удалось извлечь токен. Вставьте сам токен или URL перенаправления целиком.", parent=dialog)
+                return
+            save_button.configure(state="disabled", text="Проверка…")
+
+            def validate_worker():
+                try:
+                    user_name = validate_access_token(token)
+                    added, count = save_access_token(token)
+                    events.put(("token_saved", True, user_name, added, count, ""))
+                except Exception as exc:
+                    events.put(("token_saved", False, "", False, len(_read_token_file()), str(exc)))
+
+            threading.Thread(target=validate_worker, daemon=True).start()
+
+        save_button.configure(command=submit_token)
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        # Не используем grab_set: пользователь должен переключиться в внешний браузер,
+        # завершить вход VK ID и скопировать URL перенаправления.
+        dialog.focus_set()
+        root._vk_token_dialog = dialog
+        root._vk_token_save_button = save_button
+
+    progress_frame = ttk.LabelFrame(outer, text="Выполнение", padding=8)
+    progress_frame.grid(row=6, column=0, sticky="ew", pady=(0, 8))
+    progress_frame.columnconfigure(0, weight=1)
+    status_var = tk.StringVar(value="Готово к запуску.")
+    ttk.Label(progress_frame, textvariable=status_var, wraplength=980).grid(row=0, column=0, sticky="ew", pady=(0, 4))
+    progress_text_var = tk.StringVar(value="Ожидание")
+    ttk.Label(progress_frame, textvariable=progress_text_var).grid(row=1, column=0, sticky="w", pady=(0, 3))
+    progress_bar = ttk.Progressbar(progress_frame, mode="determinate", maximum=100, value=0)
+    progress_bar.grid(row=2, column=0, sticky="ew")
+
+    log_frame = ttk.LabelFrame(outer, text="Журнал", padding=6)
+    log_frame.grid(row=7, column=0, sticky="nsew", pady=(0, 8))
+    outer.rowconfigure(7, weight=1)
+    log_frame.columnconfigure(0, weight=1)
+    log_frame.rowconfigure(0, weight=1)
+    log_text = tk.Text(log_frame, height=12, wrap="word", state="disabled")
+    log_text.grid(row=0, column=0, sticky="nsew")
+    scroll = ttk.Scrollbar(log_frame, orient="vertical", command=log_text.yview)
+    scroll.grid(row=0, column=1, sticky="ns")
+    log_text.configure(yscrollcommand=scroll.set)
+
+    action_frame = ttk.Frame(outer)
+    action_frame.grid(row=8, column=0, sticky="ew")
+    action_frame.columnconfigure(0, weight=1)
+    running = {"value": False}
+
+    def set_running(active: bool):
+        running["value"] = active
+        start_button.configure(state="disabled" if active else "normal")
+        stop_button.configure(state="normal" if active else "disabled")
+
+    def start_job():
+        raw = input_text.get("1.0", "end").strip()
+        if not raw:
+            messagebox.showwarning("VK загрузчик", "Введите ID, короткие имена или ссылки VK.", parent=root)
+            input_text.focus_set()
+            return
+        try:
+            depth = int(depth_var.get().strip())
+            workers = int(workers_var.get().strip())
+            if depth < 0 or depth > 10:
+                raise ValueError("Глубина должна быть от 0 до 10.")
+            if workers < 1 or workers > 64:
+                raise ValueError("Количество потоков должно быть от 1 до 64.")
+        except ValueError as exc:
+            messagebox.showerror("Параметры", str(exc) or "Проверьте глубину и количество потоков.", parent=root)
+            return
+        token_count = len(_read_token_file())
+        if token_count == 0:
+            messagebox.showwarning("Токены VK", f"Файл {VK_TOKEN_FILE.name} не содержит токенов. Добавьте токен через кнопку авторизации.", parent=root)
+            return
+        reload_token_cache()
+        auto_import = bool(auto_import_var.get())
+        create_crop_files = bool(create_crop_var.get())
+        build_index_after = bool(build_index_var.get())
+        delete_processed_files = bool(delete_processed_var.get())
+        facesearch_dir = facesearch_dir_var.get().strip()
+        output_dir = output_var.get().strip() or str(DEFAULT_OUTPUT_DIR)
+        STOP_REQUESTED.clear()
+        set_running(True)
+        progress_bar.configure(mode="indeterminate")
+        progress_bar.start(10)
+        progress_text_var.set("Подготовка задания…")
+        status_var.set("Задание выполняется в фоновом потоке; интерфейс остаётся доступен.")
+        log_text.configure(state="normal")
+        log_text.insert("end", "\n" + "=" * 68 + "\nНовое задание\n")
+        log_text.see("end")
+        log_text.configure(state="disabled")
+
+        def worker():
+            importer = None
+            try:
+                if auto_import:
+                    importer = FaceSearchImporter(
+                        facesearch_dir,
+                        status_callback=lambda message: events.put(("status", message)),
+                        create_crop_files=create_crop_files,
+                    )
+                    print(f"✅ FaceSearch: активный профиль «{importer.config['active_name']}» готов к импорту.")
+                run_download_job(
+                    raw, depth, workers,
+                    output_dir,
+                    importer=importer,
+                    delete_processed_files=delete_processed_files and importer is not None,
+                )
+                if importer is not None and build_index_after and not STOP_REQUESTED.is_set():
+                    importer.build_index()
+                if importer is not None:
+                    print(f"✅ FaceSearch: импортировано файлов — {importer.imported_count}.")
+            except Exception as exc:
+                print(f"💥 Критическая ошибка задания: {exc}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                if importer is not None:
+                    try:
+                        importer.close()
+                    except Exception as exc:
+                        print(f"⚠️ Ошибка закрытия базы FaceSearch: {exc}")
+                events.put(("job_finished", STOP_REQUESTED.is_set()))
+
+        threading.Thread(target=worker, daemon=True, name="VKDownloaderWorker").start()
+
+    def stop_job():
+        if running["value"]:
+            STOP_REQUESTED.set()
+            status_var.set("Запрошена остановка. Текущий сетевой запрос/загрузка может завершиться перед остановкой.")
+            stop_button.configure(state="disabled")
+
+    start_button = ttk.Button(action_frame, text="Начать загрузку", command=start_job)
+    start_button.grid(row=0, column=0, sticky="ew", padx=(0, 6), ipady=5)
+    stop_button = ttk.Button(action_frame, text="Остановить", command=stop_job, state="disabled")
+    stop_button.grid(row=0, column=1, sticky="ew", ipady=5)
+
+    def drain_events():
+        try:
+            while True:
+                event = events.get_nowait()
+                kind = event[0]
+                if kind == "log":
+                    log_text.configure(state="normal")
+                    log_text.insert("end", event[1])
+                    # Не допускаем бесконечного роста виджета на очень больших обходах.
+                    try:
+                        line_count = int(log_text.index("end-1c").split(".")[0])
+                        if line_count > 12000:
+                            log_text.delete("1.0", f"{line_count - 10000}.0")
+                    except Exception:
+                        pass
+                    log_text.see("end")
+                    log_text.configure(state="disabled")
+                elif kind == "progress":
+                    current, total, message = event[1], event[2], event[3]
+                    progress_text_var.set(message)
+                    if total and total > 0:
+                        if str(progress_bar.cget("mode")) != "determinate":
+                            progress_bar.stop()
+                            progress_bar.configure(mode="determinate", maximum=total)
+                        else:
+                            progress_bar.configure(maximum=total)
+                        progress_bar["value"] = min(current, total)
+                    else:
+                        progress_bar.configure(mode="indeterminate")
+                        progress_bar.start(10)
+                elif kind == "status":
+                    status_var.set(event[1])
+                elif kind == "token_saved":
+                    success, user_name, added, count, error = event[1:]
+                    token_count_var.set(f"Токенов в {VK_TOKEN_FILE.name}: {count}")
+                    if hasattr(root, "_vk_token_save_button"):
+                        try:
+                            root._vk_token_save_button.configure(state="normal", text="Проверить и сохранить")
+                        except tk.TclError:
+                            pass
+                    if success:
+                        dialog = getattr(root, "_vk_token_dialog", None)
+                        if dialog is not None:
+                            try:
+                                if dialog.winfo_exists():
+                                    dialog.destroy()
+                            except tk.TclError:
+                                pass
+                        if added:
+                            messagebox.showinfo("Токен VK сохранён", f"Авторизация проверена. Токен добавлен в {VK_TOKEN_FILE.name}.\nПользователь: {user_name}\nВсего токенов: {count}", parent=root)
+                        else:
+                            messagebox.showinfo("Токен уже есть", f"Этот токен уже присутствует в {VK_TOKEN_FILE.name}.\nПользователь: {user_name}\nВсего токенов: {count}", parent=root)
+                    else:
+                        error_parent = getattr(root, "_vk_token_dialog", None)
+                        try:
+                            if error_parent is None or not error_parent.winfo_exists():
+                                error_parent = root
+                        except tk.TclError:
+                            error_parent = root
+                        messagebox.showerror("Не удалось добавить токен", error, parent=error_parent)
+                elif kind == "job_finished":
+                    progress_bar.stop()
+                    progress_bar.configure(mode="determinate")
+                    set_running(False)
+                    progress_text_var.set("Задание остановлено" if event[1] else "Задание завершено")
+                    status_var.set("Задание остановлено. Скачанные файлы сохранены." if event[1] else "Задание завершено. Проверьте журнал для итогов.")
+                    progress_bar["value"] = 0 if event[1] else progress_bar["maximum"]
+        except queue.Empty:
+            pass
+        except tk.TclError:
+            return
+        try:
+            root.after(100, drain_events)
+        except tk.TclError:
+            pass
+
+    def on_close():
+        if running["value"]:
+            if not messagebox.askyesno("Выход", "Задание ещё выполняется. Запросить остановку и закрыть окно?", parent=root):
+                return
+            STOP_REQUESTED.set()
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
+    refresh_token_count()
+    drain_events()
+    root.mainloop()
+    sys.stdout = original_stdout
+    sys.stderr = original_stderr
+    UI_EVENTS = None
+
+
+if __name__ == "__main__":
+    main()
