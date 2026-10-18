@@ -1123,9 +1123,18 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
         "&mlon="+encodeURIComponent(lon)+"#map=16/"+lat+"/"+lon;
       link.href=mapUrl;
       link.target="_blank";link.rel="noopener noreferrer";
-      link.textContent=lat+", "+lon+" · открыть карту";
+      link.textContent=lat+", "+lon;
       link.title="Показать координаты на карте OpenStreetMap";
       row.append(label,link);box.appendChild(row);
+      if(geo.altitude!==null){
+        const altitudeRow=document.createElement("div");altitudeRow.className="card-info-row";
+        const altitudeLabel=document.createElement("b");altitudeLabel.textContent="Высота над уровнем моря: ";
+        const altitudeLink=document.createElement("a");
+        altitudeLink.href=mapUrl;altitudeLink.target="_blank";altitudeLink.rel="noopener noreferrer";
+        altitudeLink.textContent=String(geo.altitude)+" м";
+        altitudeLink.title="Показать место съёмки на карте OpenStreetMap";
+        altitudeRow.append(altitudeLabel,altitudeLink);box.appendChild(altitudeRow);
+      }
     }
     const ordered=isLocal?entries.sort(function(a,b){
       const ai=Object.keys(LOCAL_INFO_LABELS).indexOf(a[0]);
@@ -1135,7 +1144,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     ordered.forEach(function(pair){
       const key=pair[0],value=pair[1],type=geoFieldType(key);
       if(isLocal&&!Object.prototype.hasOwnProperty.call(LOCAL_INFO_LABELS,key)&&type!=="altitude")return;
-      if(geo.validCoordinates&&(type==="latitude"||type==="longitude"||type==="coordinates"))return;
+      if(geo.validCoordinates&&(type==="latitude"||type==="longitude"||type==="coordinates"||type==="altitude"))return;
       const row=document.createElement("div");row.className="card-info-row";
       const label=document.createElement("b");
       const labelText=type==="altitude"?"Высота над уровнем моря":(isLocal?LOCAL_INFO_LABELS[key]:key);
@@ -1151,14 +1160,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       }else if(isLocal&&(key==="image_width"||key==="image_height")){
         rendered+=" px";
       }
-      if(type==="altitude"&&geo.validCoordinates){
-        const altitudeLink=document.createElement("a");
-        altitudeLink.href=mapUrl;altitudeLink.target="_blank";altitudeLink.rel="noopener noreferrer";
-        altitudeLink.textContent=rendered;altitudeLink.title="Показать место съёмки на карте OpenStreetMap";
-        row.append(label,altitudeLink);
-      }else{
-        text.textContent=rendered;row.append(label,text);
-      }
+      text.textContent=rendered;row.append(label,text);
       box.appendChild(row);
     });
     body.appendChild(box);
