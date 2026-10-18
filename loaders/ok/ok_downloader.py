@@ -37,8 +37,8 @@ DEFAULT_DB_PROFILES_JSON = DEFAULT_FACESEARCH_DIR / "database_profiles.json"
 def default_chrome_executable() -> str:
     """Возвращает стандартный путь Chrome для Windows, предпочитая существующий файл."""
     candidates = [
-        Path(os.environ.get("PROGRAMFILES") or r"C:\\Program Files") / "Google" / "Chrome" / "Application" / "chrome.exe",
-        Path(os.environ.get("PROGRAMFILES(X86)") or r"C:\\Program Files (x86)") / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("PROGRAMFILES") or "C:/Program Files") / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)") or "C:/Program Files (x86)") / "Google" / "Chrome" / "Application" / "chrome.exe",
         Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "Google" / "Chrome" / "Application" / "chrome.exe",
     ]
     for candidate in candidates:
@@ -1339,9 +1339,10 @@ def config_paths_from_directory(facesearch_dir: str | Path) -> tuple[Path, Path]
 
 def launch_browser_context(playwright, profile_directory: str | Path, chrome_executable: str | Path):
     """Запускает установленный Chrome с указанным постоянным профилем."""
-    profile_path = Path(profile_directory).expanduser()
-    if not str(profile_path).strip():
+    profile_value = str(profile_directory or "").strip()
+    if not profile_value:
         raise ValueError("Не задан каталог профиля Chrome.")
+    profile_path = Path(profile_value).expanduser()
     profile_path.mkdir(parents=True, exist_ok=True)
 
     executable = Path(chrome_executable).expanduser()
@@ -1651,6 +1652,8 @@ def collect_photos(
                 print(f"[DB-RECHECK-URL] {pid}: найден прежний CROP; перепроверяю текущий URL")
             else:
                 refresh_existing_sidecar(pid, image_path, json_path, old_meta, preview_map.get(pid, ""))
+                if importer and delete_processed_files and not is_duplicate_marker:
+                    delete_processed_pair(image_path, json_path, enabled=True)
                 completed.add(pid)
                 db_skipped_ids.add(pid)
                 if importer:
@@ -2225,15 +2228,16 @@ def main():
                                     importer.close()
                                 except Exception as exc:
                                     print(f"[WARN] Ошибка закрытия БД FaceSearch: {exc}")
-                context.close()
+                if context is not None:
+                    context.close()
         except Exception as exc:
             browser_state["error"] = str(exc)
             browser_ready.set()
 
     root = tk.Tk()
     root.title("OK.ru — загрузчик фотографий и импорт FaceSearch")
-    root.geometry("920x650")
-    root.minsize(820, 610)
+    root.geometry("950x750")
+    root.minsize(830, 690)
     root.resizable(True, True)
 
     frame = ttk.Frame(root, padding=12)
