@@ -19,6 +19,11 @@ import requests
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None
+
 # === ПАРАМЕТРЫ === #
 APP_DIR = Path(__file__).resolve().parent
 VK_TOKEN_FILE = APP_DIR / "vk_token.txt"
@@ -26,13 +31,18 @@ LOG_FILE = APP_DIR / "Log.txt"
 DEFAULT_OUTPUT_DIR = APP_DIR / "VK_Downloads"
 APP_SETTINGS_PATH = APP_DIR / "vk_downloader_settings.json"
 DEFAULT_FACESEARCH_DIR = Path(r"C:\FaceSearch")
+DEFAULT_BROWSER_PROFILE_DIR = APP_DIR / "VK_Browser_Profile"
+VK_SERVICE_TOKEN_FILE = APP_DIR / "vk_service_token.txt"
+VK_SILENT_TOKEN_FILE = APP_DIR / "vk_silent_token.json"
 _META_RESOLUTION = "_url_resolution"
 _META_VERSION = "_resolution_version"
 _META_DUPLICATE_OF = "_duplicate_of"
 _META_DUPLICATE_REASON = "_duplicate_reason"
 API_VERSION = "5.199"
-BASE_URL = "https://api.vk.com/method"
+BASE_URL = "https://api.vk.ru/method"
 FRIENDS_PAGE_SIZE = 5000
+AUTH_STOP_REQUESTED = threading.Event()
+_AUTH_THREAD = None
 
 # Старый URL VK ID, предоставленный пользователем. response_type=token — implicit flow;
 # если VK изменит параметры авторизации, токен можно будет вставить вручную в диалог.
@@ -110,35 +120,55 @@ def reload_tokens():
         return token
 
 
-def extract_access_token(value: str) -> str:
-    """Извлекает access_token из redirect URL или принимает токен как обычную строку."""
-    value = unquote((value or "").strip())
+def extract_vk_auth_payload(value: str) -> dict:
+    """Разбирает новый redirect VK ID (silent_token) и старый OAuth fragment."""
+    value = (value or "").strip()
     if not value:
-        return ""
+        return {}
 
-    # Сначала разбираем URL целиком: VK обычно возвращает токен во fragment после #.
     try:
         parsed = urlsplit(value)
-        for query in (parsed.fragment, parsed.query):
-            params = parse_qs(query, keep_blank_values=False)
-            if params.get("access_token"):
-                return params["access_token"][0].strip()
-            # Поддержка имён access_token_<community_id>.
-            for key, values in params.items():
-                if key.startswith("access_token_") and values:
-                    return values[0].strip()
+        fragment = parse_qs(parsed.fragment, keep_blank_values=True)
+        # Новый VK ID помещает JSON в URL hash: #payload=%7B...%7D.
+        raw_payload = fragment.get("payload", [None])[0]
+        if raw_payload:
+            data = json.loads(raw_payload)
+            return data if isinstance(data, dict) else {}
+
+        # Старый implicit flow: #access_token=...&user_id=...
+        for params in (fragment, parse_qs(parsed.query, keep_blank_values=True)):
+            token = (params.get("access_token") or [""])[0].strip()
+            if token:
+                return {
+                    "type": "access_token",
+                    "access_token": token,
+                    "user_id": (params.get("user_id") or [""])[0],
+                }
     except Exception:
         pass
 
     match = re.search(r"(?:^|[&#?\s])access_token(?:_[^=&#\s]+)?=([^&#\s]+)", value)
     if match:
-        return unquote(match.group(1)).strip()
+        return {"type": "access_token", "access_token": unquote(match.group(1)).strip()}
 
-    # Если вставили именно токен, а не URL/параметр.
-    if " " not in value and "access_token=" not in value and "://" not in value:
-        return value
+    # Ручной ввод старого токена по-прежнему поддерживается.
+    if " " not in value and "://" not in value and "access_token=" not in value:
+        return {"type": "access_token", "access_token": value}
+    return {}
+
+
+def extract_access_token(value: str) -> str:
+    """Извлекает API access_token; silent_token VK ID нельзя использовать напрямую."""
+    payload = extract_vk_auth_payload(value)
+    token_type = str(payload.get("type") or "").lower()
+    if token_type == "silent_token":
+        return ""
+    token = payload.get("access_token")
+    if token:
+        return str(token).strip()
+    if token_type == "access_token":
+        return str(payload.get("token") or "").strip()
     return ""
-
 
 def validate_access_token(token: str) -> str:
     """Проверяет токен небольшим запросом users.get и возвращает имя пользователя."""
@@ -178,6 +208,220 @@ def save_access_token(token: str) -> tuple[bool, int]:
         temp_path.replace(VK_TOKEN_FILE)
     count = reload_token_cache()
     return True, count
+
+
+def read_service_token() -> str:
+    """Читает service token из переменной окружения либо локального файла."""
+    value = os.environ.get("VK_SERVICE_TOKEN", "").strip()
+    if value:
+        return value
+    try:
+        if VK_SERVICE_TOKEN_FILE.is_file():
+            return VK_SERVICE_TOKEN_FILE.read_text(encoding="utf-8-sig").strip()
+    except OSError:
+        pass
+    return ""
+
+
+def default_chrome_executable() -> str:
+    """Находит стандартную установку Chrome в Windows."""
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES") or "C:/Program Files") / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)") or "C:/Program Files (x86)") / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return str(candidates[0])
+
+
+def _save_pending_silent_token(payload: dict) -> None:
+    """Сохраняет только необходимые поля silent_token для последующего обмена."""
+    user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+    safe_payload = {
+        "type": "silent_token",
+        "token": str(payload.get("token") or ""),
+        "uuid": str(payload.get("uuid") or ""),
+        "user_id": user.get("id"),
+        "first_name": user.get("first_name", ""),
+        "last_name": user.get("last_name", ""),
+        "saved_at": int(time.time()),
+    }
+    VK_SILENT_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = VK_SILENT_TOKEN_FILE.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(safe_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(VK_SILENT_TOKEN_FILE)
+
+
+def load_pending_silent_token() -> dict:
+    """Загружает silent_token, сохранённый после автоматического браузерного входа."""
+    if not VK_SILENT_TOKEN_FILE.is_file():
+        raise FileNotFoundError(
+            f"Файл {VK_SILENT_TOKEN_FILE.name} не найден. Сначала выполните вход VK ID через Chrome."
+        )
+    payload = json.loads(VK_SILENT_TOKEN_FILE.read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict) or not payload.get("token"):
+        raise ValueError(f"В {VK_SILENT_TOKEN_FILE.name} нет корректного silent_token.")
+    return payload
+
+
+def exchange_silent_token(silent_token: str, service_token: str, uuid: str = "") -> dict:
+    """Обменивает VK ID silent_token на API access_token с помощью service token."""
+    if not silent_token:
+        raise ValueError("VK ID не вернул silent_token.")
+    if not service_token:
+        raise ValueError(
+            "Не указан service token приложения. Silent token VK ID не является API access_token."
+        )
+    response = requests.post(
+        f"{BASE_URL}/auth.exchangeSilentAuthToken",
+        data={
+            "v": API_VERSION,
+            "token": silent_token,
+            "uuid": uuid or "",
+            "access_token": service_token,
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    data = response.json()
+    error = data.get("error")
+    if error:
+        raise RuntimeError(
+            "VK не смог обменять silent_token: "
+            f"{error.get('error_msg', error)} (код {error.get('error_code', '?')}). "
+            "Проверьте service token и права приложения."
+        )
+    result = data.get("response") or {}
+    if not isinstance(result, dict) or not result.get("access_token"):
+        raise RuntimeError(f"VK не вернул access_token при обмене: {data}")
+    return result
+
+
+def _validate_and_save_access_token(token: str) -> tuple[str, bool, int]:
+    """Проверяет API access_token и сохраняет его в общий список токенов."""
+    user_name = validate_access_token(token)
+    added, count = save_access_token(token)
+    return user_name, added, count
+
+
+def _exchange_and_store_pending_token(service_token: str) -> None:
+    """Повторно обменивает сохранённый silent_token в фоновом потоке."""
+    try:
+        pending = load_pending_silent_token()
+        result = exchange_silent_token(
+            str(pending.get("token") or ""),
+            service_token,
+            str(pending.get("uuid") or ""),
+        )
+        user_name, added, count = _validate_and_save_access_token(str(result.get("access_token") or ""))
+        try:
+            VK_SILENT_TOKEN_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+        post_ui_event("token_saved", True, user_name, added, count, "")
+        post_ui_event("auth_status", f"Авторизация VK завершена: {user_name}. API access_token сохранён.")
+    except Exception as exc:
+        post_ui_event("auth_error", str(exc))
+
+
+def _browser_auth_worker(profile_directory: str, chrome_executable: str, service_token: str = "") -> None:
+    """Открывает постоянный профиль Chrome и ловит redirect VK ID автоматически."""
+    if sync_playwright is None:
+        post_ui_event(
+            "auth_error",
+            "Для автоматической авторизации установите Playwright: python -m pip install playwright.",
+        )
+        return
+
+    context = None
+    try:
+        profile_path = Path(profile_directory).expanduser()
+        profile_path.mkdir(parents=True, exist_ok=True)
+        executable = Path(chrome_executable).expanduser()
+        if not executable.is_file():
+            raise FileNotFoundError(f"Не найден chrome.exe: {executable}")
+
+        post_ui_event("auth_status", "Запускаю Chrome с постоянным профилем VK…")
+        with sync_playwright() as playwright:
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(profile_path.resolve()),
+                executable_path=str(executable.resolve()),
+                headless=False,
+                viewport=None,
+                no_viewport=True,
+                locale="ru-RU",
+                accept_downloads=True,
+                args=["--start-maximized", "--window-size=1920,1080", "--window-position=0,0"],
+            )
+            page = context.pages[0] if context.pages else context.new_page()
+            post_ui_event("auth_status", "Завершите вход в VK ID в окне Chrome. Ответ будет обработан автоматически.")
+            try:
+                page.goto(AUTH_URL, wait_until="domcontentloaded", timeout=45000)
+            except Exception:
+                # При редиректе на blank.html Chromium иногда сообщает timeout уже после перехода.
+                pass
+
+            deadline = time.monotonic() + 600
+            while not AUTH_STOP_REQUESTED.is_set() and time.monotonic() < deadline:
+                for current_page in list(context.pages):
+                    try:
+                        payload = extract_vk_auth_payload(current_page.url or "")
+                    except Exception:
+                        continue
+                    if not payload:
+                        continue
+
+                    if str(payload.get("type") or "").lower() == "silent_token":
+                        if not payload.get("token"):
+                            raise RuntimeError("VK ID вернул payload типа silent_token без поля token.")
+                        if int(payload.get("auth") or 0) != 1:
+                            raise RuntimeError("VK ID не подтвердил успешную авторизацию (auth != 1).")
+                        _save_pending_silent_token(payload)
+                        active_service_token = service_token or read_service_token()
+                        if not active_service_token:
+                            post_ui_event(
+                                "auth_needs_service_token",
+                                "Вход VK ID успешен, получен silent_token. Укажите service token приложения и нажмите «Обменять silent_token».",
+                            )
+                        else:
+                            post_ui_event("auth_status", "VK ID авторизован. Обмениваю silent_token на API access_token…")
+                            pending = load_pending_silent_token()
+                            result = exchange_silent_token(
+                                str(pending.get("token") or ""),
+                                active_service_token,
+                                str(pending.get("uuid") or ""),
+                            )
+                            user_name, added, count = _validate_and_save_access_token(str(result.get("access_token") or ""))
+                            try:
+                                VK_SILENT_TOKEN_FILE.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                            post_ui_event("token_saved", True, user_name, added, count, "")
+                            post_ui_event("auth_status", f"Авторизация VK завершена: {user_name}. API access_token сохранён.")
+                        return
+
+                    token = str(payload.get("access_token") or "")
+                    if token:
+                        user_name, added, count = _validate_and_save_access_token(token)
+                        post_ui_event("token_saved", True, user_name, added, count, "")
+                        post_ui_event("auth_status", f"Старый OAuth access_token сохранён: {user_name}.")
+                        return
+                time.sleep(0.25)
+
+            if AUTH_STOP_REQUESTED.is_set():
+                post_ui_event("auth_status", "Ожидание авторизации остановлено.")
+            else:
+                post_ui_event("auth_error", "Время ожидания авторизации VK ID истекло (10 минут).")
+    except Exception as exc:
+        post_ui_event("auth_error", f"Ошибка автоматической авторизации VK: {exc}")
+    finally:
+        if context is not None:
+            try:
+                context.close()
+            except Exception:
+                pass
 
 
 def post_ui_event(*event):
@@ -283,7 +527,7 @@ def build_entity_json(entity: dict, url_image: str,
 
 def get_group_info(group_id_or_screen_name: str, session: requests.Session):
     url = (
-        f"https://api.vk.com/method/groups.getById"
+        f"https://api.vk.ru/method/groups.getById"
         f"?group_ids={group_id_or_screen_name}"
         f"&fields=photo_max_orig,screen_name,description,members_count,status"
         f"&access_token={reload_tokens()}"
@@ -319,7 +563,7 @@ def get_group_info(group_id_or_screen_name: str, session: requests.Session):
 
 def get_user_info(user_ids: str, session: requests.Session):
     url = (
-        f"https://api.vk.com/method/users.get"
+        f"https://api.vk.ru/method/users.get"
         f"?user_ids={user_ids}"
         f"&fields=photo_max_orig,city,home_town,sex,bdate,screen_name,deactivated,is_closed"
         f"&access_token={reload_tokens()}"
@@ -412,7 +656,7 @@ def get_user_friends(user_id: int, session: requests.Session):
 
 def get_albums(owner_id: int, session: requests.Session):
     url = (
-        f"https://api.vk.com/method/photos.getAlbums"
+        f"https://api.vk.ru/method/photos.getAlbums"
         f"?owner_id={owner_id}"
         f"&need_system=1"
         f"&access_token={reload_tokens()}"
@@ -432,7 +676,7 @@ def get_user_photos(owner_id: int, session: requests.Session):
     offset = 0
     while True:
         url = (
-            f"https://api.vk.com/method/photos.getUserPhotos"
+            f"https://api.vk.ru/method/photos.getUserPhotos"
             f"?user_id={owner_id}"
             f"&count=1000"
             f"&offset={offset}"
@@ -460,7 +704,7 @@ def get_photos_by_album(owner_id: int, album_id: int, session: requests.Session)
     offset = 0
     while True:
         url = (
-            f"https://api.vk.com/method/photos.get"
+            f"https://api.vk.ru/method/photos.get"
             f"?owner_id={owner_id}"
             f"&album_id={album_id}"
             f"&count=200"
@@ -1459,8 +1703,11 @@ def main():
 
     auth_frame = ttk.LabelFrame(outer, text="Авторизация VK", padding=8)
     auth_frame.grid(row=5, column=0, sticky="ew", pady=(0, 8))
-    auth_frame.columnconfigure(0, weight=1)
-    auth_frame.rowconfigure(2, weight=1)
+    auth_frame.columnconfigure(1, weight=1)
+    browser_profile_var = tk.StringVar(value=str(DEFAULT_BROWSER_PROFILE_DIR))
+    chrome_exe_var = tk.StringVar(value=default_chrome_executable())
+    service_token_var = tk.StringVar(value=read_service_token())
+    auth_status_var = tk.StringVar(value="Готово к автоматической авторизации.")
     token_count_var = tk.StringVar(value=f"Токенов в {VK_TOKEN_FILE.name}: {len(_read_token_file())}")
     ttk.Label(auth_frame, textvariable=token_count_var).grid(row=0, column=0, sticky="w", pady=(0, 4))
     auth_buttons = ttk.Frame(auth_frame)
@@ -1476,6 +1723,8 @@ def main():
             "delete_processed_files": False,
             "depth": 0,
             "workers": 8,
+            "browser_profile_dir": str(DEFAULT_BROWSER_PROFILE_DIR),
+            "chrome_exe_path": default_chrome_executable(),
         }
         try:
             if APP_SETTINGS_PATH.is_file():
@@ -1494,6 +1743,10 @@ def main():
         delete_processed_var.set(bool(defaults["delete_processed_files"]))
         depth_var.set(str(defaults["depth"]))
         workers_var.set(str(defaults["workers"]))
+        browser_profile_var.set(str(defaults["browser_profile_dir"]))
+        chrome_exe_var.set(str(defaults["chrome_exe_path"]))
+        if not service_token_var.get().strip():
+            service_token_var.set(read_service_token())
 
     def save_gui_settings():
         payload = {
@@ -1505,6 +1758,8 @@ def main():
             "delete_processed_files": bool(delete_processed_var.get()),
             "depth": depth_var.get().strip(),
             "workers": workers_var.get().strip(),
+            "browser_profile_dir": browser_profile_var.get().strip(),
+            "chrome_exe_path": chrome_exe_var.get().strip(),
         }
         try:
             temp_path = APP_SETTINGS_PATH.with_suffix(".tmp")
@@ -1539,15 +1794,142 @@ def main():
         except Exception as exc:
             messagebox.showerror("Файл токенов", f"Не удалось открыть файл:\n{exc}", parent=root)
 
-    ttk.Button(auth_buttons, text="Открыть VK ID и добавить токен…", command=lambda: open_auth_dialog()).pack(side="left", padx=(0, 6))
+    ttk.Button(auth_buttons, text="Вставить старый access_token…", command=lambda: open_auth_dialog()).pack(side="left", padx=(0, 6))
     ttk.Button(auth_buttons, text="Открыть vk_token.txt", command=open_token_file).pack(side="left", padx=(0, 6))
     ttk.Button(auth_buttons, text="Обновить список токенов", command=refresh_token_count).pack(side="left")
 
     ttk.Label(
         auth_frame,
-        text="Кнопка авторизации откроет старый URL VK ID. После перенаправления на blank.html скопируйте весь адрес из строки браузера (с #access_token=…) либо вставьте сам токен в диалог. Токен будет проверен через VK API и только затем сохранён.",
+        text="Авторизация VK ID выполняется в отдельном профиле Chrome. Программа автоматически разбирает ответ blank.html: старый access_token сохраняется напрямую, а silent_token обменивается на API access_token.",
         wraplength=980,
     ).grid(row=2, column=0, sticky="ew")
+
+    ttk.Label(auth_frame, text="Профиль Chrome:").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
+    ttk.Entry(auth_frame, textvariable=browser_profile_var).grid(row=3, column=1, sticky="ew", pady=3)
+
+    def browse_browser_profile():
+        current = browser_profile_var.get().strip()
+        selected = filedialog.askdirectory(
+            parent=root,
+            title="Выберите постоянный профиль браузера для VK",
+            initialdir=current if current and Path(current).expanduser().is_dir() else str(APP_DIR),
+            mustexist=False,
+        )
+        if selected:
+            browser_profile_var.set(selected)
+            save_gui_settings()
+
+    ttk.Button(auth_frame, text="Обзор…", command=browse_browser_profile).grid(row=3, column=2, padx=(8, 0), pady=3)
+
+    ttk.Label(auth_frame, text="Путь к chrome.exe:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+    ttk.Entry(auth_frame, textvariable=chrome_exe_var).grid(row=4, column=1, sticky="ew", pady=3)
+
+    def browse_chrome_executable():
+        current = chrome_exe_var.get().strip()
+        initial_dir = str(Path(current).expanduser().parent) if current and Path(current).expanduser().parent.is_dir() else str(Path.home())
+        selected = filedialog.askopenfilename(
+            parent=root,
+            title="Выберите Chrome",
+            initialdir=initial_dir,
+            filetypes=[("Google Chrome", "chrome.exe"), ("Исполняемые файлы", "*.exe"), ("Все файлы", "*.*")],
+        )
+        if selected:
+            chrome_exe_var.set(selected)
+            save_gui_settings()
+
+    ttk.Button(auth_frame, text="Обзор…", command=browse_chrome_executable).grid(row=4, column=2, padx=(8, 0), pady=3)
+
+    ttk.Label(auth_frame, text="Service token приложения:").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=3)
+    ttk.Entry(auth_frame, textvariable=service_token_var, show="*").grid(row=5, column=1, sticky="ew", pady=3)
+
+    def save_service_token(show_message=True):
+        token = service_token_var.get().strip()
+        if not token:
+            try:
+                VK_SERVICE_TOKEN_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+            auth_status_var.set("Service token не задан.")
+            if show_message:
+                messagebox.showinfo("Service token", "Поле очищено. Для обмена silent_token нужен service token приложения.", parent=root)
+            return
+        VK_SERVICE_TOKEN_FILE.write_text(token + "\n", encoding="utf-8")
+        auth_status_var.set(f"Service token сохранён локально в {VK_SERVICE_TOKEN_FILE.name}.")
+        if show_message:
+            messagebox.showinfo("Service token", f"Ключ сохранён в {VK_SERVICE_TOKEN_FILE.name}; он не записывается в JSON-настройки.", parent=root)
+
+    ttk.Button(auth_frame, text="Сохранить", command=save_service_token).grid(row=5, column=2, padx=(8, 0), pady=3)
+
+    auth_action_frame = ttk.Frame(auth_frame)
+    auth_action_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(6, 2))
+    for column in range(3):
+        auth_action_frame.columnconfigure(column, weight=1)
+
+    def start_vk_browser_auth():
+        global _AUTH_THREAD
+        if sync_playwright is None:
+            messagebox.showerror("Playwright не установлен", "Для автоматической авторизации установите пакет:\\npython -m pip install playwright", parent=root)
+            return
+        executable = Path(chrome_exe_var.get().strip()).expanduser()
+        if not executable.is_file():
+            messagebox.showerror("Chrome не найден", f"Проверьте путь к chrome.exe:\\n{executable}", parent=root)
+            return
+        profile = browser_profile_var.get().strip()
+        if not profile:
+            messagebox.showerror("Профиль Chrome", "Укажите каталог постоянного профиля Chrome.", parent=root)
+            return
+        if _AUTH_THREAD is not None and _AUTH_THREAD.is_alive():
+            messagebox.showinfo("Авторизация VK", "Ожидание авторизации уже выполняется.", parent=root)
+            return
+        if service_token_var.get().strip():
+            try:
+                save_service_token(show_message=False)
+            except Exception as exc:
+                messagebox.showerror("Service token", f"Не удалось сохранить service token: {exc}", parent=root)
+                return
+        save_gui_settings()
+        AUTH_STOP_REQUESTED.clear()
+        auth_status_var.set("Запускаю Chrome и ожидаю ответ VK ID…")
+        _AUTH_THREAD = threading.Thread(
+            target=_browser_auth_worker,
+            args=(profile, str(executable), service_token_var.get().strip()),
+            daemon=True,
+            name="VKBrowserAuthWorker",
+        )
+        _AUTH_THREAD.start()
+
+    def stop_vk_browser_auth():
+        AUTH_STOP_REQUESTED.set()
+        auth_status_var.set("Запрошена остановка ожидания авторизации…")
+
+    def exchange_pending_silent_token():
+        service_token = service_token_var.get().strip() or read_service_token()
+        if not service_token:
+            messagebox.showwarning("Нужен service token", "Silent token нельзя использовать для photos.get/friends.get как API access_token. Укажите service token приложения и сохраните его.", parent=root)
+            return
+        if service_token_var.get().strip():
+            try:
+                save_service_token(show_message=False)
+            except Exception as exc:
+                messagebox.showerror("Service token", str(exc), parent=root)
+                return
+        try:
+            load_pending_silent_token()
+        except Exception as exc:
+            messagebox.showerror("Нет сохранённого silent_token", str(exc), parent=root)
+            return
+        threading.Thread(
+            target=_exchange_and_store_pending_token,
+            args=(service_token,),
+            daemon=True,
+            name="VKSilentTokenExchangeWorker",
+        ).start()
+        auth_status_var.set("Обмениваю сохранённый silent_token на API access_token…")
+
+    ttk.Button(auth_action_frame, text="Войти через Chrome автоматически", command=start_vk_browser_auth).grid(row=0, column=0, sticky="ew", padx=(0, 5))
+    ttk.Button(auth_action_frame, text="Обменять silent_token", command=exchange_pending_silent_token).grid(row=0, column=1, sticky="ew", padx=5)
+    ttk.Button(auth_action_frame, text="Остановить ожидание", command=stop_vk_browser_auth).grid(row=0, column=2, sticky="ew", padx=(5, 0))
+    ttk.Label(auth_frame, textvariable=auth_status_var, wraplength=980).grid(row=7, column=0, columnspan=3, sticky="ew", pady=(4, 0))
 
     def open_auth_dialog():
         try:
@@ -1746,6 +2128,14 @@ def main():
                         progress_bar.start(10)
                 elif kind == "status":
                     status_var.set(event[1])
+                elif kind == "auth_status":
+                    auth_status_var.set(event[1])
+                elif kind == "auth_needs_service_token":
+                    auth_status_var.set(event[1])
+                    messagebox.showwarning("VK ID: требуется обмен токена", event[1], parent=root)
+                elif kind == "auth_error":
+                    auth_status_var.set(event[1])
+                    messagebox.showerror("Авторизация VK", event[1], parent=root)
                 elif kind == "token_saved":
                     success, user_name, added, count, error = event[1:]
                     token_count_var.set(f"Токенов в {VK_TOKEN_FILE.name}: {count}")
@@ -1795,6 +2185,7 @@ def main():
             if not messagebox.askyesno("Выход", "Задание ещё выполняется. Запросить остановку и закрыть окно?", parent=root):
                 return
             STOP_REQUESTED.set()
+        AUTH_STOP_REQUESTED.set()
         sys.stdout = original_stdout
         sys.stderr = original_stderr
         root.destroy()
