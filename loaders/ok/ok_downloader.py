@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import os
 import json
 import queue
 import re
@@ -31,6 +32,20 @@ APP_SETTINGS_PATH = Path(__file__).resolve().with_name("ok_downloader_settings.j
 DEFAULT_FACESEARCH_DIR = Path(r"C:\FaceSearch")
 DEFAULT_SETTINGS_XML = DEFAULT_FACESEARCH_DIR / "settings.xml"
 DEFAULT_DB_PROFILES_JSON = DEFAULT_FACESEARCH_DIR / "database_profiles.json"
+
+
+def default_chrome_executable() -> str:
+    """Возвращает стандартный путь Chrome для Windows, предпочитая существующий файл."""
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES") or r"C:\\Program Files") / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)") or r"C:\\Program Files (x86)") / "Google" / "Chrome" / "Application" / "chrome.exe",
+        Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return str(candidates[0])
+
 
 PHOTO_CONTAINER = "div.photo-stream"
 
@@ -1259,6 +1274,9 @@ def load_gui_paths() -> dict[str, str]:
         "auto_import": True,
         "create_crop_files": True,
         "build_index_after": False,
+        "browser_profile_dir": str(PROFILE_DIR),
+        "chrome_exe_path": default_chrome_executable(),
+        "delete_processed_files": False,
     }
     try:
         if APP_SETTINGS_PATH.is_file():
@@ -1282,6 +1300,9 @@ def load_gui_paths() -> dict[str, str]:
                 defaults["auto_import"] = bool(data.get("auto_import", True))
                 defaults["create_crop_files"] = bool(data.get("create_crop_files", True))
                 defaults["build_index_after"] = bool(data.get("build_index_after", False))
+                defaults["browser_profile_dir"] = str(data.get("browser_profile_dir") or defaults["browser_profile_dir"])
+                defaults["chrome_exe_path"] = str(data.get("chrome_exe_path") or defaults["chrome_exe_path"])
+                defaults["delete_processed_files"] = bool(data.get("delete_processed_files", False))
     except Exception as exc:
         print(f"[WARN] Не удалось загрузить настройки окна: {exc}")
     return defaults
@@ -1292,12 +1313,18 @@ def save_gui_paths(
     auto_import: bool,
     create_crop_files: bool = True,
     build_index_after: bool = False,
+    browser_profile_dir: str = "",
+    chrome_exe_path: str = "",
+    delete_processed_files: bool = False,
 ) -> None:
     payload = {
         "facesearch_dir": str(facesearch_dir or "").strip(),
         "auto_import": bool(auto_import),
         "create_crop_files": bool(create_crop_files),
         "build_index_after": bool(build_index_after),
+        "browser_profile_dir": str(browser_profile_dir or "").strip(),
+        "chrome_exe_path": str(chrome_exe_path or "").strip(),
+        "delete_processed_files": bool(delete_processed_files),
     }
     tmp = APP_SETTINGS_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1310,6 +1337,65 @@ def config_paths_from_directory(facesearch_dir: str | Path) -> tuple[Path, Path]
     return directory / "settings.xml", directory / "database_profiles.json"
 
 
+def launch_browser_context(playwright, profile_directory: str | Path, chrome_executable: str | Path):
+    """Запускает установленный Chrome с указанным постоянным профилем."""
+    profile_path = Path(profile_directory).expanduser()
+    if not str(profile_path).strip():
+        raise ValueError("Не задан каталог профиля Chrome.")
+    profile_path.mkdir(parents=True, exist_ok=True)
+
+    executable = Path(chrome_executable).expanduser()
+    if not executable.is_file():
+        raise FileNotFoundError(
+            f"Не найден chrome.exe: {executable}. Укажите корректный путь к исполняемому файлу Chrome."
+        )
+    return playwright.chromium.launch_persistent_context(
+        user_data_dir=str(profile_path.resolve()),
+        executable_path=str(executable.resolve()),
+        headless=False,
+        viewport=None,
+        no_viewport=True,
+        locale="ru-RU",
+        accept_downloads=True,
+        args=[
+            "--start-maximized",
+            "--window-size=1920,1080",
+            "--window-position=0,0",
+        ],
+    )
+
+
+def delete_processed_pair(image_path: Path | None, json_path: Path | None, *, enabled: bool) -> int:
+    """Удаляет только пару изображения/JSON внутри OUT_DIR после успешной обработки."""
+    if not enabled:
+        return 0
+    root = OUT_DIR.resolve()
+    removed = 0
+    for candidate in (image_path, json_path):
+        if candidate is None:
+            continue
+        path = Path(candidate)
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(root)
+            if resolved.is_file():
+                resolved.unlink()
+                removed += 1
+        except ValueError:
+            print(f"[WARN] Не удаляю файл за пределами каталога загрузки: {path}")
+        except OSError as exc:
+            print(f"[WARN] Не удалось удалить обработанный файл {path}: {exc}")
+    if removed:
+        print(f"[CLEANUP-PROCESSED] Удалено файлов: {removed}")
+    return removed
+
+
+def import_result_allows_cleanup(result: dict) -> bool:
+    """Не удаляет фото, где штатная детекция не нашла лица и импорт не создал запись."""
+    message = str(result.get("message") or "").strip().lower()
+    return not message.startswith("лицо не найдено")
+
+
 # ============================ Основной сбор ============================
 
 def collect_photos(
@@ -1319,6 +1405,7 @@ def collect_photos(
     importer: FaceSearchImporter | None = None,
     build_index_after: bool = False,
     progress_callback=None,
+    delete_processed_files: bool = False,
 ):
     def report_progress(current=None, total=None, message=""):
         if progress_callback is not None:
@@ -1582,6 +1669,8 @@ def collect_photos(
                     continue
                 try:
                     import_status = importer.import_image(image_path, json_path, old_meta)
+                    if delete_processed_files and import_result_allows_cleanup(import_status):
+                        delete_processed_pair(image_path, json_path, enabled=True)
                     completed.add(pid)
                     if old_url_key:
                         db_existing_url_keys.add(old_url_key)
@@ -1707,11 +1796,15 @@ def collect_photos(
                 profile_info=current_info,
                 url_resolution=resolution,
             )
+            sidecar_saved = False
             try:
                 write_metadata(json_path, refreshed)
                 metadata_sidecars_updated += 1
+                sidecar_saved = True
             except Exception as exc:
                 print(f"[WARN] Не удалось обновить JSON после синхронизации URL {json_path.name}: {exc}")
+            if sidecar_saved and delete_processed_files:
+                delete_processed_pair(image_path, json_path, enabled=True)
             completed.add(pid)
             pending_entries.pop(pid, None)
             db_skipped_ids.add(pid)
@@ -1736,6 +1829,8 @@ def collect_photos(
                     "",
                 )
                 refresh_existing_sidecar(pid, image_path, json_path, old_meta, matched_url)
+                if not _meta_get(old_meta, _META_DUPLICATE_OF) and delete_processed_files:
+                    delete_processed_pair(image_path, json_path, enabled=True)
                 completed.add(pid)
                 db_skipped_ids.add(pid)
                 importer.skipped_count += 1
@@ -2006,6 +2101,8 @@ def collect_photos(
                     f"[DB-IMPORT] {image_path.name}: лица={result.get('faces', 0)}; "
                     f"обновлено={result.get('updated', 0)}; добавлено={result.get('added', 0)}"
                 )
+                if delete_processed_files and import_result_allows_cleanup(result):
+                    delete_processed_pair(image_path, json_path, enabled=True)
             except Exception as exc:
                 errors += 1
                 imported_errors += 1
@@ -2041,37 +2138,61 @@ def main():
     def browser_worker():
         try:
             with sync_playwright() as playwright:
-                context = playwright.chromium.launch_persistent_context(
-                    user_data_dir=str(PROFILE_DIR),
-                    channel="chrome",
-                    headless=False,
-                    viewport=None,
-                    no_viewport=True,
-                    locale="ru-RU",
-                    accept_downloads=True,
-                    args=[
-                        "--start-maximized",
-                        "--window-size=1920,1080",
-                        "--window-position=0,0",
-                    ],
-                )
-                if not context.pages:
-                    context.new_page().goto(START_URL)
-                elif all("ok.ru" not in p.url for p in context.pages):
-                    context.pages[0].goto(START_URL)
+                context = None
+                try:
+                    context = launch_browser_context(
+                        playwright, browser_profile_dir_var.get(), chrome_exe_path_var.get()
+                    )
+                    if not context.pages:
+                        context.new_page().goto(START_URL)
+                    elif all("ok.ru" not in p.url for p in context.pages):
+                        context.pages[0].goto(START_URL)
+                except Exception as exc:
+                    browser_state["error"] = str(exc)
+                    set_status(f"Ошибка запуска Chrome: {exc}")
+                finally:
+                    browser_ready.set()
 
-                browser_ready.set()
                 while True:
                     command = commands.get()
                     if command[0] == "quit":
                         break
+                    if command[0] == "restart_browser":
+                        browser_ready.clear()
+                        try:
+                            if context is not None:
+                                try:
+                                    context.close()
+                                except Exception:
+                                    pass
+                            context = None
+                            context = launch_browser_context(playwright, command[1], command[2])
+                            if not context.pages:
+                                context.new_page().goto(START_URL)
+                            elif all("ok.ru" not in p.url for p in context.pages):
+                                context.pages[0].goto(START_URL)
+                            browser_state["error"] = None
+                            set_status("Chrome запущен с выбранными путями. Откройте профиль OK.ru → Фото.")
+                            set_progress(0, 1, "Браузер готов")
+                        except Exception as exc:
+                            context = None
+                            browser_state["error"] = str(exc)
+                            set_status(f"Ошибка перезапуска Chrome: {exc}")
+                            set_progress(0, 1, f"Ошибка перезапуска Chrome: {exc}")
+                        finally:
+                            browser_ready.set()
+                        continue
                     if command[0] == "collect":
+                        if context is None:
+                            set_status("Chrome не запущен. Проверьте путь к chrome.exe и нажмите «Применить пути».")
+                            continue
                         resolve = command[1]
                         settings_xml = command[2]
                         profiles_json = command[3]
                         auto_import = command[4]
                         create_crop_files = command[5]
                         build_index_after = command[6]
+                        delete_processed_files = command[7]
                         importer = None
                         try:
                             if auto_import:
@@ -2092,6 +2213,7 @@ def main():
                                 importer=importer,
                                 build_index_after=build_index_after,
                                 progress_callback=set_progress,
+                                delete_processed_files=delete_processed_files,
                             )
                         except Exception as exc:
                             print(f"[ERROR] {exc}")
@@ -2110,8 +2232,8 @@ def main():
 
     root = tk.Tk()
     root.title("OK.ru — загрузчик фотографий и импорт FaceSearch")
-    root.geometry("850x510")
-    root.minsize(760, 470)
+    root.geometry("920x650")
+    root.minsize(820, 610)
     root.resizable(True, True)
 
     frame = ttk.Frame(root, padding=12)
@@ -2124,7 +2246,7 @@ def main():
         wraplength=800,
     ).grid(row=0, column=0, sticky="w", pady=(0, 8))
 
-    paths_frame = ttk.LabelFrame(frame, text="Настройки FaceSearch", padding=8)
+    paths_frame = ttk.LabelFrame(frame, text="Настройки FaceSearch и браузера", padding=8)
     paths_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
     paths_frame.columnconfigure(1, weight=1)
 
@@ -2133,6 +2255,9 @@ def main():
     auto_import_var = tk.BooleanVar(value=bool(initial_paths.get("auto_import", True)))
     create_crop_files_var = tk.BooleanVar(value=bool(initial_paths.get("create_crop_files", True)))
     build_index_after_var = tk.BooleanVar(value=bool(initial_paths.get("build_index_after", False)))
+    browser_profile_dir_var = tk.StringVar(value=initial_paths["browser_profile_dir"])
+    chrome_exe_path_var = tk.StringVar(value=initial_paths["chrome_exe_path"])
+    delete_processed_files_var = tk.BooleanVar(value=bool(initial_paths.get("delete_processed_files", False)))
 
     ttk.Label(paths_frame, text="Папка FaceSearch:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
     ttk.Entry(paths_frame, textvariable=facesearch_dir_var).grid(row=0, column=1, sticky="ew", pady=3)
@@ -2160,6 +2285,9 @@ def main():
                 auto_import_var.get(),
                 create_crop_files_var.get(),
                 build_index_after_var.get(),
+                browser_profile_dir_var.get(),
+                chrome_exe_path_var.get(),
+                delete_processed_files_var.get(),
             )
         except Exception as exc:
             print(f"[WARN] Не удалось сохранить настройки формы: {exc}")
@@ -2177,6 +2305,52 @@ def main():
             variable.set(selected)
             persist_settings()
             config_status_var.set("Путь изменён. Нажмите «Проверить настройки», чтобы прочитать профиль.")
+
+    def choose_browser_profile_directory(variable, parent):
+        current = variable.get().strip()
+        initial_dir = current if current and Path(current).expanduser().is_dir() else str(Path(__file__).resolve().parent)
+        selected = filedialog.askdirectory(
+            parent=parent,
+            title="Выберите каталог постоянного профиля Chrome",
+            initialdir=initial_dir,
+            mustexist=False,
+        )
+        if selected:
+            variable.set(selected)
+            persist_settings()
+
+    def choose_chrome_executable(variable, parent):
+        current = variable.get().strip()
+        initial_dir = str(Path(current).expanduser().parent) if current and Path(current).expanduser().parent.is_dir() else str(Path.home())
+        selected = filedialog.askopenfilename(
+            parent=parent,
+            title="Выберите исполняемый файл Google Chrome",
+            initialdir=initial_dir,
+            filetypes=[("Google Chrome", "chrome.exe"), ("Исполняемые файлы", "*.exe"), ("Все файлы", "*.*")],
+        )
+        if selected:
+            variable.set(selected)
+            persist_settings()
+
+    def apply_browser_paths():
+        profile_text = browser_profile_dir_var.get().strip()
+        chrome_text = chrome_exe_path_var.get().strip()
+        if not profile_text:
+            messagebox.showerror("Путь профиля Chrome", "Укажите каталог профиля браузера.", parent=root)
+            return
+        if not chrome_text or not Path(chrome_text).expanduser().is_file():
+            messagebox.showerror(
+                "Путь к Chrome",
+                f"Файл chrome.exe не найден:\n{chrome_text or '(путь не указан)'}",
+                parent=root,
+            )
+            return
+        persist_settings()
+        browser_ready.clear()
+        browser_state["error"] = None
+        commands.put(("restart_browser", profile_text, chrome_text))
+        set_status("Применяю настройки и перезапускаю Chrome…")
+        set_progress(None, None, "Перезапуск Chrome с выбранным профилем…")
 
     def check_configuration(show_dialog: bool = True):
         try:
@@ -2202,11 +2376,33 @@ def main():
                 messagebox.showerror("Настройки FaceSearch", str(exc), parent=root)
             return None
 
+    ttk.Label(paths_frame, text="Папка профиля Chrome:").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
+    ttk.Entry(paths_frame, textvariable=browser_profile_dir_var).grid(row=3, column=1, sticky="ew", pady=3)
     ttk.Button(
         paths_frame,
-        text="Проверить настройки",
+        text="Выбрать папку…",
+        command=lambda: choose_browser_profile_directory(browser_profile_dir_var, root),
+    ).grid(row=3, column=2, padx=(8, 0), pady=3)
+
+    ttk.Label(paths_frame, text="Путь к chrome.exe:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+    ttk.Entry(paths_frame, textvariable=chrome_exe_path_var).grid(row=4, column=1, sticky="ew", pady=3)
+    ttk.Button(
+        paths_frame,
+        text="Выбрать файл…",
+        command=lambda: choose_chrome_executable(chrome_exe_path_var, root),
+    ).grid(row=4, column=2, padx=(8, 0), pady=3)
+
+    ttk.Button(
+        paths_frame,
+        text="Проверить настройки FaceSearch",
         command=lambda: check_configuration(True),
-    ).grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+    ).grid(row=5, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+
+    ttk.Button(
+        paths_frame,
+        text="Применить пути и перезапустить Chrome",
+        command=apply_browser_paths,
+    ).grid(row=6, column=0, columnspan=3, sticky="ew", pady=(4, 0))
 
     auto_import_check = ttk.Checkbutton(
         frame,
@@ -2239,6 +2435,13 @@ def main():
         command=persist_settings,
     )
     build_index_check.pack(anchor="w", pady=1)
+    delete_processed_check = ttk.Checkbutton(
+        options_frame,
+        text="Удалять изображения и JSON после успешной обработки в FaceSearch",
+        variable=delete_processed_files_var,
+        command=persist_settings,
+    )
+    delete_processed_check.pack(anchor="w", pady=1)
 
     status_var = tk.StringVar(value="Запуск браузера…")
     status_label = ttk.Label(frame, textvariable=status_var, wraplength=800)
@@ -2293,6 +2496,7 @@ def main():
         state = "normal" if auto_import_var.get() else "disabled"
         create_crop_check.configure(state=state)
         build_index_check.configure(state=state)
+        delete_processed_check.configure(state=state)
         persist_settings()
 
     auto_import_var.trace_add("write", update_import_options_state)
@@ -2318,6 +2522,7 @@ def main():
             auto_import_var.get(),
             create_crop_files_var.get(),
             build_index_after_var.get(),
+            delete_processed_files_var.get(),
         ))
         set_progress(None, None, "Задание отправлено; выполняется подготовка…")
         status_var.set("Задание отправлено…")
