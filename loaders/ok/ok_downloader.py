@@ -567,30 +567,124 @@ def download_one(context, url: str, stem: Path, referer: str = "https://ok.ru/")
 
 # ============================ Поиск вкладки ============================
 
+
 def find_photos_page(context):
-    """Ищет вкладку с открытым разделом «Фото» (div.photo-stream).
-    Приоритет — URL с /photos. Никогда не возвращает случайную вкладку."""
+    """Ищет вкладку с открытым разделом «Фото».
+
+    Если открыта корневая страница профиля без /photos,
+    автоматически переходит в раздел фотографий.
+    Уже открытые разделы «Фото» не изменяет.
+    """
     candidates = []
-    for p in context.pages:
-        if p.is_closed():
+    profile_pages = []
+
+    for page in context.pages:
+        if page.is_closed():
             continue
+
         try:
-            url = p.url
-        except Exception:
-            continue
-        if "ok.ru" not in urlparse(url).netloc.lower():
-            continue
-        try:
-            if p.locator(PHOTO_CONTAINER).count() > 0:
-                candidates.append(p)
+            url = page.url
         except Exception:
             continue
 
-    if not candidates:
+        parsed = urlsplit(url)
+
+        if "ok.ru" not in parsed.netloc.lower():
+            continue
+
+        path = parsed.path.rstrip("/")
+
+        try:
+            if page.locator(PHOTO_CONTAINER).count() > 0:
+                candidates.append(page)
+                continue
+        except Exception:
+            pass
+
+        # Допускаются только корневые URL профиля:
+        # /evgenij.podoprigora
+        # /profile/123456789
+        parts = [part for part in path.split("/") if part]
+
+        is_profile_root = (
+            len(parts) == 1
+            or (
+                len(parts) == 2
+                and parts[0].lower() == "profile"
+            )
+        )
+
+        if is_profile_root:
+            profile_pages.append(page)
+
+    # Если раздел фотографий уже открыт, используем его.
+    if candidates:
+        candidates.sort(
+            key=lambda page: (
+                0
+                if urlsplit(page.url).path.rstrip("/")
+                .lower()
+                .endswith("/photos")
+                else 1
+            )
+        )
+        return candidates[0]
+
+    # Если открыта главная страница профиля,
+    # переходим в раздел фотографий.
+    if not profile_pages:
         return None
 
-    candidates.sort(key=lambda p: 0 if "/photos" in p.url else 1)
-    return candidates[0]
+    page = profile_pages[-1]
+    parsed = urlsplit(page.url)
+    path = parsed.path.rstrip("/")
+
+    if not path:
+        return None
+
+    photos_url = urlunsplit((
+        parsed.scheme or "https",
+        parsed.netloc or "ok.ru",
+        f"{path}/photos",
+        "",
+        "",
+    ))
+
+    try:
+        page.goto(
+            photos_url,
+            wait_until="domcontentloaded",
+            timeout=20000,
+        )
+
+        page.wait_for_selector(
+            PHOTO_CONTAINER,
+            state="attached",
+            timeout=15000,
+        )
+
+        return page
+
+    except PlaywrightTimeoutError:
+        try:
+            if page.locator(PHOTO_CONTAINER).count() > 0:
+                return page
+        except Exception:
+            pass
+
+        print(
+            f"[WARN] Не найден раздел фотографий "
+            f"после перехода: {photos_url}"
+        )
+        return None
+
+    except Exception as exc:
+        print(
+            f"[WARN] Не удалось открыть раздел «Фото» "
+            f"{photos_url}: {exc}"
+        )
+        return None
+
 
 
 # ============================ Сбор photo_id + preview + href ============================
