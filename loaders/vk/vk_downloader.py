@@ -405,6 +405,12 @@ def exchange_silent_token_for_legacy_user_token(
     return_auth_hash = ""
     for browser_page in list(context.pages):
         try:
+            browser_url = urlsplit(browser_page.url or "")
+            if (
+                browser_url.netloc.lower() not in {"oauth.vk.ru", "oauth.vk.com"}
+                or browser_url.path.rstrip("/") != "/blank.html"
+            ):
+                continue
             candidate_hash = browser_page.evaluate(
                 "() => { const i = window.init; return i && i.data && i.data.hash "
                 "? (i.data.hash.return_auth || '') : ''; }"
