@@ -1,5 +1,5 @@
-# Получить токен:
-# https://id.vk.ru/auth?return_auth_hash=1f3f97d3e974a20acf&redirect_uri=https%3A%2F%2Foauth.vk.ru%2Fblank.html&redirect_uri_hash=96188d4fed90d04a34&force_hash=1&app_id=8101047&response_type=token&code_challenge=&code_challenge_method=&scope=327684&state=
+# VK ID: OAuth 2.1 Authorization Code Flow с PKCE.
+# Старые access_token по-прежнему можно вставить вручную.
 
 import os
 import re
