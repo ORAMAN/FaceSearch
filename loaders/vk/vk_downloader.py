@@ -493,7 +493,7 @@ def exchange_browser_session_for_legacy_user_token(
         return token
 
     # В некоторых ответах OAuth сначала отдаёт URL, на который перенаправляет JS.
-    redirect_match = re.search(r'location\\.href\\s*=\\s*"([^"]+)"\\s*\\+\\s*addr;', response.text)
+    redirect_match = re.search(r'location\.href\s*=\s*"([^"]+)"\s*\+\s*addr;', response.text)
     if redirect_match:
         redirect_url = redirect_match.group(1)
         if not redirect_url.startswith(("http://", "https://")):
@@ -510,7 +510,7 @@ def exchange_browser_session_for_legacy_user_token(
     # Рабочий legacy-поток возвращает hash внутри window.init, именно
     # data.hash.return_auth (а не поле hash из payload silent_token).
     return_auth_hash = ""
-    auth_json_match = re.search(r"window\\.init\\s*=\\s*(\\{.*?\\});", response.text, re.DOTALL)
+    auth_json_match = re.search(r"window\.init\s*=\s*(\{.*?\});", response.text, re.DOTALL)
     if auth_json_match:
         try:
             auth_json = json.loads(auth_json_match.group(1))
