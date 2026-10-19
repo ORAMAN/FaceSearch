@@ -1998,7 +1998,7 @@ def run_download_job(
                 if STOP_REQUESTED.is_set():
                     # Если часть задач пачки ещё не была отправлена, повторяем её с начала.
                     # Успешно импортированные ID при повторном запуске будут пропущены по БД.
-                    current_id = batch_start if next_task_index < len(tasks) else batch_end
+                    current_id = batch_start if (next_task_index < len(tasks) or batch_errors) else batch_end
                     break
 
                 avatars_saved_total += len(tasks) - batch_errors
@@ -2647,6 +2647,7 @@ def main():
     action_frame.grid(row=2, column=0, sticky="ew")
     action_frame.columnconfigure(0, weight=1)
     running = {"value": False}
+    window_closing = threading.Event()
 
     def set_running(active: bool):
         running["value"] = active
@@ -2721,7 +2722,7 @@ def main():
                     import_to_database=auto_import,
                 )
                 events.put(("start_id_updated", next_start_id))
-                if importer is not None and auto_import and build_index_after and not STOP_REQUESTED.is_set():
+                if importer is not None and auto_import and build_index_after and not window_closing.is_set():
                     importer.build_index()
                 if importer is not None and auto_import:
                     print(f"✅ FaceSearch: импортировано файлов — {importer.imported_count}.")
@@ -2844,6 +2845,7 @@ def main():
             if not messagebox.askyesno("Выход", "Задание ещё выполняется. Запросить остановку и закрыть окно?", parent=root):
                 return
             STOP_REQUESTED.set()
+        window_closing.set()
         AUTH_STOP_REQUESTED.set()
         sys.stdout = original_stdout
         sys.stderr = original_stderr
