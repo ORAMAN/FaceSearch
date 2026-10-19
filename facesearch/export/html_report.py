@@ -555,6 +555,23 @@ def generate_html_gallery(
             except Exception:
                 pass
 
+            # Instagram's profile-level raw_json is shared by every image in the
+            # account. Prefer the canonical per-image metadata document when present.
+            try:
+                image_metadata = json.loads(str(result.get("metadata_json") or ""))
+                if (
+                    isinstance(image_metadata, dict)
+                    and set(image_metadata.keys()) == {"url_source", "name", "url_image", "info"}
+                    and isinstance(image_metadata.get("info"), dict)
+                ):
+                    info = image_metadata["info"]
+                    name = str(image_metadata.get("name") or name)
+                    source_url = str(image_metadata.get("url_source") or source_url)
+                    if not remote_image_url:
+                        remote_image_url = str(image_metadata.get("url_image") or "").strip()
+            except Exception:
+                pass
+
             info_rows = "".join(
                 f"<div><b>{html.escape(str(k))}:</b> {html.escape(str(v))}</div>"
                 for k, v in info.items()
