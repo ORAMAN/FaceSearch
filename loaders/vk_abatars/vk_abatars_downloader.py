@@ -1427,7 +1427,9 @@ def process_entity(
         name = name or entity.get("screen_name") or f"user_{uid}"
         display_id = str(uid)
 
-    if not is_group and abs(uid) in EXISTING_PROFILE_IDS:
+    with EXISTING_PROFILE_IDS_LOCK:
+        already_in_db = abs(uid) in EXISTING_PROFILE_IDS
+    if not is_group and already_in_db:
         print(f"[DB-SKIP] Профиль VK ID {abs(uid)} уже есть в profiles.profile_url активной БД; аватар пропущен.")
         return
 
