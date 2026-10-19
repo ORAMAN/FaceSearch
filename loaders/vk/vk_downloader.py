@@ -2038,7 +2038,7 @@ def main():
 
     ttk.Label(
         auth_frame,
-        text="Авторизация VK ID выполняется в отдельном профиле Chrome. Программа автоматически разбирает ответ blank.html: старый access_token сохраняется напрямую, а silent_token обменивается на API access_token.",
+        text="Авторизация VK ID выполняется в отдельном профиле Chrome через официальный SDK. Программа получает полный ответ авторизации и обменивает временный code на API access_token; старые токены можно добавить вручную.",
         wraplength=980,
     ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 6))
 
@@ -2216,8 +2216,8 @@ def main():
 
         save_button.configure(command=submit_token)
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
-        # Не используем grab_set: пользователь должен переключиться в внешний браузер,
-        # завершить вход VK ID и скопировать URL перенаправления.
+        # Окно не блокирует основную форму; этот диалог предназначен только для
+        # добавления ранее полученного API access_token.
         dialog.focus_set()
         root._vk_token_dialog = dialog
         root._vk_token_save_button = save_button
