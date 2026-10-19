@@ -1,10 +1,59 @@
+# Получить токен:
+# https://id.vk.ru/auth?return_auth_hash=1f3f97d3e974a20acf&redirect_uri=https%3A%2F%2Foauth.vk.ru%2Fblank.html&redirect_uri_hash=96188d4fed90d04a34&force_hash=1&app_id=8101047&response_type=token&code_challenge=&code_challenge_method=&scope=327684&state=
+
+import os
+import re
+import sys
+import json
+import time
+import queue
+import threading
+import webbrowser
+import importlib
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from urllib.parse import urlparse, urlsplit, parse_qs, unquote, urlencode
+import base64
+import hashlib
+import secrets
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import requests
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None
+
+# === ПАРАМЕТРЫ === #
+APP_DIR = Path(__file__).resolve().parent
+VK_TOKEN_FILE = APP_DIR / "vk_token.txt"
+LOG_FILE = APP_DIR / "Log.txt"
+DEFAULT_OUTPUT_DIR = APP_DIR / "VK_Downloads"
+APP_SETTINGS_PATH = APP_DIR / "vk_downloader_settings.json"
+DEFAULT_FACESEARCH_DIR = Path(r"C:\FaceSearch")
+DEFAULT_BROWSER_PROFILE_DIR = APP_DIR / "VK_Browser_Profile"
+VK_SERVICE_TOKEN_FILE = APP_DIR / "vk_service_token.txt"
+VK_SILENT_TOKEN_FILE = APP_DIR / "vk_silent_token.json"
+_META_RESOLUTION = "_url_resolution"
+_META_VERSION = "_resolution_version"
+_META_DUPLICATE_OF = "_duplicate_of"
+_META_DUPLICATE_REASON = "_duplicate_reason"
+API_VERSION = "5.199"
+BASE_URL = "https://api.vk.ru/method"
+FRIENDS_PAGE_SIZE = 5000
+AUTH_STOP_REQUESTED = threading.Event()
+_AUTH_THREAD = None
+
 # VK ID OAuth 2.1: Authorization Code Flow + PKCE.
 VKID_CLIENT_ID = "8101047"
 VKID_AUTHORIZE_URL = "https://id.vk.ru/authorize"
 VKID_TOKEN_URL = "https://id.vk.ru/oauth2/auth"
 # URI должен совпадать с доверенным Redirect URL, указанным в настройках приложения VK ID.
 VKID_REDIRECT_URI = "https://oauth.vk.ru/blank.html"
-UI_EVENTS = NoneUI_EVENTS = None
+UI_EVENTS = None
 STOP_REQUESTED = threading.Event()
 _TOKEN_FILE_LOCK = threading.Lock()
 # === ========= === #
@@ -118,7 +167,7 @@ def extract_vk_auth_payload(value: str) -> dict:
     except Exception:
         pass
 
-    match = re.search(r"(?:^|[&#?\\s])access_token(?:_[^=&#\\s]+)?=([^&#\\s]+)", value)
+    match = re.search(r"(?:^|[&#?\s])access_token(?:_[^=&#\s]+)?=([^&#\s]+)", value)
     if match:
         return {"type": "access_token", "access_token": unquote(match.group(1)).strip()}
 
@@ -209,7 +258,6 @@ def default_chrome_executable() -> str:
 
 def _build_vk_id_auth_request() -> tuple[str, str, str]:
     """Создаёт OAuth 2.1 URL VK ID с PKCE и возвращает URL, state и code_verifier."""
-    # 32 случайных байта дают base64url verifier допустимой длины (43 символа).
     code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii").rstrip("=")
     code_challenge = base64.urlsafe_b64encode(
         hashlib.sha256(code_verifier.encode("ascii")).digest()
@@ -270,8 +318,7 @@ def exchange_vk_id_code(
 
     if not isinstance(data, dict):
         raise RuntimeError(f"VK ID вернул неожиданный ответ при обмене кода: {data!r}")
-    returned_state = str(data.get("state") or "")
-    if returned_state != expected_state:
+    if str(data.get("state") or "") != expected_state:
         raise RuntimeError("VK ID вернул несовпадающий state. Токен не сохранён.")
 
     result = data.get("response") if isinstance(data.get("response"), dict) else data
@@ -454,10 +501,6 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
                         post_ui_event("token_saved", True, user_name, added, count, "")
                         post_ui_event("auth_status", f"Авторизация VK ID завершена: {user_name}. API access_token сохранён.")
                         return
-
-                    if payload_type == "authorization_code":
-                        # Ветка выше завершает обмен или сообщает ошибку; сюда выполнение не попадает.
-                        continue
 
                     if payload_type == "silent_token":
                         if not payload.get("token"):
