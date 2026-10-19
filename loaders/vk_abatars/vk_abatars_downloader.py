@@ -41,9 +41,11 @@ _META_DUPLICATE_REASON = "_duplicate_reason"
 API_VERSION = "5.199"
 BASE_URL = "https://api.vk.ru/method"
 FRIENDS_PAGE_SIZE = 5000
+USER_BATCH_SIZE = 1000  # users.get поддерживает не более 1000 ID в запросе.
 AUTH_STOP_REQUESTED = threading.Event()
 # ID пользователей, чьи профили уже заведены в активной БД FaceSearch.
 EXISTING_PROFILE_IDS: set[int] = set()
+EXISTING_PROFILE_IDS_LOCK = threading.Lock()
 _AUTH_THREAD = None
 
 # VK ID flow для загрузчика: silent_token -> auth.exchangeSilentAuthToken.
@@ -972,20 +974,27 @@ def get_group_info(group_id_or_screen_name: str, session: requests.Session):
 
 
 def get_user_info(user_ids: str, session: requests.Session):
-    url = (
-        f"https://api.vk.ru/method/users.get"
-        f"?user_ids={user_ids}"
-        f"&fields=photo_max_orig,city,home_town,sex,bdate,screen_name,deactivated,is_closed"
-        f"&access_token={reload_tokens()}"
-        f"&v={API_VERSION}"
-    )
+    """Получает подробные данные пачки пользователей одним POST-запросом users.get."""
+    params = {
+        "user_ids": user_ids,
+        "fields": "photo_max_orig,city,home_town,sex,bdate,screen_name,deactivated,is_closed",
+        "access_token": reload_tokens(),
+        "v": API_VERSION,
+    }
     time.sleep(0.35)
-    resp = session.get(url, timeout=15)
+    resp = session.post(f"{BASE_URL}/users.get", data=params, timeout=30)
     resp.raise_for_status()
     data = resp.json()
     if "error" in data:
-        raise RuntimeError(f"API error: {data['error']}")
-    return data["response"]
+        error = data["error"]
+        raise RuntimeError(
+            f"users.get: {error.get('error_msg', error)} "
+            f"(код {error.get('error_code', 'неизвестен')})"
+        )
+    response = data.get("response", [])
+    if not isinstance(response, list):
+        raise RuntimeError("VK API вернул неожиданный ответ users.get.")
+    return response
 
 
 def get_user_friends(user_id: int, session: requests.Session):
@@ -1633,6 +1642,7 @@ class FaceSearchImporter:
         self.conn = None
         self.app = None
         self.imported_count = 0
+        self._import_lock = threading.RLock()
         profile = self.config["profile"]
         profile_type = str(profile.get("type") or "sqlite").strip().lower()
         if profile_type == "sqlite":
@@ -1687,6 +1697,11 @@ class FaceSearchImporter:
         return existing
 
     def import_image(self, image_path: Path, json_path: Path, source_key: str):
+        """Сериализует доступ к общей модели и соединению с БД между потоками загрузки."""
+        with self._import_lock:
+            return self._import_image_locked(image_path, json_path, source_key)
+
+    def _import_image_locked(self, image_path: Path, json_path: Path, source_key: str):
         if self.conn is None:
             raise RuntimeError("Соединение с базой FaceSearch закрыто.")
         if not image_path.is_file() or not json_path.is_file():
@@ -1825,121 +1840,157 @@ def load_existing_vk_profile_ids(importer) -> set[int]:
 
 
 def run_download_job(
-    raw_input: str, depth: int, max_workers: int, output_dir: str,
+    start_id: int, max_workers: int, output_dir: str,
     importer=None, delete_processed_files: bool = False, import_to_database: bool = True,
 ):
-    """Загружает аватары VK и заранее исключает пользователей из активной БД."""
+    """Непрерывно обрабатывает числовые ID по возрастанию пакетами users.get."""
     global EXISTING_PROFILE_IDS
+    start_id = int(start_id)
+    if start_id < 1:
+        raise ValueError("Стартовый ID должен быть положительным числом.")
+
     EXISTING_PROFILE_IDS = load_existing_vk_profile_ids(importer)
     if importer is not None:
-        print(f"[DB-CHECK] Активный профиль FaceSearch: {importer.config['active_name']}; "
-              f"найдено VK ID для пропуска: {len(EXISTING_PROFILE_IDS)}.")
-    _load_tokens_if_needed()
-    identifiers = []
-    seen_inputs = set()
-    for raw in re.split(r"[,;\s]+", raw_input.strip()):
-        item = normalize_vk_identifier(raw)
-        if item and item not in seen_inputs:
-            seen_inputs.add(item)
-            identifiers.append(item)
-    if not identifiers:
-        raise ValueError("Не указаны ID, ссылки или короткие имена VK.")
+        print(
+            f"[DB-CHECK] Активный профиль FaceSearch: {importer.config['active_name']}; "
+            f"загружено ID для пропуска: {len(EXISTING_PROFILE_IDS)}."
+        )
 
+    _load_tokens_if_needed()
     output_root = Path(output_dir).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
+    worker_count = max(1, min(64, int(max_workers)))
+    current_id = start_id
+    checked_total = 0
+    skipped_total = 0
+    returned_total = 0
+    avatars_saved_total = 0
+    errors_total = 0
+
     print(f"🖼️ VK Avatar Downloader — каталог: {output_root}")
-    print(f"🔢 Значений для проверки: {len(identifiers)}; глубина: {depth}; потоков скачивания: {max_workers}")
-    post_ui_event("status", "Проверка ID и ссылок VK…")
+    print(
+        f"▶ Начальный ID: {start_id}; потоков загрузки: {worker_count}; "
+        f"пачка users.get: до {USER_BATCH_SIZE} ID."
+    )
+    print("ℹ️ Перебор непрерывный и работает до нажатия «Остановить».")
 
-    users = []
-    groups = []
-    unknowns = []
-    for index, identifier in enumerate(identifiers, start=1):
-        if STOP_REQUESTED.is_set():
-            print("🛑 Задание остановлено до завершения проверки сущностей.")
-            break
-        direct_id = vk_user_id_from_identifier(identifier)
-        if direct_id is not None and direct_id in EXISTING_PROFILE_IDS:
-            print(f"[DB-SKIP] ID {direct_id} уже есть в profiles.profile_url активной БД; пропуск до запроса VK API.")
-            post_ui_event("progress", index, len(identifiers), f"Пропуск существующего профиля {direct_id}")
-            continue
-        try:
-            entity = get_vk_entity(identifier)
-            kind = entity.get("type")
-            if kind == "user":
-                try:
-                    uid = int(entity.get("id"))
-                    if uid in EXISTING_PROFILE_IDS:
-                        print(f"[DB-SKIP] ID {uid} уже есть в profiles.profile_url активной БД; пропуск.")
-                    elif uid > 0 and uid not in {int(x) for x in users}:
-                        users.append(str(uid))
-                except (TypeError, ValueError):
-                    unknowns.append(identifier)
-            elif kind == "group":
-                try:
-                    gid = abs(int(entity.get("id")))
-                    if gid and str(gid) not in {str(x) for x in groups}:
-                        groups.append(str(gid))
-                except (TypeError, ValueError):
-                    unknowns.append(identifier)
-            else:
-                unknowns.append(identifier)
-        except Exception as exc:
-            print(f"⚠️ Не удалось определить '{identifier}': {exc}")
-            unknowns.append(identifier)
-        post_ui_event("progress", index, len(identifiers), f"Проверка сущностей: {index}/{len(identifiers)}")
+    with requests.Session() as session:
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="VKAvatar") as executor:
+            while not STOP_REQUESTED.is_set():
+                batch_start = current_id
+                batch_end = batch_start + USER_BATCH_SIZE
+                batch_ids = list(range(batch_start, batch_end))
 
-    print(f"✅ Пользователей: {len(users)}; групп: {len(groups)}; не найдено: {len(unknowns)}")
-    if unknowns:
-        print("   Не распознаны: " + ", ".join(unknowns))
+                # Существующие профили исключаем ещё до обращения к VK API.
+                with EXISTING_PROFILE_IDS_LOCK:
+                    request_ids = [
+                        uid for uid in batch_ids
+                        if uid not in EXISTING_PROFILE_IDS
+                    ]
+                skipped = len(batch_ids) - len(request_ids)
+                skipped_total += skipped
+                checked_total += len(batch_ids)
 
-    if users and not STOP_REQUESTED.is_set():
-        post_ui_event("status", "Получение данных корневых пользователей…")
-        try:
-            with requests.Session() as session:
-                root_users = get_user_info(",".join(dict.fromkeys(users)), session)
-        except Exception as exc:
-            print(f"❌ Ошибка получения пользователей: {exc}")
-            root_users = []
-        if root_users:
-            process_users_with_friends(
-                root_users,
-                depth=max(0, int(depth)),
-                MAX_WORKERS=max(1, int(max_workers)),
-                base_output_dir=output_root,
-                importer=importer,
-                delete_processed_files=delete_processed_files,
-                import_to_database=import_to_database,
-            )
-        else:
-            print("❌ Пользователи не найдены или API не вернул их данные.")
-
-    if groups and not STOP_REQUESTED.is_set():
-        if depth > 0:
-            print("ℹ️ Глубина вложенности применяется только к пользователям; группы обрабатываются без обхода друзей.")
-        for index, group_id in enumerate(groups, start=1):
-            if STOP_REQUESTED.is_set():
-                break
-            try:
-                post_ui_event("status", f"Получение данных группы {index}/{len(groups)}…")
-                with requests.Session() as session:
-                    group = get_group_info(group_id, session)
-                gid = -abs(int(group["id"]))
-                name = group.get("name") or f"group_{abs(gid)}"
-                folder_name = sanitize_filename(f"{name} ({gid})")
-                base_dir = str(output_root / folder_name)
-                os.makedirs(base_dir, exist_ok=True)
-                process_entity(
-                    group, base_dir, is_group=True, MAX_WORKERS=max_workers,
-                    importer=importer, delete_processed_files=delete_processed_files,
-                    import_to_database=import_to_database,
+                post_ui_event(
+                    "status",
+                    f"Проверка ID {batch_start}–{batch_end - 1}; "
+                    f"найдено в БД для пропуска: {skipped}."
                 )
-            except Exception as exc:
-                print(f"💥 Ошибка обработки группы '{group_id}': {exc}")
-    if STOP_REQUESTED.is_set():
-        print("🛑 Работа остановлена. Уже скачанные файлы сохранены.")
-    else:
-        print("🏁 Задание завершено.")
+                post_ui_event(
+                    "progress", 0, 0,
+                    f"ID {batch_start}–{batch_end - 1} | "
+                    f"проверено: {checked_total:,} | пропущено по БД: {skipped_total:,}"
+                )
+
+                returned_users = []
+                if request_ids:
+                    # POST позволяет передать полный пакет ID без чрезмерно длинного URL.
+                    returned_users = get_user_info(",".join(map(str, request_ids)), session)
+
+                users_by_id = {}
+                for user in returned_users:
+                    try:
+                        uid = int(user.get("id"))
+                    except (TypeError, ValueError, AttributeError):
+                        continue
+                    if uid in request_ids:
+                        users_by_id[uid] = user
+                returned_total += len(users_by_id)
+                missing_count = len(request_ids) - len(users_by_id)
+                print(
+                    f"[BATCH] ID {batch_start}–{batch_end - 1}: "
+                    f"профилей в БД пропущено {skipped}; "
+                    f"запрошено через VK {len(request_ids)}; "
+                    f"получено пользователей {len(users_by_id)}; "
+                    f"не найдено VK {max(0, missing_count)}."
+                )
+
+                futures = {}
+                # Отправляем задания в пул строго в порядке ID. Загрузки выполняются параллельно.
+                for uid in request_ids:
+                    if STOP_REQUESTED.is_set():
+                        break
+                    user = users_by_id.get(uid)
+                    if user is None:
+                        continue
+                    if user.get("deactivated"):
+                        print(f"[VK-SKIP] ID {uid}: профиль деактивирован ({user.get('deactivated')}).")
+                        continue
+                    display_name = (
+                        f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+                        or user.get("screen_name")
+                        or f"user_{uid}"
+                    )
+                    folder_name = sanitize_filename(f"{display_name} ({uid})")
+                    base_dir = str(output_root / folder_name)
+                    os.makedirs(base_dir, exist_ok=True)
+                    future = executor.submit(
+                        process_entity,
+                        user,
+                        base_dir,
+                        False,
+                        worker_count,
+                        importer,
+                        delete_processed_files if import_to_database else False,
+                        import_to_database,
+                    )
+                    futures[future] = uid
+
+                batch_errors = 0
+                for future in as_completed(futures):
+                    uid = futures[future]
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        batch_errors += 1
+                        errors_total += 1
+                        print(f"[ERROR] ID {uid}: {exc}")
+                    if STOP_REQUESTED.is_set():
+                        # Уже выполняющиеся сетевые запросы завершаются штатно;
+                        # новые пакеты после этой пачки запрошены не будут.
+                        pass
+
+                if STOP_REQUESTED.is_set():
+                    # Вся текущая пачка завершена; следующий ID можно безопасно сохранить для продолжения.
+                    current_id = batch_end
+                    break
+
+                avatars_saved_total += len(futures) - batch_errors
+                print(
+                    f"[TOTAL] проверено ID: {checked_total:,}; "
+                    f"пропущено по БД: {skipped_total:,}; "
+                    f"профилей получено: {returned_total:,}; "
+                    f"задач завершено без исключений: {avatars_saved_total:,}; "
+                    f"ошибок обработки: {errors_total:,}."
+                )
+                current_id = batch_end
+
+    print(
+        f"🏁 Остановлено на границе пачки. Следующий стартовый ID: {current_id}. "
+        f"Проверено ID: {checked_total:,}; пропущено по БД: {skipped_total:,}; "
+        f"пользователей получено от VK: {returned_total:,}; ошибок: {errors_total:,}."
+    )
+    return current_id
 
 
 class QueueStream:
@@ -2043,30 +2094,33 @@ def main():
 
     ttk.Label(
         outer,
-        text="Введите ID, короткие имена или ссылки VK. Можно обходить друзей на заданную глубину; загрузчик сохраняет только аватарки и их JSON-метаданные.",
+        text="Загрузка аватарок по последовательным ID VK. Существующие в активной базе FaceSearch ID пропускаются; остановить бесконечный перебор можно кнопкой «Остановить».",
         wraplength=980,
     ).grid(row=0, column=0, sticky="w", pady=(0, 8))
 
-    source_frame = ttk.LabelFrame(outer, text="Пользователи и группы", padding=8)
+    source_frame = ttk.LabelFrame(outer, text="Последовательный обход ID", padding=8)
     source_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-    source_frame.columnconfigure(0, weight=1)
-    input_text = tk.Text(source_frame, height=4, wrap="word", undo=True)
-    input_text.grid(row=0, column=0, sticky="ew")
-    input_text.insert("1.0", "")
+    source_frame.columnconfigure(1, weight=1)
+    ttk.Label(source_frame, text="Стартовый ID пользователя:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+    start_id_var = tk.StringVar(value="")
+    ttk.Entry(source_frame, textvariable=start_id_var, width=20).grid(row=0, column=1, sticky="w", pady=3)
     ttk.Label(
         source_frame,
-        text="Можно вставить несколько значений, разделяя их пробелами, запятыми или переводами строк.",
-    ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        text="Сканирование продолжается по возрастанию ID до остановки. Данные запрашиваются пакетами по 1000 ID; существующие в БД не отправляются в VK API.",
+        wraplength=980,
+    ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
     settings_frame = ttk.LabelFrame(outer, text="Параметры загрузки", padding=8)
     settings_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-    settings_frame.columnconfigure(1, weight=1)
-    ttk.Label(settings_frame, text="Глубина обхода друзей:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
-    depth_var = tk.StringVar(value="0")
-    ttk.Spinbox(settings_frame, from_=0, to=10, textvariable=depth_var, width=8).grid(row=0, column=1, sticky="w", pady=3)
-    ttk.Label(settings_frame, text="0 — только введённые пользователи; 1 — также их друзья; 2 — друзья друзей и т. д. На группы глубина не распространяется.", wraplength=850).grid(row=0, column=2, sticky="w", padx=(12, 0), pady=3)
-    # Аватары обрабатываются последовательно; скрытый параметр оставлен для обратной совместимости настроек.
-    workers_var = tk.StringVar(value="1")
+    settings_frame.columnconfigure(2, weight=1)
+    ttk.Label(settings_frame, text="Потоков загрузки:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+    workers_var = tk.StringVar(value="8")
+    ttk.Spinbox(settings_frame, from_=1, to=64, textvariable=workers_var, width=8).grid(row=0, column=1, sticky="w", pady=3)
+    ttk.Label(
+        settings_frame,
+        text="ID передаются на обработку по порядку, скачивание аватаров выполняется параллельно.",
+        wraplength=850,
+    ).grid(row=0, column=2, sticky="w", padx=(12, 0), pady=3)
 
     output_frame = ttk.LabelFrame(outer, text="Каталог сохранения", padding=8)
     output_frame.grid(row=3, column=0, sticky="ew", pady=(0, 8))
@@ -2154,8 +2208,8 @@ def main():
             "create_crop_files": True,
             "build_index_after": False,
             "delete_processed_files": False,
-            "depth": 0,
-            "workers": 1,
+            "start_id": "",
+            "workers": 8,
             "browser_profile_dir": str(DEFAULT_BROWSER_PROFILE_DIR),
             "chrome_exe_path": default_chrome_executable(),
         }
@@ -2174,7 +2228,7 @@ def main():
         create_crop_var.set(bool(defaults["create_crop_files"]))
         build_index_var.set(bool(defaults["build_index_after"]))
         delete_processed_var.set(bool(defaults["delete_processed_files"]))
-        depth_var.set(str(defaults["depth"]))
+        start_id_var.set(str(defaults["start_id"]))
         workers_var.set(str(defaults["workers"]))
         browser_profile_var.set(str(defaults["browser_profile_dir"]))
         chrome_exe_var.set(str(defaults["chrome_exe_path"]))
@@ -2189,7 +2243,7 @@ def main():
             "create_crop_files": bool(create_crop_var.get()),
             "build_index_after": bool(build_index_var.get()),
             "delete_processed_files": bool(delete_processed_var.get()),
-            "depth": depth_var.get().strip(),
+            "start_id": start_id_var.get().strip(),
             "workers": workers_var.get().strip(),
             "browser_profile_dir": browser_profile_var.get().strip(),
             "chrome_exe_path": chrome_exe_var.get().strip(),
@@ -2208,7 +2262,7 @@ def main():
 
     load_gui_settings()
     update_import_state()
-    for variable in (output_var, facesearch_dir_var, depth_var, workers_var):
+    for variable in (output_var, facesearch_dir_var, start_id_var, workers_var):
         variable.trace_add("write", lambda *_args: save_gui_settings())
 
     def refresh_token_count():
@@ -2574,20 +2628,18 @@ def main():
         stop_button.configure(state="normal" if active else "disabled")
 
     def start_job():
-        raw = input_text.get("1.0", "end").strip()
-        if not raw:
-            messagebox.showwarning("VK загрузчик", "Введите ID, короткие имена или ссылки VK.", parent=root)
-            input_text.focus_set()
-            return
         try:
-            depth = int(depth_var.get().strip())
+            raw_start_id = start_id_var.get().strip()
+            if not raw_start_id:
+                raise ValueError("Укажите стартовый ID пользователя VK.")
+            start_id = int(raw_start_id)
             workers = int(workers_var.get().strip())
-            if depth < 0 or depth > 10:
-                raise ValueError("Глубина должна быть от 0 до 10.")
+            if start_id < 1:
+                raise ValueError("Стартовый ID должен быть положительным числом.")
             if workers < 1 or workers > 64:
                 raise ValueError("Количество потоков должно быть от 1 до 64.")
         except ValueError as exc:
-            messagebox.showerror("Параметры", str(exc) or "Проверьте глубину и количество потоков.", parent=root)
+            messagebox.showerror("Параметры", str(exc) or "Проверьте стартовый ID и число потоков.", parent=root)
             return
         token_count = len(_read_token_file())
         if token_count == 0:
@@ -2635,13 +2687,14 @@ def main():
                 )
                 mode_text = "готов к импорту" if auto_import else "подключён только для проверки уже существующих профилей"
                 print(f"✅ FaceSearch: активный профиль «{importer.config['active_name']}» {mode_text}.")
-                run_download_job(
-                    raw, depth, workers,
+                next_start_id = run_download_job(
+                    start_id, workers,
                     output_dir,
                     importer=importer,
                     delete_processed_files=delete_processed_files and importer is not None and auto_import,
                     import_to_database=auto_import,
                 )
+                events.put(("start_id_updated", next_start_id))
                 if importer is not None and auto_import and build_index_after and not STOP_REQUESTED.is_set():
                     importer.build_index()
                 if importer is not None and auto_import:
@@ -2703,6 +2756,8 @@ def main():
                     else:
                         progress_bar.configure(mode="indeterminate")
                         progress_bar.start(10)
+                elif kind == "start_id_updated":
+                    start_id_var.set(str(event[1]))
                 elif kind == "status":
                     status_var.set(event[1])
                 elif kind == "auth_status":
