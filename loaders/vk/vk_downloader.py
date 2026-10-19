@@ -295,6 +295,7 @@ def _save_pending_silent_token(payload: dict) -> None:
         "type": "silent_token",
         "token": str(payload.get("token") or ""),
         "uuid": str(payload.get("uuid") or ""),
+        "hash": str(payload.get("hash") or ""),
         "user_id": user.get("id"),
         "first_name": user.get("first_name", ""),
         "last_name": user.get("last_name", ""),
@@ -360,6 +361,152 @@ def exchange_silent_token(silent_token: str, service_token: str, uuid: str = "")
     if not isinstance(result, dict) or not result.get("access_token"):
         raise RuntimeError(f"VK не вернул access_token при обмене: {data}")
     return result
+
+
+def _browser_session_from_context(context) -> tuple[requests.Session, int]:
+    """Создаёт requests-сессию с cookies авторизованного браузерного контекста."""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/150.0.0.0 Safari/537.36"
+        )
+    })
+    copied = 0
+    for cookie in context.cookies():
+        name = str(cookie.get("name") or "").strip()
+        value = cookie.get("value")
+        if not name or value is None:
+            continue
+        options = {
+            "path": str(cookie.get("path") or "/"),
+            "secure": bool(cookie.get("secure", False)),
+        }
+        domain = cookie.get("domain")
+        if domain:
+            options["domain"] = str(domain)
+        session.cookies.set(name, str(value), **options)
+        copied += 1
+    return session, copied
+
+
+def exchange_silent_token_for_legacy_user_token(
+    payload: dict, context, app_id: str = VKID_CLIENT_ID, scope: int = 327684
+) -> str:
+    """Обменивает VK ID callback на legacy user API token через текущую браузерную сессию.
+
+    VK ID callback содержит hash, используемый endpoint connect_internal. Затем
+    auth.getOauthToken выдаёт токен приложения для legacy API-методов.
+    """
+    silent_token = str(payload.get("token") or "").strip()
+    return_auth_hash = str(payload.get("hash") or "").strip()
+    uuid = str(payload.get("uuid") or "").strip()
+    if not silent_token:
+        raise ValueError("VK ID вернул silent_token без поля token.")
+    if not return_auth_hash:
+        raise ValueError(
+            "VK ID вернул silent_token, но в payload отсутствует hash. "
+            "Не удалось запустить обмен на пользовательский API-токен."
+        )
+
+    session, cookie_count = _browser_session_from_context(context)
+    if cookie_count == 0:
+        raise RuntimeError(
+            "Ответ VK ID получен, но cookies браузерной сессии не удалось скопировать. "
+            "Повторите вход в окне Chrome, которое открыл сам загрузчик."
+        )
+
+    connect_response = session.post(
+        "https://login.vk.com/?act=connect_internal",
+        data={
+            "uuid": uuid,
+            "service_group": "",
+            "return_auth_hash": return_auth_hash,
+            "version": 1,
+            "app_id": app_id,
+        },
+        headers={
+            "Origin": "https://id.vk.ru",
+            "Referer": "https://id.vk.ru/",
+        },
+        timeout=30,
+    )
+    connect_response.raise_for_status()
+    try:
+        connect_data = connect_response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            "VK вернул неожиданный ответ при получении временного токена "
+            "через connect_internal."
+        ) from exc
+
+    if not isinstance(connect_data, dict) or connect_data.get("type") != "okay":
+        reason = ""
+        if isinstance(connect_data, dict):
+            reason = str(connect_data.get("error") or connect_data.get("message") or connect_data.get("type") or "")
+        raise RuntimeError(
+            "VK отклонил запрос connect_internal. Проверьте, что вошли в аккаунт "
+            "в окне Chrome загрузчика и приложение допускает этот тип авторизации."
+            + (f" Ответ VK: {reason}" if reason else "")
+        )
+
+    data = connect_data.get("data") or {}
+    temporary_token = str(data.get("access_token") or "").strip()
+    auth_user_hash = str(data.get("auth_user_hash") or "").strip()
+    if not temporary_token or not auth_user_hash:
+        raise RuntimeError(
+            "VK подтвердил connect_internal, но не вернул необходимые поля "
+            "access_token/auth_user_hash."
+        )
+
+    oauth_response = session.post(
+        "https://api.vk.com/method/auth.getOauthToken",
+        data={
+            "hash": return_auth_hash,
+            "auth_user_hash": auth_user_hash,
+            "app_id": app_id,
+            "client_id": app_id,
+            "scope": scope,
+            "access_token": temporary_token,
+            "is_seamless_auth": 1,
+            "v": "5.207",
+        },
+        headers={"Origin": "https://id.vk.ru"},
+        timeout=30,
+    )
+    oauth_response.raise_for_status()
+    try:
+        oauth_data = oauth_response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            "VK вернул неожиданный ответ при запросе пользовательского API-токена."
+        ) from exc
+
+    error = oauth_data.get("error") if isinstance(oauth_data, dict) else None
+    if error:
+        raise RuntimeError(
+            "VK не выдал пользовательский API-токен: "
+            f"{error.get('error_msg', error)} (код {error.get('error_code', '?')})."
+        )
+    result = oauth_data.get("response") if isinstance(oauth_data, dict) else None
+    if isinstance(result, str):
+        token = result.strip()
+    elif isinstance(result, dict):
+        token = str(result.get("access_token") or "").strip()
+    else:
+        token = ""
+    if not token:
+        raise RuntimeError(
+            "VK не вернул access_token из auth.getOauthToken. "
+            "Проверьте доступность legacy API-токенов для приложения."
+        )
+    if token.lower().startswith("vk2."):
+        raise RuntimeError(
+            "VK снова вернул токен нового формата vk2.a…, который не поддерживает "
+            "требуемые загрузчику методы photos.get/friends.get."
+        )
+    return token
 
 
 def _validate_and_save_access_token(token: str) -> tuple[str, bool, int]:
@@ -434,6 +581,31 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
                     current_url = current_page.url or ""
                     payload = extract_vk_auth_payload(current_url)
                     if not payload:
+                        # Не оставляем пользователя без обратной связи, если VK открыл
+                        # callback-страницу, но её fragment не удалось прочитать.
+                        try:
+                            parsed_current = urlsplit(current_url)
+                            if (
+                                parsed_current.netloc.lower() in {"oauth.vk.ru", "oauth.vk.com"}
+                                and parsed_current.path.rstrip("/") == "/blank.html"
+                            ):
+                                fragment_params = parse_qs(parsed_current.fragment, keep_blank_values=True)
+                                if fragment_params.get("payload"):
+                                    callback_status = (
+                                        "VK ID вернул callback с payload, но загрузчик не смог его разобрать. "
+                                        "Повторите вход и приложите Log.txt без токенов и URL-фрагмента."
+                                    )
+                                else:
+                                    callback_status = (
+                                        "Открыта страница возврата VK ID; ожидаю результат авторизации. "
+                                        "Если на странице уже показано предупреждение VK, проверьте, что "
+                                        "это окно Chrome было открыто кнопкой загрузчика."
+                                    )
+                                if getattr(_browser_auth_worker, "_last_callback_status", None) != callback_status:
+                                    post_ui_event("auth_status", callback_status)
+                                    _browser_auth_worker._last_callback_status = callback_status
+                        except Exception:
+                            pass
                         continue
 
                     payload_type = str(payload.get("type") or "").lower()
@@ -448,32 +620,11 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
                             raise RuntimeError("VK ID не подтвердил успешную авторизацию (auth != 1).")
 
                         _save_pending_silent_token(payload)
-                        active_service_token = (service_token or read_service_token()).strip()
-                        if not active_service_token:
-                            post_ui_event(
-                                "auth_needs_service_token",
-                                "Вход VK ID выполнен, получен silent_token, но не задан service token приложения. "
-                                "Укажите service token и нажмите «Обменять silent_token».",
-                            )
-                            return
-
                         post_ui_event(
                             "auth_status",
-                            "Получен silent_token. Обмениваю его через auth.exchangeSilentAuthToken…",
+                            "VK ID подтвердил вход. Получаю пользовательский API-токен через браузерную сессию…",
                         )
-                        result = exchange_silent_token(
-                            str(payload.get("token") or ""),
-                            active_service_token,
-                            str(payload.get("uuid") or ""),
-                        )
-                        token = str(result.get("access_token") or "")
-                        if token.lower().startswith("vk2."):
-                            raise RuntimeError(
-                                "VK API auth.exchangeSilentAuthToken также вернул токен vk2.a…, "
-                                "который не подходит для photos.get/friends.get. "
-                                "Проверьте, поддерживает ли приложение 8101047 выдачу пользовательского API-токена. "
-                                "Обычный OAuth 2.1 обмен code на /oauth2/auth для этих методов не подходит."
-                            )
+                        token = exchange_silent_token_for_legacy_user_token(payload, context)
                         user_name, added, count = _validate_and_save_access_token(token)
                         try:
                             VK_SILENT_TOKEN_FILE.unlink(missing_ok=True)
@@ -1947,7 +2098,7 @@ def main():
 
     ttk.Label(
         auth_frame,
-        text="Загрузчик запрашивает silent_token VK ID и обменивает его через VK API. Обычный OAuth 2.1 code-flow выдаёт vk2-токен, который несовместим с используемыми здесь методами photos.get/friends.get.",
+        text="После входа VK ID загрузчик получает пользовательский API-токен через браузерную сессию. Если VK не разрешит этот способ для приложения, причина отобразится здесь; code-flow с токеном vk2 не подходит для photos.get/friends.get.",
         wraplength=980,
     ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 6))
 
