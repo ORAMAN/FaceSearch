@@ -12,7 +12,7 @@ import webbrowser
 import importlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import urlparse, urlsplit, parse_qs, unquote, urlencode
+from urllib.parse import urlparse, urlsplit, parse_qs, unquote
 import base64
 import hashlib
 import secrets
@@ -49,7 +49,6 @@ _AUTH_THREAD = None
 
 # VK ID OAuth 2.1: Authorization Code Flow + PKCE.
 VKID_CLIENT_ID = "8101047"
-VKID_AUTHORIZE_URL = "https://id.vk.ru/authorize"
 VKID_TOKEN_URL = "https://id.vk.ru/oauth2/auth"
 # URI должен совпадать с доверенным Redirect URL, указанным в настройках приложения VK ID.
 VKID_REDIRECT_URI = "https://oauth.vk.ru/blank.html"
@@ -256,23 +255,11 @@ def default_chrome_executable() -> str:
     return str(candidates[0])
 
 
-def _build_vk_id_auth_request() -> tuple[str, str, str]:
-    """Создаёт OAuth 2.1 URL VK ID с PKCE и возвращает URL, state и code_verifier."""
+def _build_vk_id_pkce() -> tuple[str, str]:
+    """Создаёт state и code_verifier для OAuth 2.1 / PKCE."""
     code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii").rstrip("=")
-    code_challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(code_verifier.encode("ascii")).digest()
-    ).decode("ascii").rstrip("=")
     state = secrets.token_urlsafe(24)
-
-    params = {
-        "client_id": VKID_CLIENT_ID,
-        "response_type": "code",
-        "redirect_uri": VKID_REDIRECT_URI,
-        "code_challenge": code_challenge,
-        "code_challenge_method": "s256",
-        "state": state,
-    }
-    return f"{VKID_AUTHORIZE_URL}?{urlencode(params)}", state, code_verifier
+    return state, code_verifier
 
 
 def exchange_vk_id_code(
@@ -429,7 +416,7 @@ def _exchange_and_store_pending_token(service_token: str) -> None:
 
 
 def _browser_auth_worker(profile_directory: str, chrome_executable: str, service_token: str = "") -> None:
-    """Открывает постоянный профиль Chrome и ловит redirect VK ID автоматически."""
+    """Открывает постоянный профиль Chrome и получает полный ответ VK ID через официальный SDK."""
     if sync_playwright is None:
         post_ui_event(
             "auth_error",
@@ -445,8 +432,77 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
         if not executable.is_file():
             raise FileNotFoundError(f"Не найден chrome.exe: {executable}")
 
-        auth_url, expected_state, code_verifier = _build_vk_id_auth_request()
-        post_ui_event("auth_status", "Запускаю Chrome с постоянным профилем VK ID…")
+        expected_state, code_verifier = _build_vk_id_pkce()
+        # VK ID возвращает полный authorization payload SDK через postMessage.
+        # Прямой переход на authorize/blank.html может оставлять в URL только code и type=code_v2.
+        sdk_html = r"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Авторизация VK ID для FaceSearch</title>
+<style>
+body { font: 16px Segoe UI, sans-serif; max-width: 760px; margin: 48px auto; padding: 0 24px; color: #202124; }
+button { font: inherit; padding: 12px 22px; cursor: pointer; }
+#status { margin-top: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+</style>
+<script src="https://unpkg.com/@vkid/sdk@2.6.9/dist-sdk/umd/index.js"></script>
+</head>
+<body>
+<h2>Авторизация VK ID</h2>
+<p>Нажмите кнопку, затем завершите вход VK ID в открывшемся окне.</p>
+<button id="login" type="button">Войти через VK ID</button>
+<div id="status">Инициализация SDK…</div>
+<script>
+(() => {
+  const status = document.getElementById('status');
+  try {
+    const VKID = window.VKIDSDK;
+    if (!VKID || !VKID.Config || !VKID.Auth) {
+      throw new Error('Не удалось загрузить официальный SDK VK ID с CDN.');
+    }
+    VKID.Config.init({
+      app: 8101047,
+      redirectUrl: 'https://oauth.vk.ru/blank.html',
+      state: __EXPECTED_STATE__,
+      codeVerifier: __CODE_VERIFIER__,
+      scope: '',
+      mode: VKID.ConfigAuthMode.InNewTab,
+      responseMode: VKID.ConfigResponseMode.Callback
+    });
+    status.textContent = 'SDK готов. Нажмите «Войти через VK ID».';
+    document.getElementById('login').addEventListener('click', async () => {
+      document.getElementById('login').disabled = true;
+      status.textContent = 'Ожидание ответа VK ID…';
+      try {
+        const result = await VKID.Auth.login();
+        window.__vkidAuthResult = {
+          type: result && result.type || '',
+          code: result && result.code || '',
+          state: result && result.state || '',
+          device_id: result && result.device_id || '',
+          expires_in: result && result.expires_in || 0,
+          error: result && result.error || ''
+        };
+        status.textContent = 'Ответ VK ID получен. Возвращаюсь в FaceSearch…';
+      } catch (error) {
+        window.__vkidAuthError = String(error && (error.error_description || error.message) || error);
+        status.textContent = 'Ошибка авторизации: ' + window.__vkidAuthError;
+        document.getElementById('login').disabled = false;
+      }
+    });
+  } catch (error) {
+    window.__vkidInitError = String(error && (error.message || error) || error);
+    status.textContent = 'Ошибка инициализации VK ID SDK: ' + window.__vkidInitError;
+  }
+})();
+</script>
+</body>
+</html>"""
+        sdk_html = sdk_html.replace("__EXPECTED_STATE__", json.dumps(expected_state))
+        sdk_html = sdk_html.replace("__CODE_VERIFIER__", json.dumps(code_verifier))
+
+        post_ui_event("auth_status", "Запускаю Chrome и загружаю официальный SDK VK ID…")
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
                 user_data_dir=str(profile_path.resolve()),
@@ -459,92 +515,70 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
                 args=["--start-maximized", "--window-size=1920,1080", "--window-position=0,0"],
             )
             page = context.pages[0] if context.pages else context.new_page()
-            post_ui_event("auth_status", "Завершите вход в VK ID в окне Chrome. Ответ будет обработан автоматически.")
-            try:
-                page.goto(auth_url, wait_until="domcontentloaded", timeout=45000)
-            except Exception:
-                # При редиректе на blank.html Chromium иногда сообщает timeout уже после перехода.
-                pass
+            page.set_content(sdk_html, wait_until="load", timeout=60000)
 
             deadline = time.monotonic() + 600
+            clicked = False
             while not AUTH_STOP_REQUESTED.is_set() and time.monotonic() < deadline:
-                for current_page in list(context.pages):
-                    try:
-                        payload = extract_vk_auth_payload(current_page.url or "")
-                    except Exception:
-                        continue
-                    if not payload:
-                        continue
+                init_error = page.evaluate("window.__vkidInitError || ''")
+                if init_error:
+                    raise RuntimeError(
+                        f"Не удалось запустить официальный SDK VK ID: {init_error}. "
+                        "Проверьте доступ к unpkg.com и настройки приложения."
+                    )
 
-                    payload_type = str(payload.get("type") or "").lower()
-                    if payload_type == "authorization_error":
-                        description = payload.get("error_description") or payload.get("error") or "авторизация отклонена"
-                        raise RuntimeError(f"VK ID не завершил авторизацию: {description}")
-
-                    if payload_type == "authorization_code":
-                        if str(payload.get("state") or "") != expected_state:
-                            raise RuntimeError("Параметр state в callback не совпадает. Запросите авторизацию заново.")
-                        post_ui_event("auth_status", "Получен authorization code. Обмениваю его на access_token…")
-                        result = exchange_vk_id_code(
-                            str(payload.get("code") or ""),
-                            str(payload.get("device_id") or ""),
-                            code_verifier,
-                            expected_state,
-                            service_token or read_service_token(),
+                if not clicked:
+                    ready = page.evaluate("Boolean(window.VKIDSDK && window.VKIDSDK.Auth && window.VKIDSDK.Config)")
+                    if ready:
+                        post_ui_event(
+                            "auth_status",
+                            "Официальный SDK VK ID загружен. В открывшемся окне нажмите «Войти через VK ID» и завершите вход.",
                         )
-                        token = str(result.get("access_token") or "")
-                        user_name, added, count = _validate_and_save_access_token(token)
-                        try:
-                            VK_SILENT_TOKEN_FILE.unlink(missing_ok=True)
-                        except OSError:
-                            pass
-                        post_ui_event("token_saved", True, user_name, added, count, "")
-                        post_ui_event("auth_status", f"Авторизация VK ID завершена: {user_name}. API access_token сохранён.")
-                        return
+                        page.locator("#login").click(timeout=15000)
+                        clicked = True
 
-                    if payload_type == "silent_token":
-                        if not payload.get("token"):
-                            raise RuntimeError("VK ID вернул payload типа silent_token без поля token.")
-                        if int(payload.get("auth") or 0) != 1:
-                            raise RuntimeError("VK ID не подтвердил успешную авторизацию (auth != 1).")
-                        _save_pending_silent_token(payload)
-                        active_service_token = service_token or read_service_token()
-                        if not active_service_token:
-                            post_ui_event(
-                                "auth_needs_service_token",
-                                "Вход VK ID успешен, получен silent_token. Укажите service token приложения и нажмите «Обменять silent_token».",
-                            )
-                        else:
-                            post_ui_event("auth_status", "VK ID авторизован. Обмениваю silent_token на API access_token…")
-                            pending = load_pending_silent_token()
-                            result = exchange_silent_token(
-                                str(pending.get("token") or ""),
-                                active_service_token,
-                                str(pending.get("uuid") or ""),
-                            )
-                            user_name, added, count = _validate_and_save_access_token(str(result.get("access_token") or ""))
-                            try:
-                                VK_SILENT_TOKEN_FILE.unlink(missing_ok=True)
-                            except OSError:
-                                pass
-                            post_ui_event("token_saved", True, user_name, added, count, "")
-                            post_ui_event("auth_status", f"Авторизация VK завершена: {user_name}. API access_token сохранён.")
-                        return
+                result = page.evaluate("window.__vkidAuthResult || null")
+                if result:
+                    payload = result if isinstance(result, dict) else {}
+                    if str(payload.get("type") or "").lower() == "authorization_error" or payload.get("error"):
+                        raise RuntimeError(str(payload.get("error") or "VK ID сообщил об ошибке авторизации."))
+                    if str(payload.get("state") or "") != expected_state:
+                        raise RuntimeError("VK ID вернул несовпадающий state. Токен не сохранён.")
+                    code = str(payload.get("code") or "")
+                    device_id = str(payload.get("device_id") or "")
+                    if not code or not device_id:
+                        raise RuntimeError(
+                            "SDK VK ID не вернул полный ответ: нужны code и device_id. "
+                            "Убедитесь, что вход завершился в окне, открытом загрузчиком."
+                        )
 
-                    token = str(payload.get("access_token") or "")
-                    if token:
-                        user_name, added, count = _validate_and_save_access_token(token)
-                        post_ui_event("token_saved", True, user_name, added, count, "")
-                        post_ui_event("auth_status", f"Старый OAuth access_token сохранён: {user_name}.")
-                        return
+                    post_ui_event("auth_status", "Получен полный ответ VK ID. Обмениваю authorization code на access_token…")
+                    token_result = exchange_vk_id_code(
+                        code,
+                        device_id,
+                        code_verifier,
+                        expected_state,
+                        service_token or read_service_token(),
+                    )
+                    token = str(token_result.get("access_token") or "")
+                    user_name, added, count = _validate_and_save_access_token(token)
+                    try:
+                        VK_SILENT_TOKEN_FILE.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    post_ui_event("token_saved", True, user_name, added, count, "")
+                    post_ui_event("auth_status", f"Авторизация VK ID завершена: {user_name}. API access_token сохранён.")
+                    return
+
+                # Ожидание пользователя остаётся отзывчивым: GUI Tk работает в другом потоке.
                 time.sleep(0.25)
 
             if AUTH_STOP_REQUESTED.is_set():
                 post_ui_event("auth_status", "Ожидание авторизации остановлено.")
             else:
-                post_ui_event("auth_error", "Время ожидания авторизации VK ID истекло (10 минут).")
+                raise RuntimeError("Время ожидания авторизации VK ID истекло (10 минут).")
     except Exception as exc:
-        post_ui_event("auth_error", f"Ошибка автоматической авторизации VK: {exc}")
+        post_ui_event("auth_error", f"Ошибка автоматической авторизации VK ID: {exc}")
     finally:
         if context is not None:
             try:
@@ -2061,12 +2095,6 @@ def main():
     ttk.Label(auth_frame, textvariable=auth_status_var, wraplength=980).grid(row=7, column=0, columnspan=3, sticky="ew", pady=(4, 0))
 
     def open_auth_dialog():
-        auth_url, expected_state, code_verifier = _build_vk_id_auth_request()
-        try:
-            webbrowser.open(auth_url, new=2)
-        except Exception as exc:
-            messagebox.showwarning("VK ID", f"Не удалось автоматически открыть браузер:\n{exc}\n\nОткройте URL вручную:", parent=root)
-
         dialog = tk.Toplevel(root)
         dialog.title("Добавить токен VK")
         dialog.transient(root)
@@ -2076,7 +2104,7 @@ def main():
         dialog.rowconfigure(1, weight=1)
         ttk.Label(
             dialog,
-            text="После входа скопируйте полный URL перенаправления VK ID (в нём будут code, state и device_id) либо вставьте ранее полученный access_token:",
+            text="Вставьте ранее полученный API access_token. Значение code=... из URL VK ID — временный код, его нельзя использовать как токен:",
             wraplength=680,
         ).grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
         token_input = tk.Text(dialog, height=6, wrap="word", undo=True)
@@ -2089,61 +2117,22 @@ def main():
 
         def submit_token():
             value = token_input.get("1.0", "end").strip()
-            auth_payload = extract_vk_auth_payload(value)
-            payload_type = str(auth_payload.get("type") or "").lower()
-            code_flow = payload_type == "authorization_code"
-
-            if payload_type == "authorization_error":
+            token = extract_access_token(value)
+            if not token:
                 messagebox.showerror(
-                    "Авторизация VK ID",
-                    str(auth_payload.get("error_description") or auth_payload.get("error") or "Авторизация отклонена."),
+                    "Токен VK",
+                    "Вставьте ранее полученный API access_token или URL, содержащий access_token=. "
+                    "Код code=...&type=code_v2 не является access_token; используйте «Войти через Chrome автоматически».",
                     parent=dialog,
                 )
                 return
 
-            if code_flow:
-                if str(auth_payload.get("state") or "") != expected_state:
-                    messagebox.showerror(
-                        "Авторизация VK ID",
-                        "Параметр state не совпадает с текущим запросом. Закройте окно и запустите авторизацию заново.",
-                        parent=dialog,
-                    )
-                    return
-                if not auth_payload.get("code") or not auth_payload.get("device_id"):
-                    messagebox.showerror(
-                        "Авторизация VK ID",
-                        "В URL перенаправления отсутствует code или device_id. Скопируйте полный URL из адресной строки.",
-                        parent=dialog,
-                    )
-                    return
-                token = ""
-            else:
-                token = extract_access_token(value)
-                if not token:
-                    messagebox.showerror(
-                        "Токен VK",
-                        "Не удалось извлечь токен или authorization code. Вставьте access_token либо полный URL перенаправления VK ID.",
-                        parent=dialog,
-                    )
-                    return
-
             save_button.configure(state="disabled", text="Проверка…")
-            service_token = service_token_var.get().strip() or read_service_token()
 
             def validate_worker():
                 try:
-                    token_to_save = token
-                    if code_flow:
-                        result = exchange_vk_id_code(
-                            str(auth_payload.get("code") or ""),
-                            str(auth_payload.get("device_id") or ""),
-                            code_verifier,
-                            expected_state,
-                            service_token,
-                        )
-                        token_to_save = str(result.get("access_token") or "")
-                    user_name = validate_access_token(token_to_save)
-                    added, count = save_access_token(token_to_save)
+                    user_name = validate_access_token(token)
+                    added, count = save_access_token(token)
                     events.put(("token_saved", True, user_name, added, count, ""))
                 except Exception as exc:
                     events.put(("token_saved", False, "", False, len(_read_token_file()), str(exc)))
