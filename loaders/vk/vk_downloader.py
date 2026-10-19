@@ -12,7 +12,7 @@ import webbrowser
 import importlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import urlparse, urlsplit, parse_qs, unquote
+from urllib.parse import urlparse, urlsplit, parse_qs, unquote, urlencode
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import base64
 import hashlib
@@ -263,6 +263,36 @@ def _build_vk_id_pkce() -> tuple[str, str]:
     return state, code_verifier
 
 
+def _build_vk_id_authorize_url(state: str, code_verifier: str) -> str:
+    """Строит URL VK ID без origin=http://127.0.0.1, который блокирует авторизацию."""
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode("ascii")).digest()
+    ).decode("ascii").rstrip("=")
+    stats_info = base64.b64encode(
+        json.dumps({
+            "flow_source": "from_custom_auth",
+            "session_id": secrets.token_hex(5),
+        }, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    params = {
+        "code_challenge": challenge,
+        "code_challenge_method": "s256",
+        "client_id": VKID_CLIENT_ID,
+        "response_type": "code",
+        "scope": "327684",
+        "state": state,
+        "prompt": "",
+        "stats_info": stats_info,
+        "v": "2.6.9",
+        "sdk_type": "vkid",
+        "app_id": VKID_CLIENT_ID,
+        "redirect_uri": VKID_REDIRECT_URI,
+    }
+    # Намеренно НЕ добавляем origin. Иначе VK ID проверяет localhost
+    # как домен сервиса и блокирует вход, если этот домен не зарегистрирован.
+    return "https://id.vk.ru/authorize?" + urlencode(params)
+
+
 def exchange_vk_id_code(
     code: str,
     device_id: str,
@@ -411,7 +441,7 @@ def _exchange_and_store_pending_token(service_token: str) -> None:
 
 
 def _browser_auth_worker(profile_directory: str, chrome_executable: str, service_token: str = "") -> None:
-    """Открывает постоянный профиль Chrome и получает полный ответ VK ID через официальный SDK."""
+    """Открывает Chrome и выполняет OAuth 2.1 VK ID без запрещённого localhost origin."""
     if sync_playwright is None:
         post_ui_event(
             "auth_error",
@@ -429,8 +459,9 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
             raise FileNotFoundError(f"Не найден chrome.exe: {executable}")
 
         expected_state, code_verifier = _build_vk_id_pkce()
-        # VK ID возвращает полный authorization payload SDK через postMessage.
-        # Прямой переход на authorize/blank.html может оставлять в URL только code и type=code_v2.
+        auth_url = _build_vk_id_authorize_url(expected_state, code_verifier)
+        # Локальная страница нужна только как контейнер для Playwright. В URL VK ID
+        # параметр origin отсутствует, поэтому localhost не проверяется как домен приложения.
         sdk_html = r"""<!doctype html>
 <html lang="ru">
 <head>
@@ -442,56 +473,26 @@ body { font: 16px Segoe UI, sans-serif; max-width: 760px; margin: 48px auto; pad
 button { font: inherit; padding: 12px 22px; cursor: pointer; }
 #status { margin-top: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>
-<script src="https://unpkg.com/@vkid/sdk@2.6.9/dist-sdk/umd/index.js"></script>
 </head>
 <body>
 <h2>Авторизация VK ID</h2>
-<p>Нажмите кнопку, затем завершите вход VK ID в открывшемся окне.</p>
+<p>Нажмите кнопку, затем завершите вход VK ID. В запросе не используется origin локального адреса.</p>
 <button id="login" type="button">Войти через VK ID</button>
-<div id="status">Инициализация SDK…</div>
+<div id="status">Подготовка запроса…</div>
 <script>
 (() => {
   const status = document.getElementById('status');
-  try {
-    const VKID = window.VKIDSDK;
-    if (!VKID || !VKID.Config || !VKID.Auth) {
-      throw new Error('Не удалось загрузить официальный SDK VK ID с CDN.');
-    }
-    VKID.Config.init({
-      app: 8101047,
-      redirectUrl: 'https://oauth.vk.ru/blank.html',
-      state: __EXPECTED_STATE__,
-      codeVerifier: __CODE_VERIFIER__,
-      scope: '327684',
-      // Redirect не добавляет origin=http://127.0.0.1, который требует
-      // регистрации базового домена в настройках приложения VK ID.
-      mode: VKID.ConfigAuthMode.Redirect
-    });
-    status.textContent = 'SDK готов. Нажмите «Войти через VK ID».';
-    document.getElementById('login').addEventListener('click', async () => {
-      document.getElementById('login').disabled = true;
-      status.textContent = 'Ожидание ответа VK ID…';
-      try {
-        // В режиме Redirect браузер уходит на VK ID и возвращается на redirectUrl.
-        // Не ожидаем объект Promise здесь: навигация заменяет текущий документ.
-        void VKID.Auth.login();
-        status.textContent = 'Переход к VK ID…';
-      } catch (error) {
-        window.__vkidAuthError = String(error && (error.error_description || error.message) || error);
-        status.textContent = 'Ошибка авторизации: ' + window.__vkidAuthError;
-        document.getElementById('login').disabled = false;
-      }
-    });
-  } catch (error) {
-    window.__vkidInitError = String(error && (error.message || error) || error);
-    status.textContent = 'Ошибка инициализации VK ID SDK: ' + window.__vkidInitError;
-  }
+  const authUrl = __VKID_AUTHORIZE_URL__;
+  document.getElementById('login').addEventListener('click', () => {
+    status.textContent = 'Переход к VK ID…';
+    window.location.assign(authUrl);
+  });
+  status.textContent = 'Запрос готов. Нажмите «Войти через VK ID».';
 })();
 </script>
 </body>
 </html>"""
-        sdk_html = sdk_html.replace("__EXPECTED_STATE__", json.dumps(expected_state))
-        sdk_html = sdk_html.replace("__CODE_VERIFIER__", json.dumps(code_verifier))
+        sdk_html = sdk_html.replace("__VKID_AUTHORIZE_URL__", json.dumps(auth_url))
 
         class VKIDAuthPageHandler(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -510,7 +511,7 @@ button { font: inherit; padding: 12px 22px; cursor: pointer; }
         server.daemon_threads = True
         threading.Thread(target=server.serve_forever, daemon=True, name="VKIDAuthLocalServer").start()
 
-        post_ui_event("auth_status", "Запускаю Chrome и загружаю официальный SDK VK ID…")
+        post_ui_event("auth_status", "Запускаю Chrome. URL авторизации сформирован без параметра origin…")
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
                 user_data_dir=str(profile_path.resolve()),
@@ -524,62 +525,44 @@ button { font: inherit; padding: 12px 22px; cursor: pointer; }
             )
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(f"http://127.0.0.1:{server.server_port}/", wait_until="load", timeout=60000)
+            page.locator("#login").click(timeout=15000)
 
             deadline = time.monotonic() + 600
-            clicked = False
+            last_status = ""
             while not AUTH_STOP_REQUESTED.is_set() and time.monotonic() < deadline:
-                init_error = page.evaluate("window.__vkidInitError || ''")
-                if init_error:
-                    raise RuntimeError(
-                        f"Не удалось запустить официальный SDK VK ID: {init_error}. "
-                        "Проверьте доступ к unpkg.com и настройки приложения."
-                    )
-
-                if not clicked:
-                    ready = page.evaluate("Boolean(window.VKIDSDK && window.VKIDSDK.Auth && window.VKIDSDK.Config)")
-                    if ready:
-                        post_ui_event(
-                            "auth_status",
-                            "Официальный SDK VK ID загружен. После нажатия «Войти через VK ID» вход откроется в этой вкладке; затем программа обработает redirect URL.",
-                        )
-                        page.locator("#login").click(timeout=15000)
-                        clicked = True
-
-                result = page.evaluate("window.__vkidAuthResult || null")
-                payload = result if isinstance(result, dict) else {}
-
-                # В режиме Redirect SDK возвращает браузер на redirectUrl с параметрами
-                # code, type=code_v2, state и device_id вместо postMessage.
                 current_url = page.url or ""
-                if not payload and current_url.startswith(VKID_REDIRECT_URI):
-                    payload = extract_vk_auth_payload(current_url)
 
-                if payload:
-                    if str(payload.get("type") or "").lower() == "authorization_error" or payload.get("error"):
-                        raise RuntimeError(str(payload.get("error") or "VK ID сообщил об ошибке авторизации."))
+                if current_url.startswith(VKID_REDIRECT_URI):
+                    payload = extract_vk_auth_payload(current_url)
+                    if not payload:
+                        # Пустой blank.html без нужных параметров — ждём, вдруг callback ещё формируется.
+                        time.sleep(0.25)
+                        continue
+
+                    payload_type = str(payload.get("type") or "").lower()
+                    if payload_type == "authorization_error" or payload.get("error"):
+                        description = payload.get("error_description") or payload.get("error") or "авторизация отклонена"
+                        raise RuntimeError(f"VK ID не завершил авторизацию: {description}")
+
                     returned_state = str(payload.get("state") or "")
                     if not returned_state:
                         raise RuntimeError(
-                            "VK ID вернул code, но в redirect URL отсутствует state. "
-                            "Обмен токена остановлен, чтобы не сохранить токен от другого запроса."
+                            "VK ID вернул code, но в callback отсутствует state. "
+                            "Обмен токена остановлен. Убедитесь, что запущена актуальная версия загрузчика."
                         )
                     if returned_state != expected_state:
                         raise RuntimeError("VK ID вернул несовпадающий state. Токен не сохранён.")
+
                     code = str(payload.get("code") or "")
                     device_id = str(payload.get("device_id") or "")
                     if not code or not device_id:
                         raise RuntimeError(
-                            "SDK VK ID не вернул полный ответ: нужны code и device_id. "
-                            "Убедитесь, что вход завершился в окне, открытом загрузчиком."
+                            "В callback VK ID отсутствует code или device_id. "
+                            "Не копируйте временный code вручную; повторите вход из загрузчика."
                         )
 
-                    post_ui_event("auth_status", "Получен полный ответ VK ID. Обмениваю authorization code на access_token…")
-                    token_result = exchange_vk_id_code(
-                        code,
-                        device_id,
-                        code_verifier,
-                        expected_state,
-                    )
+                    post_ui_event("auth_status", "Получен callback VK ID. Обмениваю code на access_token…")
+                    token_result = exchange_vk_id_code(code, device_id, code_verifier, expected_state)
                     token = str(token_result.get("access_token") or "")
                     user_name, added, count = _validate_and_save_access_token(token)
                     try:
@@ -590,7 +573,23 @@ button { font: inherit; padding: 12px 22px; cursor: pointer; }
                     post_ui_event("auth_status", f"Авторизация VK ID завершена: {user_name}. API access_token сохранён.")
                     return
 
-                # Ожидание пользователя остаётся отзывчивым: GUI Tk работает в другом потоке.
+                # Если VK ID показал именно ошибку незарегистрированного домена,
+                # сообщаем это в интерфейс, а не ждём все 10 минут.
+                if "id.vk.ru/authorize" in current_url:
+                    try:
+                        body_text = page.locator("body").inner_text(timeout=1000)
+                    except Exception:
+                        body_text = ""
+                    if "базовый домен" in body_text.lower() or "не указан данный базовый домен" in body_text.lower():
+                        raise RuntimeError(
+                            "VK ID по-прежнему отклонил домен. Проверьте, что запускается обновлённый "
+                            "vk_downloader.py: в новом запросе не должно быть параметра origin=http://127.0.0.1. "
+                            "Если origin отсутствует, проверьте разрешённый Redirect URL приложения VK ID."
+                        )
+                    if body_text and body_text != last_status:
+                        last_status = body_text
+                        post_ui_event("auth_status", "Страница VK ID открыта. Завершите авторизацию в Chrome…")
+
                 time.sleep(0.25)
 
             if AUTH_STOP_REQUESTED.is_set():
