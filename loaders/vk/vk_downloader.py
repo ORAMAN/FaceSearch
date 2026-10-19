@@ -268,9 +268,8 @@ def exchange_vk_id_code(
     device_id: str,
     code_verifier: str,
     expected_state: str,
-    service_token: str = "",
 ) -> dict:
-    """Обменивает одноразовый authorization code VK ID на access_token."""
+    """Обменивает одноразовый authorization code VK ID на access_token по контракту SDK."""
     if not code or not device_id or not code_verifier or not expected_state:
         raise ValueError("Для обмена токена нужны code, device_id, code_verifier и state.")
 
@@ -282,11 +281,6 @@ def exchange_vk_id_code(
         "device_id": device_id,
         "state": expected_state,
     }
-    # Для конфиденциальных приложений VK ID может требовать service_token.
-    service_token = (service_token or read_service_token()).strip()
-    if service_token:
-        params["service_token"] = service_token
-
     response = requests.post(
         VKID_TOKEN_URL,
         params=params,
@@ -585,7 +579,6 @@ button { font: inherit; padding: 12px 22px; cursor: pointer; }
                         device_id,
                         code_verifier,
                         expected_state,
-                        service_token or read_service_token(),
                     )
                     token = str(token_result.get("access_token") or "")
                     user_name, added, count = _validate_and_save_access_token(token)
