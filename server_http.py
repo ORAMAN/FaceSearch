@@ -1498,16 +1498,24 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                     metadata_doc = value
             except (TypeError, ValueError):
                 pass
-            if (
+            is_per_image_metadata = (
                 set(metadata_doc.keys()) == {"url_source", "name", "url_image", "info"}
                 and isinstance(metadata_doc.get("info"), dict)
-            ):
+            )
+            if is_per_image_metadata:
                 metadata_info = metadata_doc["info"]
                 metadata_name = str(metadata_doc.get("name") or "")
             else:
                 metadata_info = metadata_doc
                 metadata_name = str(metadata_doc.get("filename") or "")
             if source_type == "import":
+                # Instagram's raw_json belongs to the whole account/profile; use
+                # images.metadata_json when it contains the metadata for this post.
+                if is_per_image_metadata:
+                    profile_info = metadata_info
+                    display_name = metadata_name or display_name
+                    source_url = str(metadata_doc.get("url_source") or source_url)
+                    url_image = str(metadata_doc.get("url_image") or url_image).strip()
                 if not display_name:
                     display_name = "Без имени"
             else:
