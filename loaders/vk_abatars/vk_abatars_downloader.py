@@ -1215,61 +1215,98 @@ def download_image(args):
         return False, str(e), None, None
 
 
-def save_avatar_to_root(entity: dict, base_dir: str, is_group: bool = False) -> bool:
+def _remove_dir_if_empty(path: str | Path) -> None:
+    """Удаляет только пустой каталог; чужие файлы не трогает."""
+    try:
+        Path(path).rmdir()
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def save_avatar_to_root(
+    entity: dict, base_dir: str, is_group: bool = False
+) -> tuple[bool, str | None, str]:
     """
-    Сохраняет аватар в корень папки как Avatar.jpg
-    и рядом кладёт Avatar.json.
+    Сохраняет Avatar.jpg и Avatar.json.
+    Возвращает (успех, причина, тип результата): ok, no_avatar или download_error.
+    Каталог создаётся только после проверки URL и HTTP-ответа.
     """
     avatar_url = (
-        entity.get("photo_max_orig") or
-        entity.get("photo_400_orig") or
-        entity.get("photo_200_orig") or
-        entity.get("photo_512") or
-        entity.get("photo_200") or
-        entity.get("photo_100") or
-        ""
+        entity.get("photo_max_orig")
+        or entity.get("photo_400_orig")
+        or entity.get("photo_200_orig")
+        or entity.get("photo_512")
+        or entity.get("photo_200")
+        or entity.get("photo_100")
+        or ""
     ).strip()
 
     if " " in avatar_url:
         avatar_url = avatar_url.split(" ")[0].strip()
 
-    stubs = [
+    stubs = (
         "https://vk.com/images/camera_200.png",
         "https://vk.com/images/camera_100.png",
         "https://vk.com/images/deactivated_200.png",
         "https://vk.com/images/deactivated_cropped_200.png",
         "https://vk.com/images/question_200.png",
         "https://vk.com/images/community_200.png",
-    ]
-
+    )
     if not avatar_url or any(avatar_url.startswith(stub) for stub in stubs):
-        return False
+        return False, "у профиля нет доступной фотографии (пустой URL или стандартная заглушка VK)", "no_avatar"
 
-    avatar_path = os.path.join(base_dir, "Avatar.jpg")
+    base_path = Path(base_dir)
+    avatar_path = base_path / "Avatar.jpg"
+    json_path = base_path / "Avatar.json"
+    temp_path = base_path / ".Avatar.jpg.part"
+    image_created = False
+
     try:
-        resp = requests.get(avatar_url, timeout=20, stream=True)
-        if resp.status_code == 200:
-            ct = resp.headers.get("content-type", "").lower()
-            if "image" in ct or "octet-stream" in ct:
-                with open(avatar_path, "wb") as f:
-                    for chunk in resp.iter_content(65536):
-                        if chunk:
-                            f.write(chunk)
+        with requests.get(avatar_url, timeout=20, stream=True) as resp:
+            if resp.status_code != 200:
+                return False, f"HTTP {resp.status_code} при загрузке фотографии", "download_error"
+            content_type = resp.headers.get("content-type", "").lower()
+            if "image" not in content_type and "octet-stream" not in content_type:
+                return False, f"неожиданный Content-Type: {content_type or '(пустой)'}", "download_error"
 
-                # JSON для аватара
-                avatar_json = build_entity_json(
-                    entity,
-                    avatar_url,
-                    album_title="Аватар",
-                    album_id=-6,
-                    is_group=is_group,
-                )
-                json_path = os.path.join(base_dir, "Avatar.json")
-                write_json(json_path, avatar_json)
-                return True
-    except Exception as e:
-        print(f"⚠️ Ошибка сохранения аватара: {e}")
-    return False
+            base_path.mkdir(parents=True, exist_ok=True)
+            with open(temp_path, "wb") as file:
+                for chunk in resp.iter_content(65536):
+                    if chunk:
+                        file.write(chunk)
+
+        if not temp_path.is_file() or temp_path.stat().st_size == 0:
+            raise RuntimeError("VK вернул пустой файл изображения")
+
+        os.replace(str(temp_path), str(avatar_path))
+        image_created = True
+
+        avatar_json = build_entity_json(
+            entity,
+            avatar_url,
+            album_title="Аватар",
+            album_id=-6,
+            is_group=is_group,
+        )
+        write_json(str(json_path), avatar_json)
+        return True, None, "ok"
+
+    except Exception as exc:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if image_created:
+            try:
+                avatar_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            json_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _remove_dir_if_empty(base_path)
+        return False, f"{type(exc).__name__}: {exc}", "download_error"
 
 
 def log_user_processed(NameUser: str, user_id: str, groupe: bool = False):
@@ -1415,7 +1452,7 @@ def process_entity(
     entity: dict, base_dir: str, is_group: bool, MAX_WORKERS: int,
     importer=None, delete_processed_files: bool = False, import_to_database: bool = True,
 ):
-    """Скачивает только аватар и возвращает пути для импорта из рабочего потока."""
+    """Скачивает только аватар; импорт в БД выполняет вызывающий поток."""
     raw_id = entity.get("id")
     if is_group:
         uid = -abs(int(raw_id))
@@ -1430,26 +1467,42 @@ def process_entity(
     with EXISTING_PROFILE_IDS_LOCK:
         already_in_db = abs(uid) in EXISTING_PROFILE_IDS
     if not is_group and already_in_db:
-        print(f"[DB-SKIP] Профиль VK ID {abs(uid)} уже есть в profiles.profile_url активной БД; аватар пропущен.")
-        return
+        print(f"[DB-SKIP] ID {abs(uid)} | {name}: профиль уже есть в активной БД FaceSearch.")
+        return {"status": "already_in_db", "uid": abs(uid), "name": name}
 
     print(f"\n{'=' * 60}")
     print(f"👤 {name} | ID: {display_id}")
-    post_ui_event("status", f"Скачивание аватара VK ID {display_id}…")
+    post_ui_event("status", f"Загрузка аватарки VK ID {display_id} ({name})…")
 
-    if not save_avatar_to_root(entity, base_dir, is_group=is_group):
-        print("🖼️ Аватар отсутствует или VK не предоставил доступ к изображению.")
-        log_user_processed(name, display_id, is_group)
-        post_ui_event("status", f"VK ID {display_id}: аватар отсутствует")
-        return
+    success, reason, result_kind = save_avatar_to_root(entity, base_dir, is_group=is_group)
+    if not success:
+        if result_kind == "no_avatar":
+            print(f"[NO-AVATAR] ID {display_id} | {name}: {reason}.")
+            post_ui_event("status", f"VK ID {display_id}: у профиля нет доступной аватарки.")
+        else:
+            print(f"[AVATAR-ERROR] ID {display_id} | {name}: {reason}.")
+            post_ui_event("status", f"VK ID {display_id}: ошибка загрузки аватарки.")
+        _remove_dir_if_empty(base_dir)
+        return {
+            "status": result_kind,
+            "uid": abs(uid),
+            "name": name,
+            "reason": reason,
+            "base_dir": str(base_dir),
+        }
 
     avatar_path = Path(base_dir) / "Avatar.jpg"
     avatar_json = Path(base_dir) / "Avatar.json"
-    print(f"🖼️ Аватар сохранён: {avatar_path}")
-    # Импорт в БД выполняется вызывающим потоком-владельцем соединения.
-    # Это важно для SQLite: worker-потоки занимаются сетью и записью файлов, но не DB connection.
-    post_ui_event("status", f"Аватар VK ID {display_id} скачан; передача в FaceSearch…")
-    return (avatar_path, avatar_json, abs(uid), name)
+    print(f"[AVATAR-OK] ID {display_id} | {name}: аватар скачан.")
+    post_ui_event("status", f"VK ID {display_id}: аватар скачан; передача в FaceSearch…")
+    return {
+        "status": "downloaded",
+        "image_path": avatar_path,
+        "json_path": avatar_json,
+        "uid": abs(uid),
+        "name": name,
+        "base_dir": str(base_dir),
+    }
 
 
 def process_users_with_friends(
@@ -1516,7 +1569,6 @@ def process_users_with_friends(
             name = name or user.get("screen_name") or f"user_{uid}"
             folder_name = sanitize_filename(f"{name} ({uid})")
             base_dir = str(output_root / folder_name)
-            os.makedirs(base_dir, exist_ok=True)
             print(f"\n[{index}/{len(unique_level)}] Уровень {level}: {name} (ID {uid})")
             try:
                 process_entity(
@@ -1826,6 +1878,24 @@ def load_existing_vk_profile_ids(importer) -> set[int]:
     return result
 
 
+def _format_id_ranges(values) -> str:
+    """Компактно отображает полный список ID, объединяя последовательные значения в диапазоны."""
+    ids = sorted({int(value) for value in values})
+    if not ids:
+        return "—"
+
+    ranges = []
+    range_start = previous = ids[0]
+    for value in ids[1:]:
+        if value == previous + 1:
+            previous = value
+            continue
+        ranges.append(str(range_start) if range_start == previous else f"{range_start}–{previous}")
+        range_start = previous = value
+    ranges.append(str(range_start) if range_start == previous else f"{range_start}–{previous}")
+    return ", ".join(ranges)
+
+
 def run_download_job(
     start_id: int, max_workers: int, output_dir: str,
     importer=None, delete_processed_files: bool = False, import_to_database: bool = True,
@@ -1848,17 +1918,28 @@ def run_download_job(
     output_root.mkdir(parents=True, exist_ok=True)
     worker_count = max(1, min(64, int(max_workers)))
     current_id = start_id
+
     checked_total = 0
     skipped_total = 0
     returned_total = 0
-    avatars_saved_total = 0
-    errors_total = 0
+    missing_profiles_total = 0
+    deactivated_total = 0
+    no_avatar_total = 0
+    download_errors_total = 0
+    import_errors_total = 0
+    api_errors_total = 0
+    downloaded_total = 0
+    imported_total = 0
+    downloaded_without_import_total = 0
+    cleanup_errors_total = 0
 
     print(f"🖼️ VK Avatar Downloader — каталог: {output_root}")
     print(
         f"▶ Начальный ID: {start_id}; потоков загрузки: {worker_count}; "
         f"пачка users.get: до {USER_BATCH_SIZE} ID."
     )
+    if delete_processed_files and import_to_database:
+        print("🧹 Очистка включена: после успешного импорта будут удаляться оба файла и пустая папка пользователя.")
     print("ℹ️ Перебор непрерывный и работает до нажатия «Остановить».")
 
     with requests.Session() as session:
@@ -1868,31 +1949,51 @@ def run_download_job(
                 batch_end = batch_start + USER_BATCH_SIZE
                 batch_ids = list(range(batch_start, batch_end))
 
-                # Существующие профили исключаем ещё до обращения к VK API.
+                # Уже сохранённые профили логируем по ID, но не отправляем повторно в VK API.
                 with EXISTING_PROFILE_IDS_LOCK:
-                    request_ids = [
-                        uid for uid in batch_ids
-                        if uid not in EXISTING_PROFILE_IDS
-                    ]
-                skipped = len(batch_ids) - len(request_ids)
+                    skipped_ids = [uid for uid in batch_ids if uid in EXISTING_PROFILE_IDS]
+                skipped_set = set(skipped_ids)
+                request_ids = [uid for uid in batch_ids if uid not in skipped_set]
+                skipped = len(skipped_ids)
                 skipped_total += skipped
                 checked_total += len(batch_ids)
+
+                if skipped_ids:
+                    print(
+                        f"[DB-SKIP] Уже есть в активной БД FaceSearch ({skipped} ID): "
+                        f"{_format_id_ranges(skipped_ids)}"
+                    )
 
                 post_ui_event(
                     "status",
                     f"Проверка ID {batch_start}–{batch_end - 1}; "
-                    f"найдено в БД для пропуска: {skipped}."
+                    f"уже в БД: {skipped}; ожидает проверки VK: {len(request_ids)}."
                 )
                 post_ui_event(
                     "progress", 0, 0,
-                    f"ID {batch_start}–{batch_end - 1} | "
-                    f"проверено: {checked_total:,} | пропущено по БД: {skipped_total:,}"
+                    f"ID {batch_start}–{batch_end - 1} | проверено: {checked_total:,} | "
+                    f"уже в БД: {skipped_total:,}."
                 )
 
                 returned_users = []
                 if request_ids:
-                    # POST позволяет передать полный пакет ID без чрезмерно длинного URL.
-                    returned_users = get_user_info(",".join(map(str, request_ids)), session)
+                    try:
+                        # POST передаёт полный пакет ID без чрезмерно длинного URL.
+                        returned_users = get_user_info(",".join(map(str, request_ids)), session)
+                    except Exception as exc:
+                        api_errors_total += 1
+                        print(
+                            f"[VK-API-ERROR] Пакет ID {batch_start}–{batch_end - 1}: "
+                            f"users.get завершился ошибкой: {type(exc).__name__}: {exc}. "
+                            f"Диапазон не будет пропущен; следующий стартовый ID — {batch_start}."
+                        )
+                        post_ui_event(
+                            "status",
+                            f"Ошибка VK API для ID {batch_start}–{batch_end - 1}; "
+                            "сканирование остановлено, диапазон можно повторить."
+                        )
+                        current_id = batch_start
+                        break
 
                 users_by_id = {}
                 for user in returned_users:
@@ -1903,37 +2004,53 @@ def run_download_job(
                     if uid in request_ids:
                         users_by_id[uid] = user
                 returned_total += len(users_by_id)
-                missing_count = len(request_ids) - len(users_by_id)
+
+                missing_ids = [uid for uid in request_ids if uid not in users_by_id]
+                missing_count = len(missing_ids)
+                missing_profiles_total += missing_count
+                if missing_ids:
+                    print(
+                        f"[VK-NOT-FOUND] Профиль не возвращён users.get для {missing_count} ID "
+                        f"(профиль может быть удалён, недоступен или не существовать): "
+                        f"{_format_id_ranges(missing_ids)}"
+                    )
+
                 print(
                     f"[BATCH] ID {batch_start}–{batch_end - 1}: "
-                    f"профилей в БД пропущено {skipped}; "
-                    f"запрошено через VK {len(request_ids)}; "
-                    f"получено пользователей {len(users_by_id)}; "
-                    f"не найдено VK {max(0, missing_count)}."
+                    f"уже в БД {skipped}; запрошено у VK {len(request_ids)}; "
+                    f"профилей получено {len(users_by_id)}; профиль не получен {missing_count}."
                 )
 
                 tasks = []
-                # Список задач упорядочен по ID; одновременно в работу отправляется только число потоков.
+                name_by_id = {}
                 for uid in request_ids:
                     user = users_by_id.get(uid)
                     if user is None:
-                        continue
-                    if user.get("deactivated"):
-                        print(f"[VK-SKIP] ID {uid}: профиль деактивирован ({user.get('deactivated')}).")
                         continue
                     display_name = (
                         f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
                         or user.get("screen_name")
                         or f"user_{uid}"
                     )
+                    if user.get("deactivated"):
+                        deactivated_total += 1
+                        print(
+                            f"[VK-DEACTIVATED] ID {uid} | {display_name}: "
+                            f"профиль деактивирован ({user.get('deactivated')}); аватар не загружается."
+                        )
+                        continue
+
                     folder_name = sanitize_filename(f"{display_name} ({uid})")
                     base_dir = str(output_root / folder_name)
-                    os.makedirs(base_dir, exist_ok=True)
+                    # Не создаём папку заранее: при отсутствии аватарки или ошибке сети
+                    # не останется пустого каталога.
                     tasks.append((uid, user, base_dir))
+                    name_by_id[uid] = display_name
 
                 next_task_index = 0
                 pending = {}
                 batch_errors = 0
+                batch_finished = 0
 
                 def submit_next_tasks():
                     nonlocal next_task_index
@@ -1962,66 +2079,144 @@ def run_download_job(
                     for future in completed_futures:
                         uid = pending.pop(future)
                         try:
-                            download_result = future.result()
-                            if download_result:
-                                image_path, json_path, downloaded_uid, downloaded_name = download_result
+                            outcome = future.result()
+                            if not outcome:
+                                raise RuntimeError("задача завершилась без результата")
+                            outcome_status = outcome.get("status")
+
+                            if outcome_status == "already_in_db":
+                                # Защита от случая, когда профиль появился в БД после построения списка.
+                                skipped_total += 1
+                                print(f"[DB-SKIP] ID {uid} | {outcome.get('name', name_by_id.get(uid, ''))}: профиль уже есть в БД.")
+                                continue
+
+                            if outcome_status == "no_avatar":
+                                no_avatar_total += 1
+                                continue
+
+                            if outcome_status == "download_error":
+                                download_errors_total += 1
+                                batch_errors += 1
+                                print(
+                                    f"[AVATAR-ERROR] ID {uid} | {outcome.get('name', name_by_id.get(uid, ''))}: "
+                                    f"{outcome.get('reason', 'не удалось получить изображение')}."
+                                )
+                                continue
+
+                            if outcome_status != "downloaded":
+                                raise RuntimeError(f"неизвестный статус результата: {outcome_status}")
+
+                            image_path = Path(outcome["image_path"])
+                            json_path = Path(outcome["json_path"])
+                            downloaded_uid = int(outcome["uid"])
+                            downloaded_name = str(outcome.get("name") or name_by_id.get(uid) or f"user_{uid}")
+                            downloaded_total += 1
+
+                            if importer is not None and import_to_database:
                                 try:
-                                    if importer is not None and import_to_database:
-                                        # Импортируем по готовности файлов, в потоке, где создано соединение с БД.
-                                        import_result = importer.import_image(
-                                            image_path,
-                                            json_path,
-                                            source_key=f"vk:{downloaded_uid}:avatar",
-                                        )
-                                        with EXISTING_PROFILE_IDS_LOCK:
-                                            EXISTING_PROFILE_IDS.add(abs(int(downloaded_uid)))
-                                        print(
-                                            f"[DB-IMPORT] Аватар {downloaded_uid}: "
-                                            f"импортирован; лиц: {import_result.get('faces', 0)}."
-                                        )
-                                        if delete_processed_files:
-                                            image_path.unlink(missing_ok=True)
-                                            json_path.unlink(missing_ok=True)
+                                    import_result = importer.import_image(
+                                        image_path,
+                                        json_path,
+                                        source_key=f"vk:{downloaded_uid}:avatar",
+                                    )
                                 except Exception as exc:
                                     batch_errors += 1
-                                    errors_total += 1
+                                    import_errors_total += 1
                                     print(
-                                        f"[DB-ERROR] ID {downloaded_uid}: аватар скачан, "
-                                        f"но не удалось записать в FaceSearch: {exc}"
+                                        f"[DB-ERROR] ID {downloaded_uid} | {downloaded_name}: "
+                                        f"аватар скачан, но импорт в FaceSearch завершился ошибкой "
+                                        f"{type(exc).__name__}: {exc}. Файлы оставлены для повторного импорта: {image_path.parent}"
                                     )
                                     continue
-                                # Отмечаем ID завершённым только после успешного импорта
-                                # (или после скачивания, если импорт выключен).
-                                log_user_processed(downloaded_name, str(downloaded_uid), False)
+
+                                with EXISTING_PROFILE_IDS_LOCK:
+                                    EXISTING_PROFILE_IDS.add(abs(downloaded_uid))
+                                imported_total += 1
+                                print(
+                                    f"[DB-IMPORTED] ID {downloaded_uid} | {downloaded_name}: "
+                                    f"импорт успешно завершён; лиц: {import_result.get('faces', 0)}."
+                                )
+
+                                if delete_processed_files:
+                                    try:
+                                        image_path.unlink(missing_ok=True)
+                                        json_path.unlink(missing_ok=True)
+                                        _remove_dir_if_empty(image_path.parent)
+                                        print(
+                                            f"[CLEANUP] ID {downloaded_uid}: исходные файлы удалены; "
+                                            "пустая папка пользователя удалена."
+                                        )
+                                    except Exception as exc:
+                                        cleanup_errors_total += 1
+                                        print(
+                                            f"[CLEANUP-ERROR] ID {downloaded_uid}: импорт прошёл успешно, "
+                                            f"но не удалось полностью удалить исходные файлы: {exc}"
+                                        )
+
+                            else:
+                                downloaded_without_import_total += 1
+                                print(
+                                    f"[SAVED-NO-IMPORT] ID {downloaded_uid} | {downloaded_name}: "
+                                    f"аватар сохранён на диск, автоматический импорт в FaceSearch выключен: {image_path}"
+                                )
+
+                            # Запись в Log.txt делается только после успешного импорта
+                            # либо после успешного скачивания в режиме без импорта.
+                            log_user_processed(downloaded_name, str(downloaded_uid), False)
+
                         except Exception as exc:
                             batch_errors += 1
-                            errors_total += 1
-                            print(f"[ERROR] ID {uid}: {exc}")
+                            download_errors_total += 1
+                            print(
+                                f"[DOWNLOAD-ERROR] ID {uid} | {name_by_id.get(uid, f'user_{uid}')}: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                        finally:
+                            batch_finished += 1
+                            if tasks:
+                                post_ui_event(
+                                    "progress", batch_finished, len(tasks),
+                                    f"Пакет ID {batch_start}–{batch_end - 1} | "
+                                    f"аватары: {batch_finished}/{len(tasks)} | "
+                                    f"импортировано: {imported_total:,} | "
+                                    f"без фото: {no_avatar_total:,} | ошибок загрузки/импорта: "
+                                    f"{download_errors_total + import_errors_total:,}."
+                                )
                     # При нажатии «Остановить» новые задания не добавляются в пул.
                     submit_next_tasks()
 
                 if STOP_REQUESTED.is_set():
                     # Если часть задач пачки ещё не была отправлена, повторяем её с начала.
-                    # Успешно импортированные ID при повторном запуске будут пропущены по БД.
                     current_id = batch_start if (next_task_index < len(tasks) or batch_errors) else batch_end
                     break
 
-                avatars_saved_total += len(tasks) - batch_errors
                 print(
-                    f"[TOTAL] проверено ID: {checked_total:,}; "
-                    f"пропущено по БД: {skipped_total:,}; "
-                    f"профилей получено: {returned_total:,}; "
-                    f"пользователей обработано без исключений: {avatars_saved_total:,}; "
-                    f"ошибок обработки: {errors_total:,}."
+                    f"[BATCH-SUMMARY] ID {batch_start}–{batch_end - 1}: "
+                    f"уже в БД {skipped}; профиль не получен {missing_count}; "
+                    f"задач на скачивание {len(tasks)}; ошибок загрузки/импорта в пакете {batch_errors}."
                 )
                 current_id = batch_end
 
+    total_errors = api_errors_total + download_errors_total + import_errors_total + cleanup_errors_total
+    print("\n" + "=" * 68)
     print(
-        f"🏁 Остановлено на границе пачки. Следующий стартовый ID: {current_id}. "
-        f"Проверено ID: {checked_total:,}; пропущено по БД: {skipped_total:,}; "
-        f"пользователей получено от VK: {returned_total:,}; ошибок: {errors_total:,}."
+        f"[ИТОГ] Проверено ID: {checked_total:,}; уже есть в БД: {skipped_total:,}; "
+        f"профиль не получен от VK: {missing_profiles_total:,}; "
+        f"деактивировано: {deactivated_total:,}; без доступной аватарки: {no_avatar_total:,}; "
+        f"аватаров скачано: {downloaded_total:,}; успешно импортировано в FaceSearch: {imported_total:,}; "
+        f"сохранено без импорта: {downloaded_without_import_total:,}; "
+        f"ошибок VK API: {api_errors_total:,}; ошибок скачивания: {download_errors_total:,}; "
+        f"ошибок импорта: {import_errors_total:,}; ошибок очистки: {cleanup_errors_total:,}."
     )
+    print(
+        f"🏁 Сканирование остановлено. Следующий стартовый ID: {current_id}. "
+        f"Всего ошибок: {total_errors:,}."
+    )
+    if api_errors_total:
+        print("[ПОДСКАЗКА] Последний пакет не обработан из-за ошибки VK API; повторите запуск с указанного стартового ID.")
+    print("=" * 68)
     return current_id
+
 
 
 class QueueStream:
@@ -2522,6 +2717,11 @@ def main():
     log_frame.columnconfigure(0, weight=1)
     log_frame.rowconfigure(0, weight=1)
     log_text = tk.Text(log_frame, height=8, wrap="word", state="disabled", undo=True)
+    log_text.tag_configure("log_added", foreground="#16803c")
+    log_text.tag_configure("log_skip", foreground="#606770")
+    log_text.tag_configure("log_missing", foreground="#9a6700")
+    log_text.tag_configure("log_error", foreground="#b42318")
+    log_text.tag_configure("log_info", foreground="#1d5fa7")
     log_text.grid(row=0, column=0, sticky="nsew")
     scroll = ttk.Scrollbar(log_frame, orient="vertical", command=log_text.yview)
     scroll.grid(row=0, column=1, sticky="ns")
@@ -2765,7 +2965,22 @@ def main():
                 kind = event[0]
                 if kind == "log":
                     log_text.configure(state="normal")
-                    log_text.insert("end", event[1])
+                    entry_text = str(event[1])
+                    entry_tag = None
+                    if "[DB-IMPORTED]" in entry_text or "[AVATAR-OK]" in entry_text:
+                        entry_tag = "log_added"
+                    elif "[DB-SKIP]" in entry_text:
+                        entry_tag = "log_skip"
+                    elif "[VK-NOT-FOUND]" in entry_text or "[NO-AVATAR]" in entry_text or "[VK-DEACTIVATED]" in entry_text:
+                        entry_tag = "log_missing"
+                    elif "[ERROR]" in entry_text or "[AVATAR-ERROR]" in entry_text or "[DOWNLOAD-ERROR]" in entry_text or "[DB-ERROR]" in entry_text or "[VK-API-ERROR]" in entry_text or "[CLEANUP-ERROR]" in entry_text:
+                        entry_tag = "log_error"
+                    elif "[CLEANUP]" in entry_text or "[SAVED-NO-IMPORT]" in entry_text:
+                        entry_tag = "log_info"
+                    if entry_tag:
+                        log_text.insert("end", entry_text, entry_tag)
+                    else:
+                        log_text.insert("end", entry_text)
                     # Не допускаем бесконечного роста виджета на очень больших обходах.
                     try:
                         line_count = int(log_text.index("end-1c").split(".")[0])
