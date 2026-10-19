@@ -469,24 +469,19 @@ button { font: inherit; padding: 12px 22px; cursor: pointer; }
       state: __EXPECTED_STATE__,
       codeVerifier: __CODE_VERIFIER__,
       scope: '327684',
-      mode: VKID.ConfigAuthMode.InNewTab,
-      responseMode: VKID.ConfigResponseMode.Callback
+      // Redirect не добавляет origin=http://127.0.0.1, который требует
+      // регистрации базового домена в настройках приложения VK ID.
+      mode: VKID.ConfigAuthMode.Redirect
     });
     status.textContent = 'SDK готов. Нажмите «Войти через VK ID».';
     document.getElementById('login').addEventListener('click', async () => {
       document.getElementById('login').disabled = true;
       status.textContent = 'Ожидание ответа VK ID…';
       try {
-        const result = await VKID.Auth.login();
-        window.__vkidAuthResult = {
-          type: result && result.type || '',
-          code: result && result.code || '',
-          state: result && result.state || '',
-          device_id: result && result.device_id || '',
-          expires_in: result && result.expires_in || 0,
-          error: result && result.error || ''
-        };
-        status.textContent = 'Ответ VK ID получен. Возвращаюсь в FaceSearch…';
+        // В режиме Redirect браузер уходит на VK ID и возвращается на redirectUrl.
+        // Не ожидаем объект Promise здесь: навигация заменяет текущий документ.
+        void VKID.Auth.login();
+        status.textContent = 'Переход к VK ID…';
       } catch (error) {
         window.__vkidAuthError = String(error && (error.error_description || error.message) || error);
         status.textContent = 'Ошибка авторизации: ' + window.__vkidAuthError;
@@ -551,17 +546,30 @@ button { font: inherit; padding: 12px 22px; cursor: pointer; }
                     if ready:
                         post_ui_event(
                             "auth_status",
-                            "Официальный SDK VK ID загружен. В открывшемся окне нажмите «Войти через VK ID» и завершите вход.",
+                            "Официальный SDK VK ID загружен. После нажатия «Войти через VK ID» вход откроется в этой вкладке; затем программа обработает redirect URL.",
                         )
                         page.locator("#login").click(timeout=15000)
                         clicked = True
 
                 result = page.evaluate("window.__vkidAuthResult || null")
-                if result:
-                    payload = result if isinstance(result, dict) else {}
+                payload = result if isinstance(result, dict) else {}
+
+                # В режиме Redirect SDK возвращает браузер на redirectUrl с параметрами
+                # code, type=code_v2, state и device_id вместо postMessage.
+                current_url = page.url or ""
+                if not payload and current_url.startswith(VKID_REDIRECT_URI):
+                    payload = extract_vk_auth_payload(current_url)
+
+                if payload:
                     if str(payload.get("type") or "").lower() == "authorization_error" or payload.get("error"):
                         raise RuntimeError(str(payload.get("error") or "VK ID сообщил об ошибке авторизации."))
-                    if str(payload.get("state") or "") != expected_state:
+                    returned_state = str(payload.get("state") or "")
+                    if not returned_state:
+                        raise RuntimeError(
+                            "VK ID вернул code, но в redirect URL отсутствует state. "
+                            "Обмен токена остановлен, чтобы не сохранить токен от другого запроса."
+                        )
+                    if returned_state != expected_state:
                         raise RuntimeError("VK ID вернул несовпадающий state. Токен не сохранён.")
                     code = str(payload.get("code") or "")
                     device_id = str(payload.get("device_id") or "")
