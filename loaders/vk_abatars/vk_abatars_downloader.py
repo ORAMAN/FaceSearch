@@ -26,7 +26,7 @@ except ImportError:
 
 # === ПАРАМЕТРЫ === #
 APP_DIR = Path(__file__).resolve().parent
-VK_TOKEN_FILE = APP_DIR.parent / "vk" / "vk_token.txt"
+VK_TOKEN_FILE = APP_DIR / "vk_token.txt"
 LOG_FILE = APP_DIR / "Log.txt"
 DEFAULT_OUTPUT_DIR = APP_DIR / "VK_Avatars_Downloads"
 APP_SETTINGS_PATH = APP_DIR / "vk_abatars_settings.json"
