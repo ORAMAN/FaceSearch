@@ -136,10 +136,18 @@ def _write_vk_auth_diagnostic(message: str) -> None:
     """Append a sanitized VK authentication diagnostic; never record callback payloads."""
     try:
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        safe_message = str(message).replace("\\r", " ").replace("\\n", " ")
+        safe_message = str(message).replace("\r", " ").replace("\n", " ")
+        safe_message = re.sub(
+            r"https?://[^\s'\"<>]+",
+            lambda match: (
+                urlsplit(match.group(0)).scheme + "://"
+                + urlsplit(match.group(0)).netloc + urlsplit(match.group(0)).path
+            ),
+            safe_message,
+        )
         with _AUTH_DIAGNOSTICS_LOCK:
             with VK_AUTH_DIAGNOSTICS_FILE.open("a", encoding="utf-8") as handle:
-                handle.write(f"[{stamp}] {safe_message}\\n")
+                handle.write(f"[{stamp}] {safe_message}\n")
     except Exception:
         # Diagnostics must never stop authentication.
         pass
