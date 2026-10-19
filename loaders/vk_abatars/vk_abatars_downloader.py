@@ -2065,10 +2065,8 @@ def main():
     depth_var = tk.StringVar(value="0")
     ttk.Spinbox(settings_frame, from_=0, to=10, textvariable=depth_var, width=8).grid(row=0, column=1, sticky="w", pady=3)
     ttk.Label(settings_frame, text="0 — только введённые пользователи; 1 — также их друзья; 2 — друзья друзей и т. д. На группы глубина не распространяется.", wraplength=850).grid(row=0, column=2, sticky="w", padx=(12, 0), pady=3)
-    ttk.Label(settings_frame, text="Потоков загрузки:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
-    workers_var = tk.StringVar(value="8")
-    ttk.Spinbox(settings_frame, from_=1, to=64, textvariable=workers_var, width=8).grid(row=1, column=1, sticky="w", pady=3)
-    ttk.Label(settings_frame, text="Параметр оставлен для совместимости с настройками VK-загрузчика.").grid(row=1, column=2, sticky="w", padx=(12, 0), pady=3)
+    # Аватары обрабатываются последовательно; скрытый параметр оставлен для обратной совместимости настроек.
+    workers_var = tk.StringVar(value="1")
 
     output_frame = ttk.LabelFrame(outer, text="Каталог сохранения", padding=8)
     output_frame.grid(row=3, column=0, sticky="ew", pady=(0, 8))
@@ -2157,7 +2155,7 @@ def main():
             "build_index_after": False,
             "delete_processed_files": False,
             "depth": 0,
-            "workers": 8,
+            "workers": 1,
             "browser_profile_dir": str(DEFAULT_BROWSER_PROFILE_DIR),
             "chrome_exe_path": default_chrome_executable(),
         }
@@ -2598,7 +2596,7 @@ def main():
                 if saved_token.lower().startswith("vk2.")
             )
             message = (
-                f"В {VK_TOKEN_FILE.name} нет совместимых API-токенов для photos.get/friends.get. "
+                f"В {VK_TOKEN_FILE.name} нет совместимых API-токенов для users.get/friends.get/groups.getById. "
                 "Нужен рабочий пользовательский токен старого совместимого формата vk1.a… ."
             )
             if unsupported_count:
