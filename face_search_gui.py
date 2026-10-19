@@ -2021,6 +2021,14 @@ def import_image_bundle(
     source_url = str(metadata.get("url_source") or "").strip() or None
     metadata_image_url = str(metadata.get("url_image") or "").strip() or None
     source_key = str(source_key or "").strip() or None
+    # Instagram images share a source profile but have different captions, dates,
+    # and counters. Preserve their canonical JSON per images row instead of relying
+    # only on profiles.raw_json, which is shared by every image of that profile.
+    store_per_image_metadata = bool(source_key and source_key.startswith("instagram:"))
+    per_image_metadata_json = (
+        json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        if store_per_image_metadata else None
+    )
     fallback_image_url = ""
     try:
         fallback_image_url = image_path.resolve().as_uri()
@@ -2074,14 +2082,15 @@ def import_image_bundle(
                 source_key = COALESCE(?, source_key),
                 profile_id = ?,
                 source_updated_at = ?,
-                metadata_json = NULL
+                metadata_json = ?
             WHERE source_type = 'local'
               AND source_url = ?
               AND EXISTS (
                   SELECT 1 FROM faces f WHERE f.image_id = images.id
               )
             """,
-            (source_url, image_url, source_key, profile_id, timestamp, fallback_image_url),
+            (source_url, image_url, source_key, profile_id, timestamp,
+             per_image_metadata_json, fallback_image_url),
         )
         promoted_count = int(updated.rowcount or len(local_source_rows))
         conn.commit()
@@ -2148,10 +2157,10 @@ def import_image_bundle(
                             """UPDATE images
                                SET source_key = COALESCE(?, source_key),
                                    source_url = ?, url_image = ?, profile_id = ?,
-                                   source_updated_at = ?, metadata_json = NULL
+                                   source_updated_at = ?, metadata_json = ?
                                WHERE id = ?""",
                             (source_key, source_url, image_url, profile_id, timestamp,
-                             int(existing_image_id)),
+                             per_image_metadata_json, int(existing_image_id)),
                         )
                     # Пропускаем повторное чтение изображения и inference.
                     conn.commit()
@@ -2228,14 +2237,15 @@ def import_image_bundle(
         )
         existing_source_rows.sort(key=lambda row: int(row[0]))
 
-    # EXIF/файловые сведения не хранятся в images.metadata_json для импортов:
-    # оригинальное описание строго сохраняется в profiles.raw_json.
-    for existing_image_id, _stored_path in existing_source_rows:
-        conn.execute(
-            "UPDATE images SET metadata_json = NULL "
-            "WHERE id = ? AND metadata_json IS NOT NULL",
-            (int(existing_image_id),),
-        )
+    # Для обычных импортов оригинальное описание хранится в profiles.raw_json.
+    # Instagram дополнительно хранит строгий JSON конкретной публикации в images.
+    if not store_per_image_metadata:
+        for existing_image_id, _stored_path in existing_source_rows:
+            conn.execute(
+                "UPDATE images SET metadata_json = NULL "
+                "WHERE id = ? AND metadata_json IS NOT NULL",
+                (int(existing_image_id),),
+            )
 
     restored_missing_crops = 0
     if create_crop_files and not overwrite_existing_crops and existing_source_rows:
@@ -2259,7 +2269,7 @@ def import_image_bundle(
                     source_key = COALESCE(?, source_key),
                     profile_id = ?,
                     source_updated_at = ?,
-                    metadata_json = NULL
+                    metadata_json = ?
                 WHERE source_type = 'local'
                   AND source_url = ?
                   AND EXISTS (
@@ -2272,6 +2282,7 @@ def import_image_bundle(
                     source_key,
                     profile_id,
                     time.strftime("%Y-%m-%d %H:%M:%S"),
+                    per_image_metadata_json,
                     fallback_image_url,
                 ),
             )
@@ -2284,10 +2295,10 @@ def import_image_bundle(
                 """UPDATE images
                    SET source_key = COALESCE(?, source_key), source_url = ?,
                        url_image = ?, profile_id = ?, source_updated_at = ?,
-                       metadata_json = NULL
+                       metadata_json = ?
                    WHERE id = ?""",
                 (source_key, source_url, metadata_image_url or fallback_image_url,
-                 profile_id, timestamp, int(existing_image_id)),
+                 profile_id, timestamp, per_image_metadata_json, int(existing_image_id)),
             )
 
         # _upsert_import_profile мог обновить профиль. Фиксируем транзакцию до
@@ -2373,13 +2384,14 @@ def import_image_bundle(
                     SET path = ?, filename = ?, sha256 = ?, width = ?, height = ?,
                         processed = 1, source_type = 'import', source_url = ?,
                         url_image = ?, source_key = COALESCE(?, source_key),
-                        profile_id = ?, source_updated_at = ?
+                        profile_id = ?, source_updated_at = ?, metadata_json = ?
                     WHERE id = ?
                     """,
                     (
                         _relative_crop_db_path(crop_path), crop_path.name, sha256,
                         int(crop.shape[1]), int(crop.shape[0]), source_url,
-                        image_url, source_key, profile_id, timestamp, image_id,
+                        image_url, source_key, profile_id, timestamp,
+                        per_image_metadata_json, image_id,
                     ),
                 )
             else:
@@ -2390,13 +2402,15 @@ def import_image_bundle(
                     """
                     INSERT INTO images (
                         path, filename, sha256, width, height, processed,
-                        source_type, source_url, url_image, source_key, profile_id, source_updated_at
+                        source_type, source_url, url_image, source_key, profile_id, source_updated_at,
+                        metadata_json
                     )
-                    VALUES (?, ?, ?, ?, ?, 0, 'import', ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, 0, 'import', ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         temp_name, temp_name, sha256, int(crop.shape[1]),
-                        int(crop.shape[0]), source_url, image_url, source_key, profile_id, timestamp,
+                        int(crop.shape[0]), source_url, image_url, source_key, profile_id,
+                        timestamp, per_image_metadata_json,
                     ),
                 )
                 image_id = int(cur.lastrowid)
