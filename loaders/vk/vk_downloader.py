@@ -68,8 +68,8 @@ _TOKEN_LIST = []
 _TOKEN_LOCK = threading.Lock()
 
 
-def _read_token_file() -> list[str]:
-    """Читает токены из vk_token.txt без дублирования и пустых строк."""
+def _read_all_token_file() -> list[str]:
+    """Читает все сохранённые строки токенов, включая несовместимые токены VK ID."""
     if not VK_TOKEN_FILE.exists():
         return []
     tokens = []
@@ -81,6 +81,13 @@ def _read_token_file() -> list[str]:
         seen.add(token)
         tokens.append(token)
     return tokens
+
+
+def _read_token_file() -> list[str]:
+    """Возвращает токены, пригодные для legacy-методов загрузчика (photos.get/friends.get)."""
+    # vk2.a.* — токены нового OAuth VK ID. Они могут успешно проходить вход,
+    # но не подходят для требуемых загрузчику методов VK API.
+    return [token for token in _read_all_token_file() if not token.lower().startswith("vk2.")]
 
 
 def reload_token_cache() -> int:
@@ -191,7 +198,16 @@ def extract_access_token(value: str) -> str:
     return ""
 
 def validate_access_token(token: str) -> str:
-    """Проверяет токен небольшим запросом users.get и возвращает имя пользователя."""
+    """Проверяет совместимый API-токен через users.get и возвращает имя пользователя."""
+    token = (token or "").strip()
+    if token.lower().startswith("vk2."):
+        raise ValueError(
+            "Получен токен нового формата VK ID (vk2.a.…). Для загрузчика он не подходит: "
+            "методы photos.get и friends.get требуют совместимый пользовательский API-токен. "
+            "Токен vk2 нельзя превратить в vk1 заменой префикса. Он не сохранён. "
+            "Используйте ранее полученный рабочий vk1.a токен либо другой поддерживаемый "
+            "VK API OAuth-поток, который выдаёт токен для этих методов."
+        )
     response = requests.get(
         f"{BASE_URL}/users.get",
         params={"access_token": token, "v": API_VERSION},
@@ -213,18 +229,22 @@ def validate_access_token(token: str) -> str:
 
 
 def save_access_token(token: str) -> tuple[bool, int]:
-    """Добавляет токен в vk_token.txt, не создавая повторов."""
+    """Добавляет совместимый API-токен в vk_token.txt, не создавая повторов."""
     token = (token or "").strip()
     if not token:
         raise ValueError("Токен пустой.")
+    if token.lower().startswith("vk2."):
+        raise ValueError(
+            "Токен vk2.a… не подходит для photos.get/friends.get и не может быть сохранён "
+            "как рабочий токен загрузчика. Нужен совместимый пользовательский API-токен."
+        )
     with _TOKEN_FILE_LOCK:
-        existing = _read_token_file()
-        if token in existing:
-            reload_token_cache()
-            return False, len(existing)
+        existing_all = _read_all_token_file()
+        if token in existing_all:
+            return False, reload_token_cache()
         VK_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
         temp_path = VK_TOKEN_FILE.with_suffix(VK_TOKEN_FILE.suffix + ".tmp")
-        temp_path.write_text("\n".join(existing + [token]) + "\n", encoding="utf-8")
+        temp_path.write_text("\n".join(existing_all + [token]) + "\n", encoding="utf-8")
         temp_path.replace(VK_TOKEN_FILE)
     count = reload_token_cache()
     return True, count
@@ -2396,7 +2416,20 @@ def main():
             return
         token_count = len(_read_token_file())
         if token_count == 0:
-            messagebox.showwarning("Токены VK", f"Файл {VK_TOKEN_FILE.name} не содержит токенов. Добавьте токен через кнопку авторизации.", parent=root)
+            unsupported_count = sum(
+                1 for saved_token in _read_all_token_file()
+                if saved_token.lower().startswith("vk2.")
+            )
+            message = (
+                f"В {VK_TOKEN_FILE.name} нет совместимых API-токенов для photos.get/friends.get. "
+                "Нужен рабочий пользовательский токен старого совместимого формата vk1.a… ."
+            )
+            if unsupported_count:
+                message += (
+                    f"\n\nНайдено токенов vk2.a…: {unsupported_count}. "
+                    "Это токены нового VK ID; загрузчик пропускает их и не использует."
+                )
+            messagebox.showwarning("Токены VK", message, parent=root)
             return
         reload_token_cache()
         auto_import = bool(auto_import_var.get())
