@@ -1624,15 +1624,12 @@ def collect_instagram(context, status_callback, progress_callback,
     for item in candidates:
         base_key = f"{profile_url}\0{item['shortcode']}\0{item.get('slide', 1)}"
         item["source_key"] = "instagram:" + hashlib.sha256(base_key.encode("utf-8")).hexdigest()
-    db_existing = set()
-    if importer:
-        db_existing = importer.existing_source_keys(profile_url, [p["source_key"] for p in candidates])
-
     user_slug = safe_filename(username)
     total = len(candidates)
-    downloaded = reused = imported = db_skipped = failed = 0
+    downloaded = reused = imported = failed = 0
     duplicate_images = duplicate_url_candidates
     db_added_faces = db_updated_records = db_no_face = db_noop = import_failed = 0
+    db_metadata_refreshed = 0
     import_error_samples: list[str] = []
     seen_exact_hashes: dict[str, Path] = {}
     seen_dhash_buckets: dict[tuple[int, int], list[tuple[str, int, float, Path]]] = {}
@@ -1668,7 +1665,7 @@ def collect_instagram(context, status_callback, progress_callback,
             "db_updated_records": db_updated_records,
             "db_no_face": db_no_face,
             "db_noop": db_noop,
-            "db_skipped_existing_source": db_skipped,
+            "db_metadata_refreshed": db_metadata_refreshed,
             "db_import_failures": import_failed,
             "db_import_error_samples": import_error_samples,
         }
@@ -1820,44 +1817,38 @@ def collect_instagram(context, status_callback, progress_callback,
         write_metadata(json_path, metadata)
 
         if importer:
-            if item["source_key"] in db_existing:
-                db_skipped += 1
-                status_callback(f"Уже есть в FaceSearch: {code}, слайд {slide}")
-                if delete_processed_files:
-                    try:
-                        image_path.unlink(missing_ok=True)
-                        json_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-            else:
-                try:
-                    import_status = importer.import_image(image_path, json_path, metadata, item["source_key"])
-                    imported += 1
-                    db_existing.add(item["source_key"])
-                    added_records = int(import_status.get("added", 0) or 0)
-                    updated_records = int(import_status.get("updated", 0) or 0)
-                    # Current FaceSearch reports newly-created face rows in `added`;
-                    # older compatible versions may expose only `faces`.
+            try:
+                # Existing source keys are still sent through FaceSearch's importer:
+                # its fast path refreshes metadata/URL without repeating inference
+                # when the image and CROP files are already present.
+                import_status = importer.import_image(image_path, json_path, metadata, item["source_key"])
+                imported += 1
+                added_records = int(import_status.get("added", 0) or 0)
+                updated_records = int(import_status.get("updated", 0) or 0)
+                # Current FaceSearch reports newly created face rows in the added field;
+                # older compatible versions may expose only the faces field.
                     if "added" not in import_status:
                         added_records = int(import_status.get("faces", 0) or 0)
                     db_added_faces += added_records
                     db_updated_records += updated_records
                     message = str(import_status.get("message") or "").strip()
                     detected_faces = import_status.get("detected_faces")
-                    if detected_faces == 0 or "лицо не найдено" in message.lower():
-                        db_no_face += 1
-                    elif added_records == 0 and updated_records == 0:
-                        db_noop += 1
-                    print(f"[DB-IMPORT] {image_path.name}: {import_status}")
-                    if delete_processed_files:
-                        image_path.unlink(missing_ok=True)
-                        json_path.unlink(missing_ok=True)
-                except Exception as exc:
-                    import_failed += 1
-                    if len(import_error_samples) < 5:
-                        import_error_samples.append(f"{image_path.name}: {exc}")
-                    print(f"[DB-IMPORT-ERROR] {image_path.name}: {exc}")
-                    status_callback(f"Ошибка импорта {image_path.name}: {exc}")
+                if detected_faces == 0 or "лицо не найдено" in message.lower():
+                    db_no_face += 1
+                elif "уже есть в бд" in message.lower() and added_records == 0:
+                    db_metadata_refreshed += 1
+                elif added_records == 0 and updated_records == 0:
+                    db_noop += 1
+                print(f"[DB-IMPORT] {image_path.name}: {import_status}")
+                if delete_processed_files:
+                    image_path.unlink(missing_ok=True)
+                    json_path.unlink(missing_ok=True)
+            except Exception as exc:
+                import_failed += 1
+                if len(import_error_samples) < 5:
+                    import_error_samples.append(f"{image_path.name}: {exc}")
+                print(f"[DB-IMPORT-ERROR] {image_path.name}: {exc}")
+                status_callback(f"Ошибка импорта {image_path.name}: {exc}")
         progress_callback(idx, total, f"Изображения: {idx}/{total}")
 
     if importer and build_index_after and (db_added_faces or db_updated_records):
@@ -1869,7 +1860,7 @@ def collect_instagram(context, status_callback, progress_callback,
         "reused": reused, "duplicate_images": duplicate_images,
         "imported": imported, "db_added_faces": db_added_faces,
         "db_updated_records": db_updated_records, "db_no_face": db_no_face,
-        "db_noop": db_noop, "db_skipped": db_skipped, "failed": failed,
+        "db_noop": db_noop, "db_metadata_refreshed": db_metadata_refreshed, "failed": failed,
         "foreign_posts_skipped": foreign_posts_skipped,
         "import_failed": import_failed, "import_error_samples": import_error_samples,
         "incomplete_posts": incomplete_posts, "scan_warning": scan_warning,
@@ -2162,7 +2153,7 @@ def main():
                                 summary += (
                                     f" FaceSearch: новых записей лиц {result['db_added_faces']}, "
                                     f"обновлено записей {result['db_updated_records']}, "
-                                    f"уже в БД по источнику {result['db_skipped']}, "
+                                    f"метаданные обновлены {result['db_metadata_refreshed']}, "
                                     f"без лиц {result['db_no_face']}, без новых записей {result['db_noop']}, "
                                     f"ошибок импорта {result['import_failed']}."
                                 )
