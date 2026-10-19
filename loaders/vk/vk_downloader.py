@@ -429,84 +429,134 @@ def _browser_session_from_context(context) -> tuple[requests.Session, int]:
     return session, copied
 
 
-def exchange_silent_token_for_legacy_user_token(
-    payload: dict, context, app_id: str = VKID_CLIENT_ID, scope: int = 327684
+def _extract_access_token_from_oauth_url(url: str) -> str:
+    """Извлекает access_token из URL OAuth, включая вложенный authorize_url."""
+    candidates = [url]
+    parsed = urlsplit(url or "")
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    nested = (query.get("authorize_url") or [""])[0]
+    if nested:
+        if nested.startswith("https%3A") or "%3A%2F%2F" in nested:
+            nested = unquote(nested)
+        candidates.insert(0, nested)
+
+    for candidate in candidates:
+        parsed_candidate = urlsplit(candidate)
+        for params in (
+            parse_qs(parsed_candidate.query, keep_blank_values=True),
+            parse_qs(parsed_candidate.fragment, keep_blank_values=True),
+        ):
+            token = str((params.get("access_token") or [""])[0]).strip()
+            if token:
+                return token
+    return ""
+
+
+def exchange_browser_session_for_legacy_user_token(
+    context, payload: dict | None = None, app_id: str = VKID_CLIENT_ID, scope: int = 327684
 ) -> str:
-    """Обменивает VK ID callback на legacy user API token через текущую браузерную сессию.
+    """Получает legacy user API token из авторизованной браузерной сессии.
 
-    VK ID callback содержит hash, используемый endpoint connect_internal. Затем
-    auth.getOauthToken выдаёт токен приложения для legacy API-методов.
+    Алгоритм основан на рабочем auth-потоке vk_api: oauth.vk.ru/authorize,
+    извлечение data.hash.return_auth из window.init, connect_internal и
+    auth.getOauthToken. Callback silent_token используется как сигнал, что
+    пользователь завершил подтверждение, но его hash не считается return_auth_hash.
     """
-    silent_token = str(payload.get("token") or "").strip()
-    # В legacy redirect VK может предоставить return_auth_hash в window.init страницы
-    # blank.html. Используем его, если доступен; иначе fallback на hash callback payload.
-    return_auth_hash = ""
-    for browser_page in list(context.pages):
-        try:
-            browser_url = urlsplit(browser_page.url or "")
-            if (
-                browser_url.netloc.lower() not in {"oauth.vk.ru", "oauth.vk.com"}
-                or browser_url.path.rstrip("/") != "/blank.html"
-            ):
-                continue
-            candidate_hash = browser_page.evaluate(
-                "() => { const i = window.init; return i && i.data && i.data.hash "
-                "? (i.data.hash.return_auth || '') : ''; }"
-            )
-            if candidate_hash:
-                return_auth_hash = str(candidate_hash).strip()
-                break
-        except Exception:
-            pass
-    if not return_auth_hash:
-        return_auth_hash = str(payload.get("hash") or "").strip()
-    uuid = str(payload.get("uuid") or "").strip()
-    if not silent_token:
-        raise ValueError("VK ID вернул silent_token без поля token.")
-    if not return_auth_hash:
-        raise ValueError(
-            "VK ID вернул silent_token, но в payload отсутствует hash. "
-            "Не удалось запустить обмен на пользовательский API-токен."
-        )
-
     session, cookie_count = _browser_session_from_context(context)
     if cookie_count == 0:
         raise RuntimeError(
-            "Ответ VK ID получен, но cookies браузерной сессии не удалось скопировать. "
-            "Повторите вход в окне Chrome, которое открыл сам загрузчик."
+            "VK вернул страницу callback, но браузер не передал cookies в обмен. "
+            "Повторите вход через окно Chrome, открытое загрузчиком."
+        )
+
+    response = session.get(
+        "https://oauth.vk.ru/authorize",
+        params={
+            "client_id": app_id,
+            "scope": scope,
+            "response_type": "token",
+        },
+        timeout=30,
+        allow_redirects=True,
+    )
+    response.raise_for_status()
+    if "act=blocked" in response.url:
+        raise RuntimeError("VK заблокировал legacy OAuth для этого приложения или аккаунта.")
+
+    token = _extract_access_token_from_oauth_url(response.url)
+    if token:
+        if token.lower().startswith("vk2."):
+            raise RuntimeError(
+                "OAuth вернул токен vk2.a…, несовместимый с photos.get/friends.get. "
+                "VK не выдал legacy user API token для этого приложения."
+            )
+        return token
+
+    # В некоторых ответах OAuth сначала отдаёт URL, на который перенаправляет JS.
+    redirect_match = re.search(r'location\\.href\\s*=\\s*"([^"]+)"\\s*\\+\\s*addr;', response.text)
+    if redirect_match:
+        redirect_url = redirect_match.group(1)
+        if not redirect_url.startswith(("http://", "https://")):
+            from urllib.parse import urljoin
+            redirect_url = urljoin(response.url, redirect_url)
+        response = session.get(redirect_url, timeout=30, allow_redirects=True)
+        response.raise_for_status()
+        token = _extract_access_token_from_oauth_url(response.url)
+        if token:
+            if token.lower().startswith("vk2."):
+                raise RuntimeError("VK вернул vk2-токен вместо legacy user API token.")
+            return token
+
+    # Рабочий legacy-поток возвращает hash внутри window.init, именно
+    # data.hash.return_auth (а не поле hash из payload silent_token).
+    return_auth_hash = ""
+    auth_json_match = re.search(r"window\\.init\\s*=\\s*(\\{.*?\\});", response.text, re.DOTALL)
+    if auth_json_match:
+        try:
+            auth_json = json.loads(auth_json_match.group(1))
+            return_auth_hash = str(
+                (((auth_json.get("data") or {}).get("hash") or {}).get("return_auth")) or ""
+            ).strip()
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            return_auth_hash = ""
+
+    # Fallback для callback-реализаций, где поле hash действительно содержит return_auth.
+    # Основной путь выше использует значение из OAuth HTML, как в vk_api.
+    if not return_auth_hash and isinstance(payload, dict):
+        return_auth_hash = str(payload.get("hash") or "").strip()
+
+    if not return_auth_hash:
+        location = urlsplit(response.url)
+        raise RuntimeError(
+            "VK не выдал return_auth_hash в ответе oauth.vk.ru/authorize. "
+            f"Ответ: {location.scheme}://{location.netloc}{location.path}; "
+            "доступность legacy OAuth для приложения могла быть ограничена."
         )
 
     connect_response = session.post(
-        "https://login.vk.com/?act=connect_internal",
+        "https://login.vk.ru/?act=connect_internal",
         data={
-            "uuid": uuid,
+            "uuid": "",
             "service_group": "",
             "return_auth_hash": return_auth_hash,
             "version": 1,
             "app_id": app_id,
         },
-        headers={
-            "Origin": "https://id.vk.ru",
-            "Referer": "https://id.vk.ru/",
-        },
+        headers={"Origin": "https://id.vk.ru", "Referer": "https://id.vk.ru/"},
         timeout=30,
     )
     connect_response.raise_for_status()
     try:
         connect_data = connect_response.json()
     except ValueError as exc:
-        raise RuntimeError(
-            "VK вернул неожиданный ответ при получении временного токена "
-            "через connect_internal."
-        ) from exc
+        raise RuntimeError("VK вернул некорректный JSON из connect_internal.") from exc
 
     if not isinstance(connect_data, dict) or connect_data.get("type") != "okay":
         reason = ""
         if isinstance(connect_data, dict):
             reason = str(connect_data.get("error") or connect_data.get("message") or connect_data.get("type") or "")
         raise RuntimeError(
-            "VK отклонил запрос connect_internal. Проверьте, что вошли в аккаунт "
-            "в окне Chrome загрузчика и приложение допускает этот тип авторизации."
+            "VK отклонил connect_internal."
             + (f" Ответ VK: {reason}" if reason else "")
         )
 
@@ -514,10 +564,7 @@ def exchange_silent_token_for_legacy_user_token(
     temporary_token = str(data.get("access_token") or "").strip()
     auth_user_hash = str(data.get("auth_user_hash") or "").strip()
     if not temporary_token or not auth_user_hash:
-        raise RuntimeError(
-            "VK подтвердил connect_internal, но не вернул необходимые поля "
-            "access_token/auth_user_hash."
-        )
+        raise RuntimeError("connect_internal не вернул access_token/auth_user_hash.")
 
     oauth_response = session.post(
         "https://api.vk.ru/method/auth.getOauthToken",
@@ -538,9 +585,7 @@ def exchange_silent_token_for_legacy_user_token(
     try:
         oauth_data = oauth_response.json()
     except ValueError as exc:
-        raise RuntimeError(
-            "VK вернул неожиданный ответ при запросе пользовательского API-токена."
-        ) from exc
+        raise RuntimeError("VK вернул некорректный JSON из auth.getOauthToken.") from exc
 
     error = oauth_data.get("error") if isinstance(oauth_data, dict) else None
     if error:
@@ -556,14 +601,10 @@ def exchange_silent_token_for_legacy_user_token(
     else:
         token = ""
     if not token:
-        raise RuntimeError(
-            "VK не вернул access_token из auth.getOauthToken. "
-            "Проверьте доступность legacy API-токенов для приложения."
-        )
+        raise RuntimeError("VK не вернул access_token из auth.getOauthToken.")
     if token.lower().startswith("vk2."):
         raise RuntimeError(
-            "VK снова вернул токен нового формата vk2.a…, который не поддерживает "
-            "требуемые загрузчику методы photos.get/friends.get."
+            "VK снова вернул токен vk2.a…, несовместимый с photos.get/friends.get."
         )
     return token
 
@@ -614,7 +655,7 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
 
         post_ui_event(
             "auth_status",
-            "Открываю VK ID для получения silent_token и последующего обмена в VK API…",
+            "Открываю VK ID; после возврата blank.html получу API-токен через OAuth-сессию…",
         )
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
@@ -652,9 +693,46 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
 
                 for page_index, current_page in enumerate(pages):
                     current_url = current_page.url or ""
-                    payload = extract_vk_auth_payload(current_url)
                     parsed_current = urlsplit(current_url)
                     current_location = f"{parsed_current.scheme}://{parsed_current.netloc}{parsed_current.path}"
+
+                    # Не ждём, пока fragment #payload будет распознан. Сам callback
+                    # blank.html означает, что VK завершил экран согласия; дальше
+                    # токен запрашивается через cookies авторизованного браузера.
+                    is_vk_callback = (
+                        parsed_current.netloc.lower() in {"oauth.vk.ru", "oauth.vk.com"}
+                        and parsed_current.path.rstrip("/") == "/blank.html"
+                    )
+                    if is_vk_callback:
+                        if last_seen_urls.get(page_index) != current_url:
+                            last_seen_urls[page_index] = current_url
+                            print(
+                                f"[VK AUTH] Callback обнаружен: {current_location}. "
+                                "Запускаю получение legacy user API token через OAuth-сессию."
+                            )
+                        post_ui_event(
+                            "auth_status",
+                            "VK ID вернул callback. Получаю пользовательский API-токен через OAuth-сессию…",
+                        )
+                        payload = extract_vk_auth_payload(current_url)
+                        if str(payload.get("type") or "").lower() == "authorization_error":
+                            # Невалидный payload не блокирует попытку, если cookies уже авторизованы.
+                            print("[VK AUTH] Payload callback не распознан; продолжаю обмен по cookies браузера.")
+                            payload = {}
+                        token = exchange_browser_session_for_legacy_user_token(context, payload)
+                        user_name, added, count = _validate_and_save_access_token(token)
+                        try:
+                            VK_SILENT_TOKEN_FILE.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        post_ui_event("token_saved", True, user_name, added, count, "")
+                        post_ui_event(
+                            "auth_status",
+                            f"Авторизация VK завершена: {user_name}. Совместимый API access_token сохранён.",
+                        )
+                        return
+
+                    payload = extract_vk_auth_payload(current_url)
                     if last_seen_urls.get(page_index) != current_url:
                         last_seen_urls[page_index] = current_url
                         fragment_keys = sorted(
@@ -706,7 +784,7 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
                             "auth_status",
                             "VK ID подтвердил вход. Получаю пользовательский API-токен через браузерную сессию…",
                         )
-                        token = exchange_silent_token_for_legacy_user_token(payload, context)
+                        token = exchange_browser_session_for_legacy_user_token(context, payload)
                         user_name, added, count = _validate_and_save_access_token(token)
                         try:
                             VK_SILENT_TOKEN_FILE.unlink(missing_ok=True)
