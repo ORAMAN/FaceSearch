@@ -866,8 +866,7 @@ POST_MEDIA_JS = r"""() => {
     return !!value && Number.isFinite(Date.parse(value));
   });
   const publishedAt = (timeNode?.getAttribute('datetime') ||
-    document.querySelector('meta[property="article:published_time"]')?.content ||
-    document.querySelector('meta[property="og:updated_time"]')?.content || '').trim();
+    document.querySelector('meta[property="article:published_time"]')?.content || '').trim();
 
   const locationLink = [...root.querySelectorAll('a[href]')].find(a => {
     try { return /\/(?:explore\/)?locations?\//i.test(new URL(a.href, location.href).pathname); }
