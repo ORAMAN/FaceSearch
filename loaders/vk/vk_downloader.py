@@ -12,11 +12,7 @@ import webbrowser
 import importlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import urlparse, urlsplit, parse_qs, unquote, urlencode
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import base64
-import hashlib
-import secrets
+from urllib.parse import urlparse, urlsplit, parse_qs, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -48,12 +44,10 @@ FRIENDS_PAGE_SIZE = 5000
 AUTH_STOP_REQUESTED = threading.Event()
 _AUTH_THREAD = None
 
-# VK ID OAuth 2.1: Authorization Code Flow + PKCE.
+# VK ID flow для загрузчика: silent_token -> auth.exchangeSilentAuthToken.
+# OAuth 2.1 Authorization Code Flow выдаёт vk2.a токены, несовместимые с
+# используемыми загрузчиком методами photos.get/friends.get.
 VKID_CLIENT_ID = "8101047"
-VKID_TOKEN_URL = "https://id.vk.ru/oauth2/auth"
-# Legacy VK ID flow используется для получения silent_token с последующим обменом
-# через auth.exchangeSilentAuthToken. OAuth 2.1 code-flow выдаёт vk2.a токены,
-# которые не поддерживают требуемые загрузчику photos.get/friends.get.
 VKID_REDIRECT_URI = "https://oauth.vk.ru/blank.html"
 VKID_SILENT_AUTH_URL = (
     "https://id.vk.ru/auth?return_auth_hash=1f3f97d3e974a20acf"
@@ -282,89 +276,6 @@ def default_chrome_executable() -> str:
         if candidate.is_file():
             return str(candidate)
     return str(candidates[0])
-
-
-def _build_vk_id_pkce() -> tuple[str, str]:
-    """Создаёт state и code_verifier для OAuth 2.1 / PKCE."""
-    code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii").rstrip("=")
-    state = secrets.token_urlsafe(24)
-    return state, code_verifier
-
-
-def _build_vk_id_authorize_url(state: str, code_verifier: str) -> str:
-    """Строит URL VK ID без origin=http://127.0.0.1, который блокирует авторизацию."""
-    challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(code_verifier.encode("ascii")).digest()
-    ).decode("ascii").rstrip("=")
-    stats_info = base64.b64encode(
-        json.dumps({
-            "flow_source": "from_custom_auth",
-            "session_id": secrets.token_hex(5),
-        }, separators=(",", ":")).encode("utf-8")
-    ).decode("ascii")
-    params = {
-        "code_challenge": challenge,
-        "code_challenge_method": "s256",
-        "client_id": VKID_CLIENT_ID,
-        "response_type": "code",
-        "scope": "327684",
-        "state": state,
-        "prompt": "",
-        "stats_info": stats_info,
-        "v": "2.6.9",
-        "sdk_type": "vkid",
-        "app_id": VKID_CLIENT_ID,
-        "redirect_uri": VKID_REDIRECT_URI,
-    }
-    # Намеренно НЕ добавляем origin. Иначе VK ID проверяет localhost
-    # как домен сервиса и блокирует вход, если этот домен не зарегистрирован.
-    return "https://id.vk.ru/authorize?" + urlencode(params)
-
-
-def exchange_vk_id_code(
-    code: str,
-    device_id: str,
-    code_verifier: str,
-    expected_state: str,
-) -> dict:
-    """Обменивает одноразовый authorization code VK ID на access_token по контракту SDK."""
-    if not code or not device_id or not code_verifier or not expected_state:
-        raise ValueError("Для обмена токена нужны code, device_id, code_verifier и state.")
-
-    params = {
-        "grant_type": "authorization_code",
-        "client_id": VKID_CLIENT_ID,
-        "redirect_uri": VKID_REDIRECT_URI,
-        "code_verifier": code_verifier,
-        "device_id": device_id,
-        "state": expected_state,
-    }
-    response = requests.post(
-        VKID_TOKEN_URL,
-        params=params,
-        data={"code": code},
-        timeout=30,
-    )
-    try:
-        data = response.json()
-    except ValueError:
-        response.raise_for_status()
-        raise RuntimeError("VK ID вернул ответ, который не является JSON.")
-
-    if isinstance(data, dict) and data.get("error"):
-        description = data.get("error_description") or data.get("error_reason") or data.get("error")
-        raise RuntimeError(f"VK ID не смог обменять authorization code: {description}.")
-    response.raise_for_status()
-
-    if not isinstance(data, dict):
-        raise RuntimeError(f"VK ID вернул неожиданный ответ при обмене кода: {data!r}")
-    if str(data.get("state") or "") != expected_state:
-        raise RuntimeError("VK ID вернул несовпадающий state. Токен не сохранён.")
-
-    result = data.get("response") if isinstance(data.get("response"), dict) else data
-    if not isinstance(result, dict) or not result.get("access_token"):
-        raise RuntimeError(f"VK ID не вернул access_token при обмене кода: {data}")
-    return result
 
 
 def _save_pending_silent_token(payload: dict) -> None:
