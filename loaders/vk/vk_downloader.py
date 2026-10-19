@@ -13,6 +13,7 @@ import importlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import urlparse, urlsplit, parse_qs, unquote
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import base64
 import hashlib
 import secrets
@@ -425,6 +426,7 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
         return
 
     context = None
+    server = None
     try:
         profile_path = Path(profile_directory).expanduser()
         profile_path.mkdir(parents=True, exist_ok=True)
@@ -466,7 +468,7 @@ button { font: inherit; padding: 12px 22px; cursor: pointer; }
       redirectUrl: 'https://oauth.vk.ru/blank.html',
       state: __EXPECTED_STATE__,
       codeVerifier: __CODE_VERIFIER__,
-      scope: '',
+      scope: '327684',
       mode: VKID.ConfigAuthMode.InNewTab,
       responseMode: VKID.ConfigResponseMode.Callback
     });
@@ -502,6 +504,23 @@ button { font: inherit; padding: 12px 22px; cursor: pointer; }
         sdk_html = sdk_html.replace("__EXPECTED_STATE__", json.dumps(expected_state))
         sdk_html = sdk_html.replace("__CODE_VERIFIER__", json.dumps(code_verifier))
 
+        class VKIDAuthPageHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = sdk_html.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), VKIDAuthPageHandler)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True, name="VKIDAuthLocalServer").start()
+
         post_ui_event("auth_status", "Запускаю Chrome и загружаю официальный SDK VK ID…")
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
@@ -515,7 +534,7 @@ button { font: inherit; padding: 12px 22px; cursor: pointer; }
                 args=["--start-maximized", "--window-size=1920,1080", "--window-position=0,0"],
             )
             page = context.pages[0] if context.pages else context.new_page()
-            page.set_content(sdk_html, wait_until="load", timeout=60000)
+            page.goto(f"http://127.0.0.1:{server.server_port}/", wait_until="load", timeout=60000)
 
             deadline = time.monotonic() + 600
             clicked = False
@@ -583,6 +602,12 @@ button { font: inherit; padding: 12px 22px; cursor: pointer; }
         if context is not None:
             try:
                 context.close()
+            except Exception:
+                pass
+        if server is not None:
+            try:
+                server.shutdown()
+                server.server_close()
             except Exception:
                 pass
 
