@@ -131,7 +131,7 @@ def reload_tokens():
 
 
 def extract_vk_auth_payload(value: str) -> dict:
-    """Разбирает callback VK ID OAuth 2.1, старый OAuth fragment и legacy payload."""
+    """Разбирает callback VK ID query/fragment, включая legacy #payload={...}."""
     value = (value or "").strip()
     if not value:
         return {}
@@ -140,7 +140,7 @@ def extract_vk_auth_payload(value: str) -> dict:
         parsed = urlsplit(value)
         query = parse_qs(parsed.query, keep_blank_values=True)
 
-        # Современный VK ID возвращает code, state и device_id в query callback URL.
+        # Современный VK ID может вернуть ошибку в query-параметрах.
         if query.get("error"):
             return {
                 "type": "authorization_error",
@@ -151,8 +151,6 @@ def extract_vk_auth_payload(value: str) -> dict:
         code = (query.get("code") or [""])[0].strip()
         callback_type = str((query.get("type") or [""])[0]).strip().lower()
         if code:
-            # В используемом VK ID code_v2 URL поле code иногда содержит уже vk2.a…
-            # Это не silent_token и не одноразовый authorization code для обмена.
             if callback_type == "code_v2" and code.lower().startswith("vk2."):
                 return {
                     "type": "access_token",
@@ -168,11 +166,47 @@ def extract_vk_auth_payload(value: str) -> dict:
             }
 
         fragment = parse_qs(parsed.fragment, keep_blank_values=True)
-        # Совместимость с legacy payload VK ID: #payload=%7B...%7D.
-        raw_payload = fragment.get("payload", [None])[0]
-        if raw_payload:
-            data = json.loads(raw_payload)
-            return data if isinstance(data, dict) else {}
+
+        # Некоторые callbacks помещают payload во fragment, другие — в query.
+        # Берём сырую строку параметра и используем unquote, а не unquote_plus:
+        # символ '+' в JSON-поле не должен превращаться в пробел.
+        raw_payload = None
+        for component in (parsed.fragment, parsed.query):
+            for part in component.split("&"):
+                key, separator, raw_value = part.partition("=")
+                if separator and unquote(key) == "payload":
+                    raw_payload = unquote(raw_value)
+                    break
+            if raw_payload is not None:
+                break
+
+        if raw_payload is not None:
+            candidate = raw_payload
+            last_error = None
+            for _ in range(3):
+                try:
+                    data = json.loads(candidate)
+                    if isinstance(data, dict):
+                        return data
+                    return {
+                        "type": "authorization_error",
+                        "error": "invalid_payload",
+                        "error_description": "VK ID callback payload имеет неожиданный формат.",
+                    }
+                except (json.JSONDecodeError, TypeError) as exc:
+                    last_error = exc
+                    decoded = unquote(candidate)
+                    if decoded == candidate:
+                        break
+                    candidate = decoded
+            return {
+                "type": "authorization_error",
+                "error": "invalid_payload",
+                "error_description": (
+                    "Callback VK ID содержит параметр payload, но JSON не удалось разобрать "
+                    f"({type(last_error).__name__ if last_error else 'ошибка формата'})."
+                ),
+            }
 
         # Старый implicit flow: #access_token=...&user_id=...
         for params in (fragment, query):
@@ -183,8 +217,12 @@ def extract_vk_auth_payload(value: str) -> dict:
                     "access_token": token,
                     "user_id": (params.get("user_id") or [""])[0],
                 }
-    except Exception:
-        pass
+    except Exception as exc:
+        return {
+            "type": "authorization_error",
+            "error": "callback_parse_error",
+            "error_description": f"Не удалось разобрать URL ответа VK ID ({type(exc).__name__}).",
+        }
 
     match = re.search(r"(?:^|[&#?\s])access_token(?:_[^=&#\s]+)?=([^&#\s]+)", value)
     if match:
@@ -598,36 +636,58 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
 
             deadline = time.monotonic() + 600
             last_callback_status = None
+            last_seen_urls = {}
             while not AUTH_STOP_REQUESTED.is_set() and time.monotonic() < deadline:
-                for current_page in list(context.pages):
+                pages = list(context.pages)
+                if not pages:
+                    if last_callback_status != "pages_missing":
+                        post_ui_event(
+                            "auth_status",
+                            "Chrome запущен, но Playwright сейчас не видит ни одной вкладки. "
+                            "Закройте авторизацию и запустите её повторно из загрузчика.",
+                        )
+                        last_callback_status = "pages_missing"
+                    time.sleep(0.25)
+                    continue
+
+                for page_index, current_page in enumerate(pages):
                     current_url = current_page.url or ""
                     payload = extract_vk_auth_payload(current_url)
+                    parsed_current = urlsplit(current_url)
+                    current_location = f"{parsed_current.scheme}://{parsed_current.netloc}{parsed_current.path}"
+                    if last_seen_urls.get(page_index) != current_url:
+                        last_seen_urls[page_index] = current_url
+                        fragment_keys = sorted(
+                            key for key in parse_qs(parsed_current.fragment, keep_blank_values=True).keys()
+                        )
+                        query_keys = sorted(
+                            key for key in parse_qs(parsed_current.query, keep_blank_values=True).keys()
+                        )
+                        payload_type_for_log = str(payload.get("type") or "") if payload else "unparsed"
+                        # Намеренно не записываем значения URL, token, hash или payload в журнал.
+                        diagnostic = (
+                            f"[VK AUTH] Tab {page_index + 1}: {current_location}; "
+                            f"query_keys={query_keys}; fragment_keys={fragment_keys}; "
+                            f"parsed_type={payload_type_for_log or 'none'}"
+                        )
+                        print(diagnostic)
+                        if "blank.html" in parsed_current.path and "payload" in (
+                            fragment_keys + query_keys
+                        ) and payload.get("type") == "authorization_error":
+                            raise RuntimeError(str(payload.get("error_description") or "Не удалось разобрать payload VK ID."))
+
                     if not payload:
-                        # Не оставляем пользователя без обратной связи, если VK открыл
-                        # callback-страницу, но её fragment не удалось прочитать.
-                        try:
-                            parsed_current = urlsplit(current_url)
-                            if (
-                                parsed_current.netloc.lower() in {"oauth.vk.ru", "oauth.vk.com"}
-                                and parsed_current.path.rstrip("/") == "/blank.html"
-                            ):
-                                fragment_params = parse_qs(parsed_current.fragment, keep_blank_values=True)
-                                if fragment_params.get("payload"):
-                                    callback_status = (
-                                        "VK ID вернул callback с payload, но загрузчик не смог его разобрать. "
-                                        "Повторите вход и приложите Log.txt без токенов и URL-фрагмента."
-                                    )
-                                else:
-                                    callback_status = (
-                                        "Открыта страница возврата VK ID; ожидаю результат авторизации. "
-                                        "Если на странице уже показано предупреждение VK, проверьте, что "
-                                        "это окно Chrome было открыто кнопкой загрузчика."
-                                    )
-                                if last_callback_status != callback_status:
-                                    post_ui_event("auth_status", callback_status)
-                                    last_callback_status = callback_status
-                        except Exception:
-                            pass
+                        if (
+                            parsed_current.netloc.lower() in {"oauth.vk.ru", "oauth.vk.com"}
+                            and parsed_current.path.rstrip("/") == "/blank.html"
+                        ):
+                            callback_status = (
+                                "VK открыл blank.html, но URL не содержит распознанного payload/code. "
+                                "В журнал добавлен безопасный диагноз без токена: проверьте строку [VK AUTH]."
+                            )
+                            if last_callback_status != callback_status:
+                                post_ui_event("auth_status", callback_status)
+                                last_callback_status = callback_status
                         continue
 
                     payload_type = str(payload.get("type") or "").lower()
