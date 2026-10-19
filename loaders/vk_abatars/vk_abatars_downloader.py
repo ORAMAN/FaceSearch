@@ -13,7 +13,7 @@ import importlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import urlparse, urlsplit, parse_qs, unquote
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 import requests
 import tkinter as tk
@@ -1455,6 +1455,8 @@ def process_entity(
                 f"[DB-IMPORT] Аватар {display_id}: "
                 f"добавлено/обновлено; найдено лиц: {result.get('faces', 0)}"
             )
+            with EXISTING_PROFILE_IDS_LOCK:
+                EXISTING_PROFILE_IDS.add(abs(uid))
             if delete_processed_files:
                 avatar_path.unlink(missing_ok=True)
                 avatar_json.unlink(missing_ok=True)
@@ -1925,11 +1927,9 @@ def run_download_job(
                     f"не найдено VK {max(0, missing_count)}."
                 )
 
-                futures = {}
-                # Отправляем задания в пул строго в порядке ID. Загрузки выполняются параллельно.
+                tasks = []
+                # Список задач упорядочен по ID; одновременно в работу отправляется только число потоков.
                 for uid in request_ids:
-                    if STOP_REQUESTED.is_set():
-                        break
                     user = users_by_id.get(uid)
                     if user is None:
                         continue
@@ -1944,43 +1944,59 @@ def run_download_job(
                     folder_name = sanitize_filename(f"{display_name} ({uid})")
                     base_dir = str(output_root / folder_name)
                     os.makedirs(base_dir, exist_ok=True)
-                    future = executor.submit(
-                        process_entity,
-                        user,
-                        base_dir,
-                        False,
-                        worker_count,
-                        importer,
-                        delete_processed_files if import_to_database else False,
-                        import_to_database,
-                    )
-                    futures[future] = uid
+                    tasks.append((uid, user, base_dir))
 
+                next_task_index = 0
+                pending = {}
                 batch_errors = 0
-                for future in as_completed(futures):
-                    uid = futures[future]
-                    try:
-                        future.result()
-                    except Exception as exc:
-                        batch_errors += 1
-                        errors_total += 1
-                        print(f"[ERROR] ID {uid}: {exc}")
-                    if STOP_REQUESTED.is_set():
-                        # Уже выполняющиеся сетевые запросы завершаются штатно;
-                        # новые пакеты после этой пачки запрошены не будут.
-                        pass
+
+                def submit_next_tasks():
+                    nonlocal next_task_index
+                    while (
+                        not STOP_REQUESTED.is_set()
+                        and next_task_index < len(tasks)
+                        and len(pending) < worker_count
+                    ):
+                        uid, user, base_dir = tasks[next_task_index]
+                        next_task_index += 1
+                        future = executor.submit(
+                            process_entity,
+                            user,
+                            base_dir,
+                            False,
+                            worker_count,
+                            importer,
+                            delete_processed_files if import_to_database else False,
+                            import_to_database,
+                        )
+                        pending[future] = uid
+
+                submit_next_tasks()
+                while pending:
+                    completed_futures, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in completed_futures:
+                        uid = pending.pop(future)
+                        try:
+                            future.result()
+                        except Exception as exc:
+                            batch_errors += 1
+                            errors_total += 1
+                            print(f"[ERROR] ID {uid}: {exc}")
+                    # При нажатии «Остановить» новые задания не добавляются в пул.
+                    submit_next_tasks()
 
                 if STOP_REQUESTED.is_set():
-                    # Вся текущая пачка завершена; следующий ID можно безопасно сохранить для продолжения.
-                    current_id = batch_end
+                    # Если часть задач пачки ещё не была отправлена, повторяем её с начала.
+                    # Успешно импортированные ID при повторном запуске будут пропущены по БД.
+                    current_id = batch_start if next_task_index < len(tasks) else batch_end
                     break
 
-                avatars_saved_total += len(futures) - batch_errors
+                avatars_saved_total += len(tasks) - batch_errors
                 print(
                     f"[TOTAL] проверено ID: {checked_total:,}; "
                     f"пропущено по БД: {skipped_total:,}; "
                     f"профилей получено: {returned_total:,}; "
-                    f"задач завершено без исключений: {avatars_saved_total:,}; "
+                    f"пользователей обработано без исключений: {avatars_saved_total:,}; "
                     f"ошибок обработки: {errors_total:,}."
                 )
                 current_id = batch_end
@@ -2754,8 +2770,9 @@ def main():
                             progress_bar.configure(maximum=total)
                         progress_bar["value"] = min(current, total)
                     else:
-                        progress_bar.configure(mode="indeterminate")
-                        progress_bar.start(10)
+                        if str(progress_bar.cget("mode")) != "indeterminate":
+                            progress_bar.configure(mode="indeterminate")
+                            progress_bar.start(10)
                 elif kind == "start_id_updated":
                     start_id_var.set(str(event[1]))
                 elif kind == "status":
