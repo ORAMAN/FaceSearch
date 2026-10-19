@@ -1415,7 +1415,7 @@ def process_entity(
     entity: dict, base_dir: str, is_group: bool, MAX_WORKERS: int,
     importer=None, delete_processed_files: bool = False, import_to_database: bool = True,
 ):
-    """Сохраняет только аватар VK, JSON-метаданные и при необходимости импортирует его в FaceSearch."""
+    """Скачивает только аватар и возвращает пути для импорта из рабочего потока."""
     raw_id = entity.get("id")
     if is_group:
         uid = -abs(int(raw_id))
@@ -1435,7 +1435,7 @@ def process_entity(
 
     print(f"\n{'=' * 60}")
     print(f"👤 {name} | ID: {display_id}")
-    post_ui_event("progress", 0, 1, f"[{display_id}] — получение аватара")
+    post_ui_event("status", f"Скачивание аватара VK ID {display_id}…")
 
     if not save_avatar_to_root(entity, base_dir, is_group=is_group):
         print("🖼️ Аватар отсутствует или VK не предоставил доступ к изображению.")
@@ -1449,8 +1449,8 @@ def process_entity(
     # Импорт в БД выполняется вызывающим потоком-владельцем соединения.
     # Это важно для SQLite: worker-потоки занимаются сетью и записью файлов, но не DB connection.
     log_user_processed(name, display_id, is_group)
-    post_ui_event("progress", 1, 1, f"[{display_id}] — аватар скачан")
-    return (avatar_path, avatar_json, abs(uid))
+    post_ui_event("status", f"Аватар VK ID {display_id} скачан; передача в FaceSearch…")
+    return (avatar_path, avatar_json, abs(uid), name)
 
 
 def process_users_with_friends(
@@ -1964,25 +1964,25 @@ def run_download_job(
                         uid = pending.pop(future)
                         try:
                             download_result = future.result()
-                            if download_result and importer is not None and import_to_database:
-                                image_path, json_path, downloaded_uid = download_result
+                            if download_result:
+                                image_path, json_path, downloaded_uid, downloaded_name = download_result
                                 try:
-                                    # Импортируем сразу по мере готовности файлов, в том же потоке,
-                                    # где создано соединение с SQLite/MySQL FaceSearch.
-                                    import_result = importer.import_image(
-                                        image_path,
-                                        json_path,
-                                        source_key=f"vk:{downloaded_uid}:avatar",
-                                    )
-                                    with EXISTING_PROFILE_IDS_LOCK:
-                                        EXISTING_PROFILE_IDS.add(abs(int(downloaded_uid)))
-                                    print(
-                                        f"[DB-IMPORT] Аватар {downloaded_uid}: "
-                                        f"импортирован; лиц: {import_result.get('faces', 0)}."
-                                    )
-                                    if delete_processed_files:
-                                        image_path.unlink(missing_ok=True)
-                                        json_path.unlink(missing_ok=True)
+                                    if importer is not None and import_to_database:
+                                        # Импортируем по готовности файлов, в потоке, где создано соединение с БД.
+                                        import_result = importer.import_image(
+                                            image_path,
+                                            json_path,
+                                            source_key=f"vk:{downloaded_uid}:avatar",
+                                        )
+                                        with EXISTING_PROFILE_IDS_LOCK:
+                                            EXISTING_PROFILE_IDS.add(abs(int(downloaded_uid)))
+                                        print(
+                                            f"[DB-IMPORT] Аватар {downloaded_uid}: "
+                                            f"импортирован; лиц: {import_result.get('faces', 0)}."
+                                        )
+                                        if delete_processed_files:
+                                            image_path.unlink(missing_ok=True)
+                                            json_path.unlink(missing_ok=True)
                                 except Exception as exc:
                                     batch_errors += 1
                                     errors_total += 1
@@ -1990,6 +1990,10 @@ def run_download_job(
                                         f"[DB-ERROR] ID {downloaded_uid}: аватар скачан, "
                                         f"но не удалось записать в FaceSearch: {exc}"
                                     )
+                                    continue
+                                # Отмечаем ID завершённым только после успешного импорта
+                                # (или после скачивания, если импорт выключен).
+                                log_user_processed(downloaded_name, str(downloaded_uid), False)
                         except Exception as exc:
                             batch_errors += 1
                             errors_total += 1
