@@ -1215,12 +1215,18 @@ def download_image(args):
         return False, str(e), None, None
 
 
-def _remove_dir_if_empty(path: str | Path) -> None:
-    """Удаляет только пустой каталог; чужие файлы не трогает."""
+def _remove_dir_if_empty(path: str | Path) -> bool:
+    """Удаляет только пустой каталог; возвращает, удалось ли убрать его."""
+    target = Path(path)
+    if not target.exists():
+        return True
     try:
-        Path(path).rmdir()
+        target.rmdir()
+        return True
+    except FileNotFoundError:
+        return True
     except (OSError, TypeError, ValueError):
-        pass
+        return False
 
 
 def save_avatar_to_root(
@@ -2095,12 +2101,9 @@ def run_download_job(
                                 continue
 
                             if outcome_status == "download_error":
+                                # Причина подробно записана process_entity; здесь обновляем только счётчики.
                                 download_errors_total += 1
                                 batch_errors += 1
-                                print(
-                                    f"[AVATAR-ERROR] ID {uid} | {outcome.get('name', name_by_id.get(uid, ''))}: "
-                                    f"{outcome.get('reason', 'не удалось получить изображение')}."
-                                )
                                 continue
 
                             if outcome_status != "downloaded":
@@ -2141,11 +2144,16 @@ def run_download_job(
                                     try:
                                         image_path.unlink(missing_ok=True)
                                         json_path.unlink(missing_ok=True)
-                                        _remove_dir_if_empty(image_path.parent)
-                                        print(
-                                            f"[CLEANUP] ID {downloaded_uid}: исходные файлы удалены; "
-                                            "пустая папка пользователя удалена."
-                                        )
+                                        if _remove_dir_if_empty(image_path.parent):
+                                            print(
+                                                f"[CLEANUP] ID {downloaded_uid}: исходные файлы и пустая папка пользователя удалены."
+                                            )
+                                        else:
+                                            cleanup_errors_total += 1
+                                            print(
+                                                f"[CLEANUP-ERROR] ID {downloaded_uid}: файлы удалены, "
+                                                f"но каталог остался (не пуст или занят): {image_path.parent}"
+                                            )
                                     except Exception as exc:
                                         cleanup_errors_total += 1
                                         print(
