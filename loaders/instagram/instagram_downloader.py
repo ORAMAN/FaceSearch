@@ -805,7 +805,8 @@ POST_MEDIA_JS = r"""() => {
   }
   candidates.sort((a, b) => b.score - a.score);
 
-  const caption = document.querySelector('meta[property="og:description"]')?.content || '';
+  const metaDescription = document.querySelector('meta[property="og:description"]')?.content || '';
+  const pageDescription = document.querySelector('meta[name="description"]')?.content || '';
   const reservedPaths = new Set(['p','reel','tv','stories','explore','accounts','direct','about','developer']);
   const usernameFromHref = (href) => {
     try {
@@ -816,6 +817,62 @@ POST_MEDIA_JS = r"""() => {
   };
   const author = [...root.querySelectorAll('header a[href]')]
     .map(a => usernameFromHref(a.href)).find(Boolean) || '';
+
+  // Prefer the caption visible in the post DOM. Open Graph descriptions sometimes
+  // contain only counts or a legacy "likes, comments - username on date: caption" string.
+  const cleanMetaCaption = (raw) => {
+    let value = String(raw || '').trim().replace(/\s+/g, ' ');
+    if (!value || /^see instagram photos and videos from\b/i.test(value)) return '';
+    const legacy = value.match(/^\s*\d[\d., \u00a0]*\s+likes?,\s*\d[\d., \u00a0]*\s+comments?\s*[-–—]\s*[^:]{1,180}:\s*([\s\S]*)$/i);
+    if (legacy) value = legacy[1].trim();
+    else {
+      value = value.replace(/^\s*\d[\d., \u00a0]*\s+likes?,\s*\d[\d., \u00a0]*\s+comments?\s*[-–—]\s*/i, '').trim();
+    }
+    if (/^\d[\d., \s\u00a0]*\s+likes?,\s*\d[\d., \s\u00a0]*\s+comments?$/i.test(value)) return '';
+    if (author && value.toLowerCase() === author.toLowerCase()) return '';
+    return value.replace(/^["“‘]\s*/, '').replace(/\s*["”’]$/, '').trim();
+  };
+  const captionNode = root.querySelector('[data-testid*="caption"]') || root.querySelector('h1');
+  let caption = '';
+  if (captionNode) {
+    let visibleCaption = text(captionNode);
+    if (author && visibleCaption.toLowerCase().startsWith(author.toLowerCase())) {
+      visibleCaption = visibleCaption.slice(author.length).replace(/^[\s:·–—-]+/, '').trim();
+    }
+    if (visibleCaption && (!author || visibleCaption.toLowerCase() !== author.toLowerCase())) {
+      caption = visibleCaption;
+    }
+  }
+  if (!caption) caption = cleanMetaCaption(metaDescription) || cleanMetaCaption(pageDescription);
+
+  // Counts are taken only from visible DOM/metadata; if Instagram hides them,
+  // the fields remain empty rather than being guessed.
+  const metricText = [
+    metaDescription, pageDescription, root.innerText || '',
+    ...[...root.querySelectorAll('[aria-label], [title]')].map(el =>
+      (el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '')
+    )
+  ].join(' ');
+  const likeMatch = metricText.match(/(\d[\d., \u00a0]*(?:[KMB]|тыс\.?|млн)?)[\s\u00a0]*(?:likes?|like count|отмет(?:ка|ки|ок)?\s+нравится|нравится|me gusta|j'aime)/i)
+    || metricText.match(/liked by[\s\S]{0,180}?(\d[\d., \s\u00a0]*(?:[KMB]|тыс\.?|млн)?)\s+others/i);
+  const commentMatch = metricText.match(/(\d[\d., \u00a0]*(?:[KMB]|тыс\.?|млн)?)[\s\u00a0]*(?:comments?|комментар(?:ий|ия|иев|ии)?)/i);
+  const likesCount = likeMatch ? String(likeMatch[1] || '').trim() : '';
+  const commentsCount = commentMatch ? String(commentMatch[1] || '').trim() : '';
+
+  const timeNode = [...root.querySelectorAll('time[datetime]')].find(el => {
+    const value = el.getAttribute('datetime') || '';
+    return !!value && Number.isFinite(Date.parse(value));
+  });
+  const publishedAt = (timeNode?.getAttribute('datetime') ||
+    document.querySelector('meta[property="article:published_time"]')?.content ||
+    document.querySelector('meta[property="og:updated_time"]')?.content || '').trim();
+
+  const locationLink = [...root.querySelectorAll('a[href]')].find(a => {
+    try { return /\/(?:explore\/)?locations?\//i.test(new URL(a.href, location.href).pathname); }
+    catch (_) { return false; }
+  });
+  const locationName = locationLink ? text(locationLink) : '';
+
   const buttonIsVisible = (button) => {
     const r = button.getBoundingClientRect();
     const style = getComputedStyle(button);
@@ -886,6 +943,10 @@ POST_MEDIA_JS = r"""() => {
       height: candidates[0].height, score: candidates[0].score, alt: candidates[0].alt} : null,
     caption,
     author,
+    publishedAt,
+    likesCount,
+    commentsCount,
+    location: locationName,
     hasNext: !!nextButton,
     nextLabel: nextButton ? (buttonLabel(nextButton) || 'Next') : '',
     nextButtonIndex: nextButton ? controls.indexOf(nextButton) : -1,
@@ -977,6 +1038,58 @@ def collect_grid_entries_with_scroll(page, status_callback, profile_username: st
     return list(collected.values()), scan_warning
 
 
+def resolve_post_metadata(post_page, entry: dict, status_callback, index: int, total: int,
+                          expected_owner: str | None = None) -> dict | None:
+    """Read caption/date/counts from a post page without traversing its carousel."""
+    url = str(entry.get("permalink") or "").strip()
+    if not url:
+        return {}
+
+    status_callback(f"Читаю описание и статистику публикации {index}/{total} — {entry.get('shortcode', '')}")
+    try:
+        post_page.goto(url, wait_until="domcontentloaded", timeout=45000)
+    except Exception as exc:
+        # A redirect or slow document can interrupt goto even when the DOM is usable.
+        print(f"[WARN] Не удалось открыть публикацию для чтения метаданных {url}: {exc}")
+    try:
+        post_page.wait_for_function(
+            "() => !!document.querySelector('article img, main img')",
+            timeout=9000,
+        )
+    except Exception:
+        pass
+    try:
+        post_page.wait_for_timeout(250)
+        data = post_page.evaluate(POST_MEDIA_JS) or {}
+    except Exception as exc:
+        print(f"[WARN] Не удалось прочитать метаданные публикации {url}: {exc}")
+        return {}
+
+    actual_owner = str(data.get("author") or "").strip().lstrip("@").lower()
+    if expected_owner and actual_owner and actual_owner != expected_owner.lower():
+        message = (
+            f"Публикация {entry.get('shortcode', '')} принадлежит @{actual_owner}, "
+            f"а не @{expected_owner}; пропускаю."
+        )
+        print(f"[SKIP-OTHER-OWNER] {url}: {message}")
+        status_callback(message)
+        return None
+
+    indicator = str(data.get("slideIndicator") or "").strip()
+    counter_match = re.search(r"(\d+)\s*/\s*(\d+)", indicator)
+    expected_slides = int(counter_match.group(2)) if counter_match else 0
+    return {
+        "caption": str(data.get("caption") or "").strip(),
+        "alt": str((data.get("media") or {}).get("alt") or entry.get("alt") or "").strip(),
+        "author": actual_owner,
+        "published_at": str(data.get("publishedAt") or "").strip(),
+        "likes_count": str(data.get("likesCount") or "").strip(),
+        "comments_count": str(data.get("commentsCount") or "").strip(),
+        "location": str(data.get("location") or "").strip(),
+        "expected_slides": expected_slides or None,
+    }
+
+
 def resolve_post_media(post_page, entry: dict, status_callback, index: int, total: int,
                        expected_owner: str | None = None) -> list[dict] | None:
     """Collect every accessible image slide from a post/carousel.
@@ -1041,7 +1154,17 @@ def resolve_post_media(post_page, entry: dict, status_callback, index: int, tota
             visited_states.add(state)
 
             if media_url not in seen_urls:
-                found.append({"url": media_url, "caption": caption, "alt": alt, "slide": len(found) + 1})
+                found.append({
+                    "url": media_url,
+                    "caption": caption,
+                    "alt": alt,
+                    "slide": len(found) + 1,
+                    "author": str(current_data.get("author") or "").strip(),
+                    "published_at": str(current_data.get("publishedAt") or "").strip(),
+                    "likes_count": str(current_data.get("likesCount") or "").strip(),
+                    "comments_count": str(current_data.get("commentsCount") or "").strip(),
+                    "location": str(current_data.get("location") or "").strip(),
+                })
                 seen_urls.add(media_url)
 
             if not current_data.get("hasNext"):
@@ -1390,8 +1513,11 @@ def collect_instagram(context, status_callback, progress_callback,
     incomplete_post_codes: set[str] = set()
     post_page = None
     try:
-        if fullsize:
-            post_page = context.new_page()
+        if entries:
+            try:
+                post_page = context.new_page()
+            except Exception as exc:
+                print(f"[WARN] Не удалось создать служебную вкладку для чтения публикаций: {exc}")
             # Keep the user's selected profile tab in front while the helper tab
             # navigates through post URLs in the background.
             try:
@@ -1403,17 +1529,32 @@ def collect_instagram(context, status_callback, progress_callback,
             code = str(entry.get("shortcode") or "")
             raw_preview = absolute_url(str(entry.get("preview") or ""), requested_url)
             assets = []
-            if fullsize and post_page is not None and str(entry.get("permalink") or "").strip():
-                assets = resolve_post_media(
-                    post_page, entry, status_callback, pos, len(entries),
-                    expected_owner=username if mode == "posts" else None,
-                )
-                # None means the opened /p/ page clearly belongs to another account.
-                # Do not fall back to its grid thumbnail or import it.
-                if assets is None:
-                    foreign_posts_skipped += 1
-                    progress_callback(pos, max(1, len(entries)), f"Чужая публикация пропущена: {pos}/{len(entries)}")
-                    continue
+            if post_page is not None and str(entry.get("permalink") or "").strip():
+                if fullsize:
+                    assets = resolve_post_media(
+                        post_page, entry, status_callback, pos, len(entries),
+                        expected_owner=username if mode == "posts" else None,
+                    )
+                    # None means the opened /p/ page clearly belongs to another account.
+                    # Do not fall back to its grid thumbnail or import it.
+                    if assets is None:
+                        foreign_posts_skipped += 1
+                        progress_callback(pos, max(1, len(entries)), f"Чужая публикация пропущена: {pos}/{len(entries)}")
+                        continue
+                    if assets:
+                        for key in ("caption", "author", "published_at", "likes_count", "comments_count", "location", "expected_slides"):
+                            if assets[0].get(key) not in (None, ""):
+                                entry[key] = assets[0][key]
+                else:
+                    post_metadata = resolve_post_metadata(
+                        post_page, entry, status_callback, pos, len(entries),
+                        expected_owner=username if mode == "posts" else None,
+                    )
+                    if post_metadata is None:
+                        foreign_posts_skipped += 1
+                        progress_callback(pos, max(1, len(entries)), f"Чужая публикация пропущена: {pos}/{len(entries)}")
+                        continue
+                    entry.update({key: value for key, value in post_metadata.items() if value not in (None, "")})
             if not assets:
                 if fullsize and entry.get("permalink") and code not in incomplete_post_codes:
                     incomplete_post_codes.add(code)
@@ -1422,7 +1563,18 @@ def collect_instagram(context, status_callback, progress_callback,
                         "permalink": entry.get("permalink", ""),
                         "reason": "Не удалось извлечь слайды публикации; использована только миниатюра из сетки профиля."
                     })
-                assets = [{"url": raw_preview, "caption": "", "alt": str(entry.get("alt") or ""), "slide": 1}]
+                assets = [{
+                    "url": raw_preview,
+                    "caption": str(entry.get("caption") or ""),
+                    "alt": str(entry.get("alt") or ""),
+                    "slide": 1,
+                    "author": str(entry.get("author") or ""),
+                    "published_at": str(entry.get("published_at") or ""),
+                    "likes_count": str(entry.get("likes_count") or ""),
+                    "comments_count": str(entry.get("comments_count") or ""),
+                    "location": str(entry.get("location") or ""),
+                    "expected_slides": entry.get("expected_slides"),
+                }]
             for asset in assets:
                 warning = str(asset.get("carousel_warning") or "").strip()
                 if warning and code not in incomplete_post_codes:
@@ -1619,22 +1771,51 @@ def collect_instagram(context, status_callback, progress_callback,
 
         caption = str(item.get("caption") or "").strip()
         alt = str(item.get("alt") or item.get("entry_alt") or "").strip()
-        info = {
-            "Instagram username": username,
-            "Код публикации": code,
-            "Тип публикации": str(item.get("kind") or "p"),
-            "URL публикации": str(item.get("permalink") or ""),
-            "Страница загрузки": requested_url,
-            "Раздел": "Отмеченные публикации" if mode == "tagged" else "Публикации профиля",
-            "Номер слайда": slide,
-            "Ожидаемых слайдов": item.get("expected_slides"),
-        }
+        info = {}
+        author = str(item.get("author") or "").strip().lstrip("@")
+        # Do not repeat the profile username on ordinary profile posts. The author
+        # is useful for /tagged/ results or collaborative posts by another account.
+        if author and (mode == "tagged" or author.lower() != username.lower()):
+            info["Автор публикации"] = "@" + author
+
+        published_at = str(item.get("published_at") or "").strip()
+        if published_at:
+            try:
+                parsed_date = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+                if parsed_date.tzinfo is not None:
+                    parsed_date = parsed_date.astimezone()
+                info["Дата публикации"] = parsed_date.strftime("%d.%m.%Y %H:%M")
+            except (TypeError, ValueError, OverflowError):
+                info["Дата публикации"] = published_at[:40]
+
+        likes_count = str(item.get("likes_count") or "").strip()
+        if likes_count:
+            info["Отметки «Нравится»"] = likes_count
+        comments_count = str(item.get("comments_count") or "").strip()
+        if comments_count:
+            info["Комментарии"] = comments_count
+
         if caption:
-            info["Описание публикации"] = caption[:2000]
-        if alt:
+            info["Описание публикации"] = caption[:3000]
+        if alt and alt.casefold() != caption.casefold():
             info["Описание изображения"] = alt[:1000]
-        if description:
-            info["Описание профиля"] = description[:1500]
+
+        location = str(item.get("location") or "").strip()
+        if location:
+            info["Место публикации"] = location[:250]
+
+        hashtags = list(dict.fromkeys(re.findall(r"(?<!\w)#[\w]+", caption, flags=re.UNICODE)))
+        if hashtags:
+            info["Хэштеги"] = " ".join(hashtags[:40])
+
+        expected_slides = item.get("expected_slides")
+        if expected_slides:
+            try:
+                expected_count = int(expected_slides)
+            except (TypeError, ValueError):
+                expected_count = 0
+            if expected_count > 1:
+                info["Слайд"] = f"{slide} из {expected_count}"
         metadata = {"url_source": profile_url, "name": display_name, "url_image": current_url, "info": info}
         write_metadata(json_path, metadata)
 
