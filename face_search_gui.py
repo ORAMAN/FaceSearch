@@ -2029,6 +2029,16 @@ def import_image_bundle(
         json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
         if store_per_image_metadata else None
     )
+    # Keep the shared profile record stable across individual Instagram posts.
+    # Captions, timestamps, and counters belong to each image row, not the profile.
+    profile_metadata = metadata
+    if store_per_image_metadata:
+        profile_metadata = {
+            "url_source": source_url or "",
+            "name": str(metadata.get("name") or ""),
+            "url_image": "",
+            "info": {},
+        }
     fallback_image_url = ""
     try:
         fallback_image_url = image_path.resolve().as_uri()
@@ -2070,7 +2080,7 @@ def import_image_bundle(
         and not overwrite_existing_crops
         and not local_crops_missing
     ):
-        profile_id = _upsert_import_profile(conn, metadata)
+        profile_id = _upsert_import_profile(conn, profile_metadata)
         image_url = metadata_image_url or fallback_image_url
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         updated = conn.execute(
@@ -2149,7 +2159,7 @@ def import_image_bundle(
                     # импортированных фотографий источник истины — profiles.raw_json.
                     # Обновляем метаданные и URL на существующих строках, сохраняя
                     # идентификаторы, файлы CROP и связанные embeddings.
-                    profile_id = _upsert_import_profile(conn, metadata)
+                    profile_id = _upsert_import_profile(conn, profile_metadata)
                     image_url = metadata_image_url or fallback_image_url
                     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
                     for existing_image_id, _stored_path in preexisting_source_rows:
@@ -2205,7 +2215,7 @@ def import_image_bundle(
             "detected_faces": 0,
         }
 
-    profile_id = _upsert_import_profile(conn, metadata)
+    profile_id = _upsert_import_profile(conn, profile_metadata)
     # Если JSON не содержит URL оригинала, используем локальный URI исходника
     # независимо от режима создания CROP. Это позволяет отличать несколько
     # фотографий одного профиля и не пропускать новые файлы при повторном сканировании.
