@@ -80,9 +80,20 @@ def _site_display_data(source_url: str | None) -> tuple[str, str, str]:
         if not parsed.scheme or not parsed.netloc:
             return value, value, ""
 
-        host = parsed.netloc.split("@")[-1].split(":")[0]
+        host = parsed.hostname or parsed.netloc.split("@")[-1].split(":")[0]
         display_host = host
-        favicon_url = f"{parsed.scheme}://{parsed.netloc}/favicon.ico"
+        normalized_host = host.lower().rstrip(".")
+        is_instagram = (
+            normalized_host == "instagram.com"
+            or normalized_host.endswith(".instagram.com")
+        )
+        # Instagram currently serves its official favicon from the static CDN;
+        # constructing /favicon.ico from a profile URL can fail in embedded/local HTML.
+        favicon_url = (
+            "https://static.cdninstagram.com/rsrc.php/y4/r/QaBlI0OZiks.ico"
+            if is_instagram
+            else f"{parsed.scheme}://{parsed.netloc}/favicon.ico"
+        )
         return value, display_host, favicon_url
     except Exception:
         return value, value, ""
