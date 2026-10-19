@@ -1448,7 +1448,6 @@ def process_entity(
     print(f"🖼️ Аватар сохранён: {avatar_path}")
     # Импорт в БД выполняется вызывающим потоком-владельцем соединения.
     # Это важно для SQLite: worker-потоки занимаются сетью и записью файлов, но не DB connection.
-    log_user_processed(name, display_id, is_group)
     post_ui_event("status", f"Аватар VK ID {display_id} скачан; передача в FaceSearch…")
     return (avatar_path, avatar_json, abs(uid), name)
 
