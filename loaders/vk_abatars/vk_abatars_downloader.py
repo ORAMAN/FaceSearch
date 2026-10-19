@@ -1440,7 +1440,7 @@ def process_entity(
     if not save_avatar_to_root(entity, base_dir, is_group=is_group):
         print("🖼️ Аватар отсутствует или VK не предоставил доступ к изображению.")
         log_user_processed(name, display_id, is_group)
-        post_ui_event("progress", 1, 1, f"[{display_id}] — аватар отсутствует")
+        post_ui_event("status", f"VK ID {display_id}: аватар отсутствует")
         return
 
     avatar_path = Path(base_dir) / "Avatar.jpg"
