@@ -51,8 +51,16 @@ _AUTH_THREAD = None
 # VK ID OAuth 2.1: Authorization Code Flow + PKCE.
 VKID_CLIENT_ID = "8101047"
 VKID_TOKEN_URL = "https://id.vk.ru/oauth2/auth"
-# URI должен совпадать с доверенным Redirect URL, указанным в настройках приложения VK ID.
+# Legacy VK ID flow используется для получения silent_token с последующим обменом
+# через auth.exchangeSilentAuthToken. OAuth 2.1 code-flow выдаёт vk2.a токены,
+# которые не поддерживают требуемые загрузчику photos.get/friends.get.
 VKID_REDIRECT_URI = "https://oauth.vk.ru/blank.html"
+VKID_SILENT_AUTH_URL = (
+    "https://id.vk.ru/auth?return_auth_hash=1f3f97d3e974a20acf"
+    "&redirect_uri=https%3A%2F%2Foauth.vk.ru%2Fblank.html"
+    "&redirect_uri_hash=96188d4fed90d04a34&force_hash=1&app_id=8101047"
+    "&response_type=token&code_challenge=&code_challenge_method=&scope=327684&state="
+)
 UI_EVENTS = None
 STOP_REQUESTED = threading.Event()
 _TOKEN_FILE_LOCK = threading.Lock()
@@ -461,7 +469,7 @@ def _exchange_and_store_pending_token(service_token: str) -> None:
 
 
 def _browser_auth_worker(profile_directory: str, chrome_executable: str, service_token: str = "") -> None:
-    """Открывает Chrome и выполняет OAuth 2.1 VK ID без запрещённого localhost origin."""
+    """Получает VK ID silent_token и обменивает его на API access_token для загрузчика."""
     if sync_playwright is None:
         post_ui_event(
             "auth_error",
@@ -470,7 +478,6 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
         return
 
     context = None
-    server = None
     try:
         profile_path = Path(profile_directory).expanduser()
         profile_path.mkdir(parents=True, exist_ok=True)
@@ -478,60 +485,10 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
         if not executable.is_file():
             raise FileNotFoundError(f"Не найден chrome.exe: {executable}")
 
-        expected_state, code_verifier = _build_vk_id_pkce()
-        auth_url = _build_vk_id_authorize_url(expected_state, code_verifier)
-        # Локальная страница нужна только как контейнер для Playwright. В URL VK ID
-        # параметр origin отсутствует, поэтому localhost не проверяется как домен приложения.
-        sdk_html = r"""<!doctype html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Авторизация VK ID для FaceSearch</title>
-<style>
-body { font: 16px Segoe UI, sans-serif; max-width: 760px; margin: 48px auto; padding: 0 24px; color: #202124; }
-button { font: inherit; padding: 12px 22px; cursor: pointer; }
-#status { margin-top: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
-</style>
-</head>
-<body>
-<h2>Авторизация VK ID</h2>
-<p>Нажмите кнопку, затем завершите вход VK ID. В запросе не используется origin локального адреса.</p>
-<button id="login" type="button">Войти через VK ID</button>
-<div id="status">Подготовка запроса…</div>
-<script>
-(() => {
-  const status = document.getElementById('status');
-  const authUrl = __VKID_AUTHORIZE_URL__;
-  document.getElementById('login').addEventListener('click', () => {
-    status.textContent = 'Переход к VK ID…';
-    window.location.assign(authUrl);
-  });
-  status.textContent = 'Запрос готов. Нажмите «Войти через VK ID».';
-})();
-</script>
-</body>
-</html>"""
-        sdk_html = sdk_html.replace("__VKID_AUTHORIZE_URL__", json.dumps(auth_url))
-
-        class VKIDAuthPageHandler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                body = sdk_html.encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, format, *args):
-                return
-
-        server = ThreadingHTTPServer(("127.0.0.1", 0), VKIDAuthPageHandler)
-        server.daemon_threads = True
-        threading.Thread(target=server.serve_forever, daemon=True, name="VKIDAuthLocalServer").start()
-
-        post_ui_event("auth_status", "Запускаю Chrome. URL авторизации сформирован без параметра origin…")
+        post_ui_event(
+            "auth_status",
+            "Открываю VK ID для получения silent_token и последующего обмена в VK API…",
+        )
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
                 user_data_dir=str(profile_path.resolve()),
@@ -544,90 +501,97 @@ button { font: inherit; padding: 12px 22px; cursor: pointer; }
                 args=["--start-maximized", "--window-size=1920,1080", "--window-position=0,0"],
             )
             page = context.pages[0] if context.pages else context.new_page()
-            page.goto(f"http://127.0.0.1:{server.server_port}/", wait_until="load", timeout=60000)
-            page.locator("#login").click(timeout=15000)
+            try:
+                page.goto(VKID_SILENT_AUTH_URL, wait_until="domcontentloaded", timeout=45000)
+            except Exception:
+                # VK ID может перенаправить на blank.html до истечения стандартного timeout.
+                pass
 
             deadline = time.monotonic() + 600
-            last_status = ""
             while not AUTH_STOP_REQUESTED.is_set() and time.monotonic() < deadline:
-                current_url = page.url or ""
-
-                if current_url.startswith(VKID_REDIRECT_URI):
+                for current_page in list(context.pages):
+                    current_url = current_page.url or ""
                     payload = extract_vk_auth_payload(current_url)
                     if not payload:
-                        # Пустой blank.html без нужных параметров — ждём, вдруг callback ещё формируется.
-                        time.sleep(0.25)
                         continue
 
                     payload_type = str(payload.get("type") or "").lower()
-                    if payload_type == "authorization_error" or payload.get("error"):
+                    if payload_type == "authorization_error":
                         description = payload.get("error_description") or payload.get("error") or "авторизация отклонена"
                         raise RuntimeError(f"VK ID не завершил авторизацию: {description}")
 
-                    returned_state = str(payload.get("state") or "")
-                    if not returned_state:
-                        raise RuntimeError(
-                            "VK ID вернул code, но в callback отсутствует state. "
-                            "Обмен токена остановлен. Убедитесь, что запущена актуальная версия загрузчика."
-                        )
-                    if returned_state != expected_state:
-                        raise RuntimeError("VK ID вернул несовпадающий state. Токен не сохранён.")
+                    if payload_type == "silent_token":
+                        if not payload.get("token"):
+                            raise RuntimeError("VK ID вернул payload silent_token без поля token.")
+                        if int(payload.get("auth") or 0) != 1:
+                            raise RuntimeError("VK ID не подтвердил успешную авторизацию (auth != 1).")
 
-                    code = str(payload.get("code") or "")
-                    device_id = str(payload.get("device_id") or "")
-                    if not code or not device_id:
-                        raise RuntimeError(
-                            "В callback VK ID отсутствует code или device_id. "
-                            "Не копируйте временный code вручную; повторите вход из загрузчика."
-                        )
+                        _save_pending_silent_token(payload)
+                        active_service_token = (service_token or read_service_token()).strip()
+                        if not active_service_token:
+                            post_ui_event(
+                                "auth_needs_service_token",
+                                "Вход VK ID выполнен, получен silent_token, но не задан service token приложения. "
+                                "Укажите service token и нажмите «Обменять silent_token».",
+                            )
+                            return
 
-                    post_ui_event("auth_status", "Получен callback VK ID. Обмениваю code на access_token…")
-                    token_result = exchange_vk_id_code(code, device_id, code_verifier, expected_state)
-                    token = str(token_result.get("access_token") or "")
-                    user_name, added, count = _validate_and_save_access_token(token)
-                    try:
-                        VK_SILENT_TOKEN_FILE.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                    post_ui_event("token_saved", True, user_name, added, count, "")
-                    post_ui_event("auth_status", f"Авторизация VK ID завершена: {user_name}. API access_token сохранён.")
-                    return
-
-                # Если VK ID показал именно ошибку незарегистрированного домена,
-                # сообщаем это в интерфейс, а не ждём все 10 минут.
-                if "id.vk.ru/authorize" in current_url:
-                    try:
-                        body_text = page.locator("body").inner_text(timeout=1000)
-                    except Exception:
-                        body_text = ""
-                    if "базовый домен" in body_text.lower() or "не указан данный базовый домен" in body_text.lower():
-                        raise RuntimeError(
-                            "VK ID по-прежнему отклонил домен. Проверьте, что запускается обновлённый "
-                            "vk_downloader.py: в новом запросе не должно быть параметра origin=http://127.0.0.1. "
-                            "Если origin отсутствует, проверьте разрешённый Redirect URL приложения VK ID."
+                        post_ui_event(
+                            "auth_status",
+                            "Получен silent_token. Обмениваю его через auth.exchangeSilentAuthToken…",
                         )
-                    if body_text and body_text != last_status:
-                        last_status = body_text
-                        post_ui_event("auth_status", "Страница VK ID открыта. Завершите авторизацию в Chrome…")
+                        result = exchange_silent_token(
+                            str(payload.get("token") or ""),
+                            active_service_token,
+                            str(payload.get("uuid") or ""),
+                        )
+                        token = str(result.get("access_token") or "")
+                        if token.lower().startswith("vk2."):
+                            raise RuntimeError(
+                                "VK API auth.exchangeSilentAuthToken также вернул токен vk2.a…, "
+                                "который не подходит для photos.get/friends.get. "
+                                "Проверьте, поддерживает ли приложение 8101047 выдачу пользовательского API-токена. "
+                                "Обычный OAuth 2.1 обмен code на /oauth2/auth для этих методов не подходит."
+                            )
+                        user_name, added, count = _validate_and_save_access_token(token)
+                        try:
+                            VK_SILENT_TOKEN_FILE.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        post_ui_event("token_saved", True, user_name, added, count, "")
+                        post_ui_event(
+                            "auth_status",
+                            f"Авторизация VK завершена: {user_name}. Совместимый API access_token сохранён.",
+                        )
+                        return
+
+                    token = str(payload.get("access_token") or "")
+                    if token:
+                        if token.lower().startswith("vk2."):
+                            raise RuntimeError(
+                                "VK ID вернул vk2.a токен вместо silent_token. Он несовместим с methods photos.get/friends.get. "
+                                "Загрузчик ожидает silent_token для auth.exchangeSilentAuthToken либо старый рабочий vk1.a токен."
+                            )
+                        user_name, added, count = _validate_and_save_access_token(token)
+                        post_ui_event("token_saved", True, user_name, added, count, "")
+                        post_ui_event("auth_status", f"Совместимый API access_token сохранён: {user_name}.")
+                        return
 
                 time.sleep(0.25)
 
             if AUTH_STOP_REQUESTED.is_set():
                 post_ui_event("auth_status", "Ожидание авторизации остановлено.")
             else:
-                raise RuntimeError("Время ожидания авторизации VK ID истекло (10 минут).")
+                raise RuntimeError(
+                    "За 10 минут VK ID не вернул silent_token. Возможно, старый silent-auth flow "
+                    "отключён для приложения; проверьте актуальные возможности приложения VK ID."
+                )
     except Exception as exc:
         post_ui_event("auth_error", f"Ошибка автоматической авторизации VK ID: {exc}")
     finally:
         if context is not None:
             try:
                 context.close()
-            except Exception:
-                pass
-        if server is not None:
-            try:
-                server.shutdown()
-                server.server_close()
             except Exception:
                 pass
 
@@ -2058,7 +2022,7 @@ def main():
 
     ttk.Label(
         auth_frame,
-        text="Авторизация VK ID выполняется в отдельном профиле Chrome через официальный SDK. Программа получает полный ответ авторизации и обменивает временный code на API access_token; старые токены можно добавить вручную.",
+        text="Загрузчик запрашивает silent_token VK ID и обменивает его через VK API. Обычный OAuth 2.1 code-flow выдаёт vk2-токен, который несовместим с используемыми здесь методами photos.get/friends.get.",
         wraplength=980,
     ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 6))
 
