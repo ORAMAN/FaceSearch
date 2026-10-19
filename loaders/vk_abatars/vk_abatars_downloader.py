@@ -1444,27 +1444,11 @@ def process_entity(
     avatar_path = Path(base_dir) / "Avatar.jpg"
     avatar_json = Path(base_dir) / "Avatar.json"
     print(f"🖼️ Аватар сохранён: {avatar_path}")
-    if importer is not None and import_to_database:
-        try:
-            result = importer.import_image(
-                avatar_path,
-                avatar_json,
-                source_key=f"vk:{display_id}:avatar",
-            )
-            print(
-                f"[DB-IMPORT] Аватар {display_id}: "
-                f"добавлено/обновлено; найдено лиц: {result.get('faces', 0)}"
-            )
-            with EXISTING_PROFILE_IDS_LOCK:
-                EXISTING_PROFILE_IDS.add(abs(uid))
-            if delete_processed_files:
-                avatar_path.unlink(missing_ok=True)
-                avatar_json.unlink(missing_ok=True)
-        except Exception as exc:
-            print(f"⚠️ Аватар скачан, но не удалось импортировать его в FaceSearch: {exc}")
-
+    # Импорт в БД выполняется вызывающим потоком-владельцем соединения.
+    # Это важно для SQLite: worker-потоки занимаются сетью и записью файлов, но не DB connection.
     log_user_processed(name, display_id, is_group)
-    post_ui_event("progress", 1, 1, f"[{display_id}] — аватар обработан")
+    post_ui_event("progress", 1, 1, f"[{display_id}] — аватар скачан")
+    return (avatar_path, avatar_json, abs(uid))
 
 
 def process_users_with_friends(
@@ -1965,9 +1949,9 @@ def run_download_job(
                             base_dir,
                             False,
                             worker_count,
-                            importer,
-                            delete_processed_files if import_to_database else False,
-                            import_to_database,
+                            None,   # соединение FaceSearch не передаётся в worker-потоки
+                            False,
+                            False,  # только скачивание; импорт выполняет текущий поток
                         )
                         pending[future] = uid
 
@@ -1977,7 +1961,33 @@ def run_download_job(
                     for future in completed_futures:
                         uid = pending.pop(future)
                         try:
-                            future.result()
+                            download_result = future.result()
+                            if download_result and importer is not None and import_to_database:
+                                image_path, json_path, downloaded_uid = download_result
+                                try:
+                                    # Импортируем сразу по мере готовности файлов, в том же потоке,
+                                    # где создано соединение с SQLite/MySQL FaceSearch.
+                                    import_result = importer.import_image(
+                                        image_path,
+                                        json_path,
+                                        source_key=f"vk:{downloaded_uid}:avatar",
+                                    )
+                                    with EXISTING_PROFILE_IDS_LOCK:
+                                        EXISTING_PROFILE_IDS.add(abs(int(downloaded_uid)))
+                                    print(
+                                        f"[DB-IMPORT] Аватар {downloaded_uid}: "
+                                        f"импортирован; лиц: {import_result.get('faces', 0)}."
+                                    )
+                                    if delete_processed_files:
+                                        image_path.unlink(missing_ok=True)
+                                        json_path.unlink(missing_ok=True)
+                                except Exception as exc:
+                                    batch_errors += 1
+                                    errors_total += 1
+                                    print(
+                                        f"[DB-ERROR] ID {downloaded_uid}: аватар скачан, "
+                                        f"но не удалось записать в FaceSearch: {exc}"
+                                    )
                         except Exception as exc:
                             batch_errors += 1
                             errors_total += 1
