@@ -400,7 +400,22 @@ def exchange_silent_token_for_legacy_user_token(
     auth.getOauthToken выдаёт токен приложения для legacy API-методов.
     """
     silent_token = str(payload.get("token") or "").strip()
-    return_auth_hash = str(payload.get("hash") or "").strip()
+    # В legacy redirect VK может предоставить return_auth_hash в window.init страницы
+    # blank.html. Используем его, если доступен; иначе fallback на hash callback payload.
+    return_auth_hash = ""
+    for browser_page in list(context.pages):
+        try:
+            candidate_hash = browser_page.evaluate(
+                "() => { const i = window.init; return i && i.data && i.data.hash "
+                "? (i.data.hash.return_auth || '') : ''; }"
+            )
+            if candidate_hash:
+                return_auth_hash = str(candidate_hash).strip()
+                break
+        except Exception:
+            pass
+    if not return_auth_hash:
+        return_auth_hash = str(payload.get("hash") or "").strip()
     uuid = str(payload.get("uuid") or "").strip()
     if not silent_token:
         raise ValueError("VK ID вернул silent_token без поля token.")
@@ -461,7 +476,7 @@ def exchange_silent_token_for_legacy_user_token(
         )
 
     oauth_response = session.post(
-        "https://api.vk.com/method/auth.getOauthToken",
+        "https://api.vk.ru/method/auth.getOauthToken",
         data={
             "hash": return_auth_hash,
             "auth_user_hash": auth_user_hash,
@@ -576,6 +591,7 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
                 pass
 
             deadline = time.monotonic() + 600
+            last_callback_status = None
             while not AUTH_STOP_REQUESTED.is_set() and time.monotonic() < deadline:
                 for current_page in list(context.pages):
                     current_url = current_page.url or ""
@@ -601,9 +617,9 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
                                         "Если на странице уже показано предупреждение VK, проверьте, что "
                                         "это окно Chrome было открыто кнопкой загрузчика."
                                     )
-                                if getattr(_browser_auth_worker, "_last_callback_status", None) != callback_status:
+                                if last_callback_status != callback_status:
                                     post_ui_event("auth_status", callback_status)
-                                    _browser_auth_worker._last_callback_status = callback_status
+                                    last_callback_status = callback_status
                         except Exception:
                             pass
                         continue
