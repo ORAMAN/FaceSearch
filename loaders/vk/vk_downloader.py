@@ -149,12 +149,22 @@ def extract_vk_auth_payload(value: str) -> dict:
             }
 
         code = (query.get("code") or [""])[0].strip()
+        callback_type = str((query.get("type") or [""])[0]).strip().lower()
         if code:
+            # В используемом VK ID code_v2 URL поле code иногда содержит уже vk2.a…
+            # Это не silent_token и не одноразовый authorization code для обмена.
+            if callback_type == "code_v2" and code.lower().startswith("vk2."):
+                return {
+                    "type": "access_token",
+                    "access_token": code,
+                    "token_format": "code_v2",
+                }
             return {
                 "type": "authorization_code",
                 "code": code,
                 "state": (query.get("state") or [""])[0],
                 "device_id": (query.get("device_id") or [""])[0],
+                "code_format": callback_type,
             }
 
         fragment = parse_qs(parsed.fragment, keep_blank_values=True)
@@ -480,8 +490,12 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
                     if token:
                         if token.lower().startswith("vk2."):
                             raise RuntimeError(
-                                "VK ID вернул vk2.a токен вместо silent_token. Он несовместим с methods photos.get/friends.get. "
-                                "Загрузчик ожидает silent_token для auth.exchangeSilentAuthToken либо старый рабочий vk1.a токен."
+                                "VK ID вернул токен vk2.a… в параметре code (type=code_v2), а не silent_token. "
+                                "Загрузчик распознал ответ и остановил ожидание. Этот токен не поддерживает требуемые "
+                                "photos.get/friends.get (ошибка VK API 1051); обменивать его через "
+                                "auth.exchangeSilentAuthToken нельзя. Для текущего приложения VK ID не выдал "
+                                "совместимый пользовательский API-токен vk1.a…. Нужен поддерживаемый VK способ "
+                                "выдачи legacy user token или помощь поддержки VK; заменой префикса это не исправить."
                             )
                         user_name, added, count = _validate_and_save_access_token(token)
                         post_ui_event("token_saved", True, user_name, added, count, "")
