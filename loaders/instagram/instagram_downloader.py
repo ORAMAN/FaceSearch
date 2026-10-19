@@ -828,7 +828,9 @@ POST_MEDIA_JS = r"""() => {
     else {
       value = value.replace(/^\s*\d[\d., \u00a0]*\s+likes?,\s*\d[\d., \u00a0]*\s+comments?\s*[-–—]\s*/i, '').trim();
     }
-    if (/^\d[\d., \s\u00a0]*\s+likes?,\s*\d[\d., \s\u00a0]*\s+comments?$/i.test(value)) return '';
+    if (/^\d[\d., \s\u00a0]*\s+likes?,\s*\d[\d., \s\u00a0]*\s+comments?$/i.test(value)
+        || /^see instagram photos and videos from\b/i.test(value)
+        || /^instagram$/i.test(value)) return '';
     if (author && value.toLowerCase() === author.toLowerCase()) return '';
     return value.replace(/^["“‘]\s*/, '').replace(/\s*["”’]$/, '').trim();
   };
