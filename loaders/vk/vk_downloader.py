@@ -1783,16 +1783,66 @@ def main():
 
     root = tk.Tk()
     root.title("VK.ru — загрузчик фотографий")
-    root.geometry("1100x1120")
-    root.minsize(900, 780)
+    root.geometry("1100x960")
+    root.minsize(900, 700)
 
     original_stdout, original_stderr = sys.stdout, sys.stderr
     sys.stdout = QueueStream(events, "log")
     sys.stderr = QueueStream(events, "log")
 
-    outer = ttk.Frame(root, padding=12)
-    outer.pack(fill="both", expand=True)
+    # Верхняя часть формы прокручивается; выполнение, журнал и кнопки закреплены снизу.
+    main_frame = ttk.Frame(root, padding=8)
+    main_frame.pack(fill="both", expand=True)
+    main_frame.columnconfigure(0, weight=1)
+    main_frame.rowconfigure(0, weight=3)
+    main_frame.rowconfigure(1, weight=2)
+
+    form_host = ttk.Frame(main_frame)
+    form_host.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
+    form_host.columnconfigure(0, weight=1)
+    form_host.rowconfigure(0, weight=1)
+
+    form_canvas = tk.Canvas(form_host, highlightthickness=0, borderwidth=0)
+    form_scrollbar = ttk.Scrollbar(form_host, orient="vertical", command=form_canvas.yview)
+    form_canvas.configure(yscrollcommand=form_scrollbar.set)
+    form_canvas.grid(row=0, column=0, sticky="nsew")
+    form_scrollbar.grid(row=0, column=1, sticky="ns")
+
+    outer = ttk.Frame(form_canvas, padding=4)
     outer.columnconfigure(0, weight=1)
+    form_window_id = form_canvas.create_window((0, 0), window=outer, anchor="nw")
+
+    def update_form_scrollregion(_event=None):
+        form_canvas.configure(scrollregion=form_canvas.bbox("all"))
+
+    def resize_form_content(event):
+        form_canvas.itemconfigure(form_window_id, width=event.width)
+
+    outer.bind("<Configure>", update_form_scrollregion)
+    form_canvas.bind("<Configure>", resize_form_content)
+
+    def scroll_form_mousewheel(event):
+        # Не перехватываем прокрутку журнала и других элементов нижней панели.
+        widget = root.winfo_containing(event.x_root, event.y_root)
+        while widget is not None and widget is not form_canvas:
+            widget = getattr(widget, "master", None)
+        if widget is not form_canvas:
+            return None
+        delta = getattr(event, "delta", 0)
+        if delta:
+            units = int(-delta / 120)
+            if units == 0:
+                units = -1 if delta > 0 else 1
+            form_canvas.yview_scroll(units, "units")
+        elif getattr(event, "num", None) == 4:
+            form_canvas.yview_scroll(-1, "units")
+        elif getattr(event, "num", None) == 5:
+            form_canvas.yview_scroll(1, "units")
+        return "break"
+
+    root.bind_all("<MouseWheel>", scroll_form_mousewheel, add="+")
+    root.bind_all("<Button-4>", scroll_form_mousewheel, add="+")
+    root.bind_all("<Button-5>", scroll_form_mousewheel, add="+")
 
     ttk.Label(
         outer,
@@ -2172,8 +2222,13 @@ def main():
         root._vk_token_dialog = dialog
         root._vk_token_save_button = save_button
 
-    progress_frame = ttk.LabelFrame(outer, text="Выполнение", padding=8)
-    progress_frame.grid(row=6, column=0, sticky="ew", pady=(0, 8))
+    footer = ttk.Frame(main_frame)
+    footer.grid(row=1, column=0, sticky="nsew")
+    footer.columnconfigure(0, weight=1)
+    footer.rowconfigure(1, weight=1)
+
+    progress_frame = ttk.LabelFrame(footer, text="Выполнение", padding=8)
+    progress_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
     progress_frame.columnconfigure(0, weight=1)
     status_var = tk.StringVar(value="Готово к запуску.")
     ttk.Label(progress_frame, textvariable=status_var, wraplength=980).grid(row=0, column=0, sticky="ew", pady=(0, 4))
@@ -2182,19 +2237,139 @@ def main():
     progress_bar = ttk.Progressbar(progress_frame, mode="determinate", maximum=100, value=0)
     progress_bar.grid(row=2, column=0, sticky="ew")
 
-    log_frame = ttk.LabelFrame(outer, text="Журнал", padding=6)
-    log_frame.grid(row=7, column=0, sticky="nsew", pady=(0, 8))
-    outer.rowconfigure(7, weight=1)
+    log_frame = ttk.LabelFrame(footer, text="Журнал", padding=6)
+    log_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 6))
     log_frame.columnconfigure(0, weight=1)
     log_frame.rowconfigure(0, weight=1)
-    log_text = tk.Text(log_frame, height=12, wrap="word", state="disabled")
+    log_text = tk.Text(log_frame, height=8, wrap="word", state="disabled", undo=True)
     log_text.grid(row=0, column=0, sticky="nsew")
     scroll = ttk.Scrollbar(log_frame, orient="vertical", command=log_text.yview)
     scroll.grid(row=0, column=1, sticky="ns")
     log_text.configure(yscrollcommand=scroll.set)
 
-    action_frame = ttk.Frame(outer)
-    action_frame.grid(row=8, column=0, sticky="ew")
+    def install_edit_shortcuts():
+        editable_classes = (tk.Text, tk.Entry, tk.Spinbox, ttk.Entry, ttk.Spinbox, ttk.Combobox)
+        shortcuts = {
+            "c": "copy", "cyrillic_es": "copy", "с": "copy",
+            "v": "paste", "cyrillic_em": "paste", "м": "paste",
+            "x": "cut", "cyrillic_che": "cut", "ч": "cut",
+            "a": "select_all", "cyrillic_ef": "select_all", "ф": "select_all",
+            "z": "undo", "cyrillic_ya": "undo", "я": "undo",
+            "y": "redo", "cyrillic_en": "redo", "н": "redo",
+        }
+
+        def selection_exists(widget):
+            if isinstance(widget, tk.Text):
+                return bool(widget.tag_ranges("sel"))
+            try:
+                return bool(widget.selection_present())
+            except (AttributeError, tk.TclError):
+                return False
+
+        def selected_text(widget):
+            if isinstance(widget, tk.Text):
+                return widget.get("sel.first", "sel.last")
+            return widget.selection_get()
+
+        def delete_selection(widget):
+            if not selection_exists(widget):
+                return False
+            if isinstance(widget, tk.Text):
+                widget.delete("sel.first", "sel.last")
+            else:
+                widget.delete("sel.first", "sel.last")
+            return True
+
+        def handle_ctrl_shortcut(event):
+            widget = event.widget
+            if not isinstance(widget, editable_classes):
+                return None
+            # keysym при русской раскладке отличается, поэтому поддерживаем оба варианта.
+            action = shortcuts.get(str(event.keysym).lower())
+            if not action:
+                return None
+
+            is_text = isinstance(widget, tk.Text)
+            try:
+                state = str(widget.cget("state")).lower()
+            except (tk.TclError, AttributeError):
+                state = "normal"
+            can_edit = state not in {"disabled", "readonly"}
+
+            try:
+                if action == "select_all":
+                    if is_text:
+                        widget.tag_add("sel", "1.0", "end-1c")
+                        widget.mark_set("insert", "end-1c")
+                    else:
+                        widget.selection_range(0, "end")
+                        widget.icursor("end")
+                    return "break"
+
+                if action == "copy":
+                    if selection_exists(widget):
+                        text_value = selected_text(widget)
+                        root.clipboard_clear()
+                        root.clipboard_append(text_value)
+                    return "break"
+
+                if action == "cut":
+                    if not can_edit:
+                        return "break"
+                    if selection_exists(widget):
+                        text_value = selected_text(widget)
+                        root.clipboard_clear()
+                        root.clipboard_append(text_value)
+                        delete_selection(widget)
+                    return "break"
+
+                if action == "paste":
+                    if not can_edit:
+                        return "break"
+                    try:
+                        value = root.clipboard_get()
+                    except tk.TclError:
+                        return "break"
+                    if is_text:
+                        delete_selection(widget)
+                        widget.insert("insert", value)
+                    else:
+                        delete_selection(widget)
+                        widget.insert("insert", value)
+                    return "break"
+
+                if action == "undo":
+                    if is_text and can_edit:
+                        widget.edit_undo()
+                        return "break"
+                    return None
+
+                if action == "redo":
+                    if is_text and can_edit:
+                        widget.edit_redo()
+                        return "break"
+                    return None
+            except tk.TclError:
+                # Например, история Undo ещё пуста или фокус находится в readonly-поле.
+                return "break"
+            return None
+
+        root.bind_all("<Control-KeyPress>", handle_ctrl_shortcut, add="+")
+        # Дополнительные стандартные варианты, распространённые в Windows.
+        root.bind_all("<Control-Insert>", lambda event: handle_ctrl_shortcut(
+            type("ShortcutEvent", (), {"widget": event.widget, "keysym": "c"})()
+        ), add="+")
+        root.bind_all("<Shift-Insert>", lambda event: handle_ctrl_shortcut(
+            type("ShortcutEvent", (), {"widget": event.widget, "keysym": "v"})()
+        ), add="+")
+        root.bind_all("<Shift-Delete>", lambda event: handle_ctrl_shortcut(
+            type("ShortcutEvent", (), {"widget": event.widget, "keysym": "x"})()
+        ), add="+")
+
+    install_edit_shortcuts()
+
+    action_frame = ttk.Frame(footer)
+    action_frame.grid(row=2, column=0, sticky="ew")
     action_frame.columnconfigure(0, weight=1)
     running = {"value": False}
 
