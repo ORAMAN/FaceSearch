@@ -1827,12 +1827,12 @@ def collect_instagram(context, status_callback, progress_callback,
                 updated_records = int(import_status.get("updated", 0) or 0)
                 # Current FaceSearch reports newly created face rows in the added field;
                 # older compatible versions may expose only the faces field.
-                    if "added" not in import_status:
-                        added_records = int(import_status.get("faces", 0) or 0)
-                    db_added_faces += added_records
-                    db_updated_records += updated_records
-                    message = str(import_status.get("message") or "").strip()
-                    detected_faces = import_status.get("detected_faces")
+                if "added" not in import_status:
+                    added_records = int(import_status.get("faces", 0) or 0)
+                db_added_faces += added_records
+                db_updated_records += updated_records
+                message = str(import_status.get("message") or "").strip()
+                detected_faces = import_status.get("detected_faces")
                 if detected_faces == 0 or "лицо не найдено" in message.lower():
                     db_no_face += 1
                 elif "уже есть в бд" in message.lower() and added_records == 0:
