@@ -1206,7 +1206,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
         const favicon=document.createElement("img");favicon.className="favicon";favicon.alt="";favicon.loading="lazy";
         try{
           const sourceUrl=new URL(source);
-          const sourceHost=sourceUrl.hostname.toLowerCase().replace(/\\.$/,"");
+          const sourceHost=sourceUrl.hostname.toLowerCase().replace(/\.$/,"");
           const isInstagram=sourceHost==="instagram.com"||sourceHost.endsWith(".instagram.com");
           favicon.src=isInstagram
             ?"https://static.cdninstagram.com/rsrc.php/y4/r/QaBlI0OZiks.ico"
