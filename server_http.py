@@ -1204,7 +1204,14 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
         let host=source;
         try{host=new URL(source).hostname;}catch(e){}
         const favicon=document.createElement("img");favicon.className="favicon";favicon.alt="";favicon.loading="lazy";
-        try{favicon.src=new URL("/favicon.ico",source).href;}catch(e){favicon.style.display="none";}
+        try{
+          const sourceUrl=new URL(source);
+          const sourceHost=sourceUrl.hostname.toLowerCase().replace(/\\.$/,"");
+          const isInstagram=sourceHost==="instagram.com"||sourceHost.endsWith(".instagram.com");
+          favicon.src=isInstagram
+            ?"https://static.cdninstagram.com/rsrc.php/y4/r/QaBlI0OZiks.ico"
+            :new URL("/favicon.ico",sourceUrl).href;
+        }catch(e){favicon.style.display="none";}
         favicon.onerror=function(){favicon.style.display="none";};
         const link=document.createElement("a");link.href=source;link.target="_blank";link.rel="noopener noreferrer";
         link.textContent=host;link.title=source;
