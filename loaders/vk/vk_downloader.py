@@ -28,6 +28,8 @@ except ImportError:
 APP_DIR = Path(__file__).resolve().parent
 VK_TOKEN_FILE = APP_DIR / "vk_token.txt"
 LOG_FILE = APP_DIR / "Log.txt"
+VK_AUTH_DIAGNOSTICS_FILE = APP_DIR / "VK_Auth_Diagnostics.log"
+_AUTH_DIAGNOSTICS_LOCK = threading.Lock()
 DEFAULT_OUTPUT_DIR = APP_DIR / "VK_Downloads"
 APP_SETTINGS_PATH = APP_DIR / "vk_downloader_settings.json"
 DEFAULT_FACESEARCH_DIR = Path(r"C:\FaceSearch")
@@ -128,6 +130,19 @@ def reload_tokens():
         token = _TOKEN_LIST[current_token]
         current_token = (current_token + 1) % len(_TOKEN_LIST)
         return token
+
+
+def _write_vk_auth_diagnostic(message: str) -> None:
+    """Append a sanitized VK authentication diagnostic; never record callback payloads."""
+    try:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        safe_message = str(message).replace("\\r", " ").replace("\\n", " ")
+        with _AUTH_DIAGNOSTICS_LOCK:
+            with VK_AUTH_DIAGNOSTICS_FILE.open("a", encoding="utf-8") as handle:
+                handle.write(f"[{stamp}] {safe_message}\\n")
+    except Exception:
+        # Diagnostics must never stop authentication.
+        pass
 
 
 def extract_vk_auth_payload(value: str) -> dict:
@@ -462,13 +477,16 @@ def exchange_browser_session_for_legacy_user_token(
     auth.getOauthToken. Callback silent_token используется как сигнал, что
     пользователь завершил подтверждение, но его hash не считается return_auth_hash.
     """
+    _write_vk_auth_diagnostic("Starting legacy OAuth token exchange.")
     session, cookie_count = _browser_session_from_context(context)
+    _write_vk_auth_diagnostic(f"Copied browser cookies: {cookie_count}.")
     if cookie_count == 0:
         raise RuntimeError(
             "VK вернул страницу callback, но браузер не передал cookies в обмен. "
             "Повторите вход через окно Chrome, открытое загрузчиком."
         )
 
+    _write_vk_auth_diagnostic("Requesting oauth.vk.ru/authorize.")
     response = session.get(
         "https://oauth.vk.ru/authorize",
         params={
@@ -480,6 +498,10 @@ def exchange_browser_session_for_legacy_user_token(
         allow_redirects=True,
     )
     response.raise_for_status()
+    _write_vk_auth_diagnostic(
+        f"OAuth response: HTTP {response.status_code}; location={urlsplit(response.url).netloc}"
+        f"{urlsplit(response.url).path}; final_url_has_token={'access_token' in response.url}."
+    )
     if "act=blocked" in response.url:
         raise RuntimeError("VK заблокировал legacy OAuth для этого приложения или аккаунта.")
 
@@ -533,6 +555,7 @@ def exchange_browser_session_for_legacy_user_token(
             "доступность legacy OAuth для приложения могла быть ограничена."
         )
 
+    _write_vk_auth_diagnostic("Calling login.vk.ru connect_internal.")
     connect_response = session.post(
         "https://login.vk.ru/?act=connect_internal",
         data={
@@ -566,6 +589,7 @@ def exchange_browser_session_for_legacy_user_token(
     if not temporary_token or not auth_user_hash:
         raise RuntimeError("connect_internal не вернул access_token/auth_user_hash.")
 
+    _write_vk_auth_diagnostic("Calling api.vk.ru auth.getOauthToken.")
     oauth_response = session.post(
         "https://api.vk.ru/method/auth.getOauthToken",
         data={
@@ -606,6 +630,7 @@ def exchange_browser_session_for_legacy_user_token(
         raise RuntimeError(
             "VK снова вернул токен vk2.a…, несовместимый с photos.get/friends.get."
         )
+    _write_vk_auth_diagnostic("Legacy API token obtained; starting users.get validation.")
     return token
 
 
@@ -653,6 +678,8 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
         if not executable.is_file():
             raise FileNotFoundError(f"Не найден chrome.exe: {executable}")
 
+        _write_vk_auth_diagnostic("Authentication worker started.")
+        _write_vk_auth_diagnostic(f"Using script: {Path(__file__).resolve()}")
         post_ui_event(
             "auth_status",
             "Открываю VK ID; после возврата blank.html получу API-токен через OAuth-сессию…",
@@ -675,21 +702,33 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
                 # VK ID может перенаправить на blank.html до истечения стандартного timeout.
                 pass
 
+            _write_vk_auth_diagnostic("Playwright persistent Chrome context launched.")
             deadline = time.monotonic() + 600
             last_callback_status = None
             last_seen_urls = {}
+            no_pages_since = None
             while not AUTH_STOP_REQUESTED.is_set() and time.monotonic() < deadline:
                 pages = list(context.pages)
                 if not pages:
+                    if no_pages_since is None:
+                        no_pages_since = time.monotonic()
+                        _write_vk_auth_diagnostic("No browser tabs detected; waiting briefly for popup/navigation.")
+                    elif time.monotonic() - no_pages_since >= 5:
+                        _write_vk_auth_diagnostic("All browser tabs were closed before authorization finished.")
+                        raise RuntimeError(
+                            "Окно Chrome закрыто до завершения авторизации. "
+                            "Оставьте окно открытым до сообщения об успехе или ошибке. "
+                            f"Подробности: {VK_AUTH_DIAGNOSTICS_FILE.name}"
+                        )
                     if last_callback_status != "pages_missing":
                         post_ui_event(
                             "auth_status",
-                            "Chrome запущен, но Playwright сейчас не видит ни одной вкладки. "
-                            "Закройте авторизацию и запустите её повторно из загрузчика.",
+                            "Ожидаю вкладку VK ID. Не закрывайте Chrome; результат появится в этой форме.",
                         )
                         last_callback_status = "pages_missing"
                     time.sleep(0.25)
                     continue
+                no_pages_since = None
 
                 for page_index, current_page in enumerate(pages):
                     current_url = current_page.url or ""
@@ -709,6 +748,9 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
                             print(
                                 f"[VK AUTH] Callback обнаружен: {current_location}. "
                                 "Запускаю получение legacy user API token через OAuth-сессию."
+                            )
+                            _write_vk_auth_diagnostic(
+                                f"Callback detected in Playwright page {page_index + 1}: {current_location}."
                             )
                         post_ui_event(
                             "auth_status",
@@ -749,6 +791,7 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
                             f"parsed_type={payload_type_for_log or 'none'}"
                         )
                         print(diagnostic)
+                        _write_vk_auth_diagnostic(diagnostic)
                         if "blank.html" in parsed_current.path and "payload" in (
                             fragment_keys + query_keys
                         ) and payload.get("type") == "authorization_error":
@@ -823,8 +866,16 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
                     "отключён для приложения; проверьте актуальные возможности приложения VK ID."
                 )
     except Exception as exc:
-        post_ui_event("auth_error", f"Ошибка автоматической авторизации VK ID: {exc}")
+        _write_vk_auth_diagnostic(
+            f"Authentication failed: {type(exc).__name__}: {str(exc)[:600]}"
+        )
+        post_ui_event(
+            "auth_error",
+            f"Ошибка автоматической авторизации VK ID: {exc}\\n"
+            f"Подробный журнал: {VK_AUTH_DIAGNOSTICS_FILE.name}",
+        )
     finally:
+        _write_vk_auth_diagnostic("Authentication worker finished.")
         if context is not None:
             try:
                 context.close()
