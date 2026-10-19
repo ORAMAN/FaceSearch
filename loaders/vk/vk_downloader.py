@@ -715,6 +715,7 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
             last_callback_status = None
             last_seen_urls = {}
             no_pages_since = None
+            last_wait_report = 0.0
             while not AUTH_STOP_REQUESTED.is_set() and time.monotonic() < deadline:
                 pages = list(context.pages)
                 if not pages:
@@ -742,6 +743,18 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
                     current_url = current_page.url or ""
                     parsed_current = urlsplit(current_url)
                     current_location = f"{parsed_current.scheme}://{parsed_current.netloc}{parsed_current.path}"
+
+                    now = time.monotonic()
+                    if now - last_wait_report >= 15 and not (
+                        parsed_current.netloc.lower() in {"oauth.vk.ru", "oauth.vk.com"}
+                        and parsed_current.path.rstrip("/") == "/blank.html"
+                    ):
+                        post_ui_event(
+                            "auth_status",
+                            f"Ожидаю ответ VK ID… вкладок: {len(pages)}; текущая страница: "
+                            f"{current_location}. Диагностика: {VK_AUTH_DIAGNOSTICS_FILE.name}",
+                        )
+                        last_wait_report = now
 
                     # Не ждём, пока fragment #payload будет распознан. Сам callback
                     # blank.html означает, что VK завершил экран согласия; дальше
@@ -869,9 +882,10 @@ def _browser_auth_worker(profile_directory: str, chrome_executable: str, service
             if AUTH_STOP_REQUESTED.is_set():
                 post_ui_event("auth_status", "Ожидание авторизации остановлено.")
             else:
+                _write_vk_auth_diagnostic("Timed out after 600 seconds without VK callback.")
                 raise RuntimeError(
-                    "За 10 минут VK ID не вернул silent_token. Возможно, старый silent-auth flow "
-                    "отключён для приложения; проверьте актуальные возможности приложения VK ID."
+                    "За 10 минут VK ID не вернул callback. Проверьте, завершилось ли подтверждение в Chrome. "
+                    f"Подробности: {VK_AUTH_DIAGNOSTICS_FILE.name}"
                 )
     except Exception as exc:
         _write_vk_auth_diagnostic(
