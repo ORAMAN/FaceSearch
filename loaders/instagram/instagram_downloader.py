@@ -1893,7 +1893,7 @@ def main():
 
     root = tk.Tk()
     root.title("Instagram — загрузчик изображений и импорт FaceSearch")
-    theme_manager = ThemeManager(root, saved.get("theme", "light"))
+    theme_manager = ThemeManager(root, saved.get("theme", "light"), accent_variant="instagram")
     # На Windows форма занимает левую половину рабочего стола; Chrome запускается справа.
     if not place_tk_window_half(root, "left", min_width=620, min_height=480):
         root.geometry("980x790")
