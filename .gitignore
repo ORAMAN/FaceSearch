@@ -42,8 +42,10 @@ CROP/
 CROPS/
 *.faiss
 *.index
-loaders/ok/Browser_Profile/
-loaders/instagram/Browser_Profile/
+loaders/instagram/browser_profile/
+loaders/ok/browser_profile/
+loaders/instagram/downloads/
+loaders/ok/downloads/
 query_cache/
 
 # Временные и системные файлы Windows
