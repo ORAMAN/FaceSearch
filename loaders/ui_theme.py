@@ -2,9 +2,82 @@
 
 from __future__ import annotations
 
+import ctypes
+import os
 import tkinter as tk
+from ctypes import wintypes
 from tkinter import ttk
 from typing import Callable
+
+
+def _windows_work_area() -> tuple[int, int, int, int] | None:
+    """Return the Windows work area (excluding the taskbar), or None elsewhere."""
+    if os.name != "nt":
+        return None
+    try:
+        rect = wintypes.RECT()
+        # SPI_GETWORKAREA = 0x0030
+        ok = ctypes.windll.user32.SystemParametersInfoW(
+            0x0030, 0, ctypes.byref(rect), 0
+        )
+        if not ok:
+            return None
+        width = int(rect.right - rect.left)
+        height = int(rect.bottom - rect.top)
+        if width < 2 or height < 2:
+            return None
+        return int(rect.left), int(rect.top), width, height
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def place_tk_window_half(
+    root: tk.Misc,
+    side: str = "left",
+    *,
+    min_width: int = 620,
+    min_height: int = 480,
+) -> bool:
+    """Place a Tk top-level in the left or right half of the Windows work area."""
+    area = _windows_work_area()
+    if area is None:
+        return False
+    left, top, total_width, total_height = area
+    left_width = total_width // 2
+    if str(side).lower() == "right":
+        x, width = left + left_width, total_width - left_width
+    else:
+        x, width = left, left_width
+    try:
+        root.state("normal")
+        root.minsize(min(int(min_width), width), min(int(min_height), total_height))
+        root.geometry(f"{width}x{total_height}+{x}+{top}")
+        root.update_idletasks()
+        return True
+    except tk.TclError:
+        return False
+
+
+def browser_window_args(side: str = "right") -> list[str]:
+    """Return Chrome launch arguments that place it beside the loader on Windows."""
+    area = _windows_work_area()
+    if area is None:
+        # Keep the previous behaviour on macOS/Linux or if Windows metrics fail.
+        return [
+            "--start-maximized",
+            "--window-size=1920,1080",
+            "--window-position=0,0",
+        ]
+    left, top, total_width, total_height = area
+    left_width = total_width // 2
+    if str(side).lower() == "left":
+        x, width = left, left_width
+    else:
+        x, width = left + left_width, total_width - left_width
+    return [
+        f"--window-position={x},{top}",
+        f"--window-size={width},{total_height}",
+    ]
 
 
 THEME_PALETTES = {
