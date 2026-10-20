@@ -1,8 +1,8 @@
-"""Быстрый текстовый фильтр результатов поиска по содержимому карточки.
+"""Текстовый фильтр результатов поиска по значениям полей карточки.
 
-Поиск выполняется как нечувствительное к регистру частичное совпадение
-по JSON-представлению всей записи результата, включая поля профиля,
-вложенные info/metadata и исходные JSON-метаданные.
+Сопоставление — частичное и нечувствительное к регистру. Вложенные JSON-строки
+(профильные данные и metadata_json) разбираются рекурсивно, чтобы проверить
+их значения, не создавая ложных совпадений только по именам полей.
 """
 from __future__ import annotations
 
@@ -26,26 +26,46 @@ def candidate_count_for_text_filter(top_k: int, query: str | None) -> int:
     )
 
 
+def _iter_card_values(value: Any):
+    """Обходит значения словаря/списка и разбирает вложенные JSON-строки."""
+    if isinstance(value, dict):
+        for nested in value.values():
+            yield from _iter_card_values(nested)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for nested in value:
+            yield from _iter_card_values(nested)
+        return
+    if value is None:
+        return
+
+    yield str(value)
+    if isinstance(value, str):
+        candidate = value.lstrip()
+        if candidate.startswith(("{", "[")):
+            try:
+                parsed = json.loads(candidate)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return
+            if isinstance(parsed, (dict, list)):
+                yield from _iter_card_values(parsed)
+
+
 def filter_results_by_card_text(
     results: Iterable[dict[str, Any]],
     query: str | None,
     *,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Оставляет карточки с подстрокой в любом поле/значении записи."""
+    """Оставляет карточки, в значениях полей которых встречается подстрока."""
     needle = str(query or "").strip().casefold()
     if not needle:
         selected = list(results)
     else:
         selected = []
         for result in results:
-            try:
-                searchable = json.dumps(
-                    result, ensure_ascii=False, default=str, separators=(",", ":")
-                )
-            except (TypeError, ValueError, OverflowError):
-                searchable = str(result)
-            if needle in searchable.casefold():
+            searchable = "\n".join(_iter_card_values(result)).casefold()
+            if needle in searchable:
                 selected.append(dict(result))
 
     if limit is not None:
