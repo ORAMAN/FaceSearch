@@ -1381,9 +1381,10 @@ def process_entity(
 
                 def save_album_photos(photo_records, title, album_data=None, album_id_value=None):
                     nonlocal album_photos_downloaded, album_errors
+                    # Список фотографий текущего альбома уже получен — завершаем
+                    # обработку всех его элементов, включая импорт в БД и очистку.
+                    # Stop проверяется между альбомами/профилями, не внутри начатой задачи.
                     for photo in photo_records:
-                        if STOP_REQUESTED.is_set():
-                            return
                         if not isinstance(photo, dict):
                             continue
                         photo_id = photo.get("id")
