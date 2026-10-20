@@ -2358,7 +2358,7 @@ def main():
     root = tk.Tk()
     root.title("OK.ru — загрузчик фотографий и импорт FaceSearch")
     initial_paths = load_gui_paths()
-    theme_manager = ThemeManager(root, initial_paths.get("theme", "light"))
+    theme_manager = ThemeManager(root, initial_paths.get("theme", "light"), accent_variant="ok")
     # На Windows форма занимает левую половину рабочего стола; Chrome запускается справа.
     if not place_tk_window_half(root, "left", min_width=620, min_height=480):
         root.geometry("950x750")
