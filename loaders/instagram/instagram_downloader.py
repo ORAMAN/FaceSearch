@@ -39,7 +39,7 @@ from ui_theme import ThemeManager
 
 BASE_URL = "https://www.instagram.com/"
 OUT_DIR = Path(__file__).resolve().parent / "downloads"
-PROFILE_DIR = Path(__file__).resolve().parent / "Instagram_Browser_Profile"
+PROFILE_DIR = Path(__file__).resolve().parent / "browser_profile"
 APP_SETTINGS_PATH = Path(__file__).resolve().with_name("instagram_downloader_settings.json")
 DEFAULT_FACESEARCH_DIR = Path(r"C:\FaceSearch")
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"}
