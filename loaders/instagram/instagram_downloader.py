@@ -30,6 +30,12 @@ except ImportError:
     sync_playwright = None
     PlaywrightTimeoutError = TimeoutError
 
+# Shared visual theme, also available when this script is started directly from loaders/instagram.
+_LOADER_SHARED_DIR = str(Path(__file__).resolve().parents[1])
+if _LOADER_SHARED_DIR not in sys.path:
+    sys.path.insert(0, _LOADER_SHARED_DIR)
+from ui_theme import ThemeManager
+
 
 BASE_URL = "https://www.instagram.com/"
 OUT_DIR = Path(__file__).resolve().parent / "Instagram_Download"
@@ -1386,6 +1392,7 @@ def load_settings() -> dict:
         "browser_profile_dir": str(PROFILE_DIR),
         "chrome_exe_path": default_chrome_executable(),
         "fullsize": True,
+        "theme": "light",
     }
     try:
         if APP_SETTINGS_PATH.is_file():
@@ -1886,19 +1893,36 @@ def main():
 
     root = tk.Tk()
     root.title("Instagram — загрузчик изображений и импорт FaceSearch")
+    theme_manager = ThemeManager(root, saved.get("theme", "light"))
     root.geometry("980x790")
     root.minsize(850, 700)
     root.columnconfigure(0, weight=1)
     root.rowconfigure(0, weight=1)
-    frame = ttk.Frame(root, padding=12)
+    frame = ttk.Frame(root, padding=12, style="App.TFrame")
     frame.grid(row=0, column=0, sticky="nsew")
     frame.columnconfigure(0, weight=1)
 
-    ttk.Label(frame, text=(
+    def toggle_theme():
+        theme_manager.toggle(on_change=persist_settings)
+
+    header_frame = ttk.Frame(frame, style="App.TFrame")
+    header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+    header_frame.columnconfigure(0, weight=1)
+    ttk.Label(header_frame, text="Загрузчик изображений Instagram", style="Header.TLabel").grid(
+        row=0, column=0, sticky="w", pady=(0, 3)
+    )
+    theme_button = ttk.Button(
+        header_frame, text="☾ Тёмная тема", command=toggle_theme, style="TButton"
+    )
+    theme_button.grid(row=0, column=1, sticky="e", padx=(12, 0), pady=2)
+    theme_manager.set_button(theme_button)
+    ttk.Label(header_frame, text=(
         "Откройте нужный профиль Instagram в запущенном Chrome — обычную страницу профиля "
-        "или вкладку /tagged/. Загрузчик возьмёт адрес из уже открытой вкладки и не будет "
+        "или вкладку /tagged/. Загрузчик возьмёт адрес из открытой вкладки и не будет "
         "переходить по ссылке сам, чтобы не прерывать авторизацию или редиректы Instagram."
-    ), wraplength=900).grid(row=0, column=0, sticky="w", pady=(0, 8))
+    ), style="Muted.TLabel", wraplength=1200).grid(
+        row=1, column=0, columnspan=2, sticky="w"
+    )
 
     paths_frame = ttk.LabelFrame(frame, text="Настройки FaceSearch и браузера", padding=8)
     paths_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
@@ -1958,6 +1982,7 @@ def main():
             "browser_profile_dir": browser_profile_dir_var.get().strip(),
             "chrome_exe_path": chrome_exe_path_var.get().strip(),
             "fullsize": fullsize_var.get(),
+            "theme": theme_manager.current,
         })
 
     def set_status(message: str):
@@ -2065,7 +2090,12 @@ def main():
         set_status("Задание отправлено. Проверяю открытую вкладку Instagram…")
         set_progress(None, None, "Подготовка к загрузке…")
 
-    ttk.Button(frame, text="Загрузить с открытой страницы и импортировать в FaceSearch", command=start_download).grid(row=7, column=0, sticky="ew", ipady=7)
+    ttk.Button(
+        frame,
+        text="Загрузить с открытой страницы и импортировать в FaceSearch",
+        command=start_download,
+        style="Accent.TButton",
+    ).grid(row=7, column=0, sticky="ew", ipady=7)
 
     def browser_worker():
         try:
@@ -2185,6 +2215,8 @@ def main():
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
+    theme_manager.apply(saved.get("theme", "light"), recolor=True)
+
     worker = threading.Thread(target=browser_worker, daemon=True)
     worker.start()
     if auto_import_var.get():
