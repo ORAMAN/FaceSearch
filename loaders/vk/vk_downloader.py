@@ -3460,9 +3460,16 @@ def main():
 
     def update_worker_control_state():
         """Как в основной форме: ручное поле недоступно при включённой автоподстройке."""
-        workers_spinbox.configure(
-            state="disabled" if auto_workers_var.get() else "normal"
-        )
+        auto = bool(auto_workers_var.get())
+        workers_spinbox.configure(state="disabled" if auto else "normal")
+        if auto:
+            workers_status_var.set(
+                "Автоподстройка будет менять число потоков по системной нагрузке."
+            )
+        else:
+            workers_status_var.set(
+                f"Ручной режим: фиксировано {workers_var.get().strip() or '8'} поток(ов)"
+            )
 
     db_test_running = {"value": False}
 
