@@ -57,6 +57,12 @@ from urllib.request import Request, url2pathname, urlopen
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 
+# Общие горячие клавиши и контекстное меню для всех полей ввода приложения.
+_LOADER_MODULE_DIR = str(Path(__file__).resolve().parent / "loaders")
+if _LOADER_MODULE_DIR not in sys.path:
+    sys.path.insert(0, _LOADER_MODULE_DIR)
+from edit_shortcuts import install_edit_shortcuts
+
 # Необязательная поддержка drag-and-drop. Устанавливается через requirements.txt.
 # Если расширение TkDND недоступно, приложение продолжит запускаться без DnD.
 try:
@@ -4247,6 +4253,7 @@ def generate_html_gallery(
 class FaceSearchGUI:
     def __init__(self, root):
         self.root = root
+        install_edit_shortcuts(root)
         self._set_window_icon()
 
         self.gui_settings = _load_gui_settings()
