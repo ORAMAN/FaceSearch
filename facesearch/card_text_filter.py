@@ -41,10 +41,10 @@ def _iter_card_values(value: Any):
 
     if isinstance(value, str):
         candidate = value.lstrip()
-        if candidate.startswith(("{", "[")):
+        if len(candidate) <= 1_000_000 and candidate.startswith(("{", "[")):
             try:
                 parsed = json.loads(candidate)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, RecursionError):
                 parsed = None
             if isinstance(parsed, (dict, list)):
                 yield from _iter_card_values(parsed)
@@ -65,7 +65,7 @@ def filter_results_by_card_text(
     else:
         selected = []
         for result in results:
-            searchable = "\n".join(_iter_card_values(result)).casefold()
+            searchable = " ".join(_iter_card_values(result)).casefold()
             if needle in searchable:
                 selected.append(dict(result))
 
