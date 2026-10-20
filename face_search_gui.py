@@ -1833,22 +1833,57 @@ def _prepare_source_crop_overwrite(
 
 
 def _delete_processed_source_files(
-    image_path: Path, metadata_path: Path | None = None
+    image_path: Path,
+    metadata_path: Path | None = None,
+    *,
+    stop_at: Path | str | None = None,
 ) -> bool:
-    """Удаляет исходное изображение и, если передан, JSON после успешной обработки.
+    """Удаляет обработанное изображение/JSON и очищает пустые вложенные каталоги.
 
-    Отсутствие найденных лиц не считается ошибкой обработки. Ошибки удаления
-    файлов фиксируются отдельно и не маскируют результат распознавания.
+    stop_at ограничивает очистку выбранной папкой сканирования: саму папку и
+    каталоги выше неё функция никогда не удаляет. Отсутствие лиц — штатный
+    результат обработки и не препятствует удалению при включённой настройке.
     """
+    root = None
+    resolved_image = None
+    if stop_at is not None:
+        try:
+            root = Path(stop_at).expanduser().resolve()
+            resolved_image = Path(image_path).expanduser().resolve()
+            resolved_image.relative_to(root)
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(
+                f"[WARN] Не удаляю исходник вне выбранного каталога "
+                f"{stop_at}: {image_path} ({exc})"
+            )
+            return False
+
     deleted = True
     for path in (image_path, metadata_path):
         if path is None:
             continue
         try:
-            path.unlink(missing_ok=True)
+            candidate = Path(path)
+            if root is not None:
+                candidate.resolve().relative_to(root)
+            candidate.unlink(missing_ok=True)
+        except ValueError:
+            deleted = False
+            print(f"[WARN] Не удаляю файл за пределами выбранного каталога: {path}")
         except OSError as exc:
             deleted = False
             print(f"[WARN] Не удалось удалить обработанный исходник {path}: {exc}")
+
+    if deleted and root is not None and resolved_image is not None:
+        current = resolved_image.parent
+        while current != root:
+            try:
+                current.relative_to(root)
+                current.rmdir()
+                current = current.parent
+            except (OSError, ValueError, RuntimeError):
+                # Каталог не пуст, отсутствует или находится вне разрешённого дерева.
+                break
     return deleted
 
 
@@ -2010,6 +2045,7 @@ def import_image_bundle(
     overwrite_existing_crops: bool = False,
     metadata: Any | None = None,
     source_key: str | None = None,
+    source_root: Path | str | None = None,
 ) -> dict[str, int | bool | str]:
 
     delete_source = bool(delete_source)
@@ -2116,7 +2152,7 @@ def import_image_bundle(
         promoted_count = int(updated.rowcount or len(local_source_rows))
         conn.commit()
         deleted = (
-            _delete_processed_source_files(image_path, json_path)
+            _delete_processed_source_files(image_path, json_path, stop_at=source_root)
             if delete_source else False
         )
         return {
@@ -2548,6 +2584,7 @@ def process_local_image(
     overwrite_existing_crops: bool = False,
     store_metadata: bool = True,
     clear_metadata: bool = False,
+    source_root: Path | str | None = None,
 ) -> dict[str, int | bool | str]:
     """Сканирует локальную фотографию без JSON-метаданных.
 
@@ -2560,7 +2597,7 @@ def process_local_image(
     для пары изображение+JSON в import_image_bundle(). Параметр delete_source
     сохранён для совместимости со старыми вызывающими участками.
     """
-    delete_source = False  # локальные исходники сохраняем при любых настройках
+    delete_source = bool(delete_source)
     overwrite_existing_crops = bool(overwrite_existing_crops)
     image_path = image_path.resolve()
 
@@ -2656,7 +2693,15 @@ def process_local_image(
             conn.rollback()
         except Exception:
             pass
-        deleted = False
+        # При выключенном создании CROP сохраняем исходник, если в БД ещё
+        # отсутствуют CROP-файлы: он может понадобиться для восстановления.
+        needs_source_for_repair = bool(missing_existing_rows) and (
+            not create_crop_files or restored_missing_crops < len(missing_existing_rows)
+        )
+        deleted = (
+            _delete_processed_source_files(image_path, stop_at=source_root)
+            if delete_source and not needs_source_for_repair else False
+        )
         message = "исходник уже есть в БД"
         if restored_missing_crops:
             message += f"; восстановлено CROP: {restored_missing_crops}"
@@ -2692,10 +2737,15 @@ def process_local_image(
     )
 
     if not valid_faces:
-        # Отсутствие лиц — штатный результат, но локальный исходник сохраняем.
+        # Отсутствие лиц — штатный завершённый результат. При включённом чекбоксе
+        # удаляем обработанный файл и очищаем ставшие пустыми вложенные каталоги.
+        deleted = (
+            _delete_processed_source_files(image_path, stop_at=source_root)
+            if delete_source else False
+        )
         return {
             "faces": 0,
-            "deleted": False,
+            "deleted": deleted,
             "message": "лицо не найдено",
             "detected_faces": 0,
         }
