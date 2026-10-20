@@ -7667,12 +7667,9 @@ class FaceSearchGUI:
                     "auto_workers_status",
                     f"{final_prefix}, {final_workers_text}"
                 ))
-            self.events.put((
-                "scan_done", total_faces, completed, total, stopped,
-                total_updated_crops, total_added_crops, total_removed_crops,
-            ))
-
-            # Закрываем переиспользованные connections worker-ов.
+            # Дождались Future всех уже поданных задач: inference, commit/rollback
+            # и очистка исходников в worker-функциях завершены. Закрываем их
+            # соединения до события, которое разблокирует интерфейс после Stop.
             connections = getattr(self, "_scan_worker_connections", [])
             for conn in connections:
                 try:
@@ -7683,6 +7680,11 @@ class FaceSearchGUI:
                 delattr(self, "_scan_worker_connections")
             except Exception:
                 pass
+
+            self.events.put((
+                "scan_done", total_faces, completed, total, stopped,
+                total_updated_crops, total_added_crops, total_removed_crops,
+            ))
 
         except Exception as exc:
             # Даже при аварийном завершении не оставляем открытые ODBC
@@ -8888,9 +8890,11 @@ class FaceSearchGUI:
                     face_ids=normalized_face_ids,
                     delete_unavailable_records=(normalized_face_ids is None),
                 )
-                self.events.put(("crop_repair_done", result))
             finally:
+                # repair_missing_crops возвращается только после окончания всех
+                # активных групп и закрытия соединений worker-ов.
                 conn.close()
+            self.events.put(("crop_repair_done", result))
 
         except Exception as exc:
             self.events.put(("fatal", str(exc)))
@@ -10770,12 +10774,13 @@ def repair_missing_crops(
         source_url = first_row[4]
         image_url = first_row[5]
 
+        # С этого места группа считается начатой: даже если пользователь нажмёт
+        # «Стоп» во время скачивания/чтения, завершаем её текущую обработку и
+        # все необходимые записи/удаления в БД. Остановка запрещает только новые группы.
         source_result = _load_repair_source_image(
             source_url,
             image_url,
         )
-        if not operation_allowed():
-            return []
 
         # Если именно прямая ссылка на изображение недоступна после всех
         # HTTP-попыток, удаляем все связанные с этим URL image rows и faces,
@@ -10818,10 +10823,19 @@ def repair_missing_crops(
         source_cache = {source_key: source_result}
         used_matches = {source_key: set()}
 
+        def wait_before_next_crop_in_active_group():
+            # Пауза приостанавливает переход к следующей записи, но «Стоп» не
+            # бросает уже начатую группу: сначала завершаем весь её набор CROP/БД.
+            if stop_event is not None and stop_event.is_set():
+                return
+            if pause_event is not None:
+                while not pause_event.wait(timeout=0.25):
+                    if stop_event is not None and stop_event.is_set():
+                        return
+
         results = []
         for row in group_rows:
-            if not operation_allowed():
-                break
+            wait_before_next_crop_in_active_group()
             ok, message = _repair_single_missing_crop(
                 worker_conn,
                 app,
