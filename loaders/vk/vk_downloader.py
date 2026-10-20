@@ -1273,6 +1273,35 @@ def _remove_empty_directories_upwards(start_path: str | Path, stop_at: str | Pat
         current = current.parent
 
 
+def _remove_empty_directories_recursively(root_path: str | Path) -> int:
+    """Удаляет все пустые вложенные каталоги под output-root, сам root не удаляет."""
+    try:
+        root = Path(root_path).resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return 0
+    if not root.is_dir():
+        return 0
+
+    removed = 0
+    # Bottom-up: сначала пустые подкаталоги альбомов, затем папки пользователей.
+    for current_text, dirnames, _filenames in os.walk(root, topdown=False, followlinks=False):
+        current = Path(current_text)
+        for dirname in dirnames:
+            candidate = current / dirname
+            try:
+                resolved = candidate.resolve()
+                resolved.relative_to(root)
+                # Не затрагиваем symlinks/junctions: их цель может быть вне downloads.
+                if candidate.is_symlink():
+                    continue
+                candidate.rmdir()
+                removed += 1
+            except (FileNotFoundError, OSError, RuntimeError, ValueError):
+                # Каталог непуст, отсутствует или его путь выходит за пределы root.
+                continue
+    return removed
+
+
 def process_entity(
     entity: dict, base_dir: str, is_group: bool, MAX_WORKERS: int,
     importer=None, delete_processed_files: bool = False, import_to_database: bool = True,
@@ -2683,6 +2712,18 @@ def run_download_job(
                     specific_cursor += len(batch_ids)
                 else:
                     current_id = batch_end
+
+    # После Stop все активные futures уже завершены. Делаем финальную безопасную
+    # уборку: некоторые профили могли оставить пустые папки без пары image/JSON
+    # (например, после ошибки/отсутствия медиа или от прежнего запуска).
+    # Удаляются только действительно пустые вложенные каталоги; любые файлы
+    # (в том числе сохранённые из-за ошибки импорта) остаются нетронутыми.
+    if delete_processed_files and import_to_database:
+        removed_empty_dirs = _remove_empty_directories_recursively(output_root)
+        print(
+            f"[CLEANUP-DIRS] Финальная очистка каталога загрузки: "
+            f"удалено пустых папок: {removed_empty_dirs}."
+        )
 
     total_errors = api_errors_total + album_errors_total + download_errors_total + import_errors_total + cleanup_errors_total
     print("\n" + "=" * 68)
