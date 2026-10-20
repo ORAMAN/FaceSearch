@@ -973,10 +973,32 @@ def get_group_info(group_id_or_screen_name: str, session: requests.Session):
     return groups[0]
 
 
-def get_user_info(user_ids: str, session: requests.Session):
-    """Получает подробные данные пачки пользователей одним POST-запросом users.get."""
+def get_user_info(user_ids: str | list[int] | tuple[int, ...], session: requests.Session):
+    """Запрашивает пользователей, принимая только отдельные ID, перечисленные через запятую."""
+    if isinstance(user_ids, str):
+        raw_ids = [part.strip() for part in user_ids.split(",") if part.strip()]
+    else:
+        raw_ids = [str(part).strip() for part in user_ids]
+
+    if not raw_ids:
+        raise ValueError("users.get: список ID пуст.")
+
+    normalized_ids = []
+    for raw_id in raw_ids:
+        if not re.fullmatch(r"\d+", raw_id):
+            raise ValueError(
+                f"users.get ожидает отдельные числовые ID через запятую; "
+                f"диапазоны и другие значения запрещены: {raw_id!r}"
+            )
+        user_id = int(raw_id)
+        if user_id < 1:
+            raise ValueError(f"users.get ожидает положительный ID: {raw_id!r}")
+        normalized_ids.append(str(user_id))
+
+    # В параметр VK API передаётся только явный список, например "101,102,103".
+    user_ids_param = ",".join(normalized_ids)
     params = {
-        "user_ids": user_ids,
+        "user_ids": user_ids_param,
         "fields": "photo_max_orig,city,home_town,sex,bdate,screen_name,deactivated,is_closed",
         "access_token": reload_tokens(),
         "v": API_VERSION,
@@ -1884,22 +1906,10 @@ def load_existing_vk_profile_ids(importer) -> set[int]:
     return result
 
 
-def _format_id_ranges(values) -> str:
-    """Компактно отображает полный список ID, объединяя последовательные значения в диапазоны."""
+def _format_id_list(values) -> str:
+    """Показывает каждый ID отдельно; никогда не сворачивает список в диапазоны."""
     ids = sorted({int(value) for value in values})
-    if not ids:
-        return "—"
-
-    ranges = []
-    range_start = previous = ids[0]
-    for value in ids[1:]:
-        if value == previous + 1:
-            previous = value
-            continue
-        ranges.append(str(range_start) if range_start == previous else f"{range_start}–{previous}")
-        range_start = previous = value
-    ranges.append(str(range_start) if range_start == previous else f"{range_start}–{previous}")
-    return ", ".join(ranges)
+    return ", ".join(map(str, ids)) if ids else "—"
 
 
 def run_download_job(
@@ -1967,7 +1977,7 @@ def run_download_job(
                 if skipped_ids:
                     print(
                         f"[DB-SKIP] Уже есть в активной БД FaceSearch ({skipped} ID): "
-                        f"{_format_id_ranges(skipped_ids)}"
+                        f"{_format_id_list(skipped_ids)}"
                     )
 
                 post_ui_event(
@@ -1985,7 +1995,14 @@ def run_download_job(
                 if request_ids:
                     try:
                         # POST передаёт полный пакет ID без чрезмерно длинного URL.
-                        returned_users = get_user_info(",".join(map(str, request_ids)), session)
+                        request_preview = ", ".join(map(str, request_ids[:20]))
+                        if len(request_ids) > 20:
+                            request_preview += f", … (+{len(request_ids) - 20} ID)"
+                        print(
+                            f"[VK-REQUEST] users.get: {len(request_ids)} отдельных ID; "
+                            f"диапазоны не используются. Список: {request_preview}"
+                        )
+                        returned_users = get_user_info(request_ids, session)
                     except Exception as exc:
                         api_errors_total += 1
                         print(
@@ -2018,7 +2035,7 @@ def run_download_job(
                     print(
                         f"[VK-NOT-FOUND] Профиль не возвращён users.get для {missing_count} ID "
                         f"(профиль может быть удалён, недоступен или не существовать): "
-                        f"{_format_id_ranges(missing_ids)}"
+                        f"{_format_id_list(missing_ids)}"
                     )
 
                 print(
