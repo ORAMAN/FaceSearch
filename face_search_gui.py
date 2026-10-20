@@ -6192,6 +6192,9 @@ class FaceSearchGUI:
             description_filter_control, textvariable=self.description_filter_var
         )
         self.description_filter_entry.pack(fill="x")
+        self.description_filter_entry.bind(
+            "<Return>", lambda _event: self.start_search()
+        )
         ttk.Label(
             description_filter_control,
             text="Частичное совпадение без учёта регистра; поиск по всем полям карточки.",
