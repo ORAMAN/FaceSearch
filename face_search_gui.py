@@ -2222,7 +2222,7 @@ def import_image_bundle(
                     # Пропускаем повторное чтение изображения и inference.
                     conn.commit()
                     deleted = (
-                        _delete_processed_source_files(image_path, json_path)
+                        _delete_processed_source_files(image_path, json_path, stop_at=source_root)
                         if delete_source else False
                     )
                     return {
@@ -2254,7 +2254,7 @@ def import_image_bundle(
     if not valid_faces:
         # Распознавание завершилось штатно: отсутствие лиц — это результат,
         # а не ошибка. При включённом чекбоксе удаляем и изображение, и JSON.
-        deleted = _delete_processed_source_files(image_path, json_path) if delete_source else False
+        deleted = _delete_processed_source_files(image_path, json_path, stop_at=source_root) if delete_source else False
         return {
             "faces": 0,
             "deleted": deleted,
@@ -2526,7 +2526,7 @@ def import_image_bundle(
             conn.rollback()
             _rollback_crop_file_writes(created_files, crop_file_backups)
             if delete_source:
-                deleted = _delete_processed_source_files(image_path, json_path)
+                deleted = _delete_processed_source_files(image_path, json_path, stop_at=source_root)
             else:
                 deleted = False
             message = (
@@ -2552,13 +2552,12 @@ def import_image_bundle(
     if old_crop_rows:
         _cleanup_replaced_crop_files(old_crop_rows, created_files)
 
-    if delete_source:
-        try:
-            image_path.unlink()
-            json_path.unlink()
-            deleted = True
-        except OSError:
-            deleted = False
+    if delete_source and create_crop_files:
+        # При выключенном CROP сохраняем исходник с лицами для возможного
+        # восстановления crop-файлов; отсутствие лиц обрабатывается отдельно выше.
+        deleted = _delete_processed_source_files(
+            image_path, json_path, stop_at=source_root
+        )
     else:
         deleted = False
 
@@ -6846,11 +6845,10 @@ class FaceSearchGUI:
             confirmed = messagebox.askyesno(
                 "Подтверждение удаления исходников",
                 "Включено удаление исходников.\n\n"
-                "Будут удаляться только пары «изображение + одноимённый JSON», "
-                "обработанные с включённым параметром «Использовать JSON-описание». "
-                "Пары, у которых лицо не найдено, тоже удаляются после штатной обработки.\n\n"
-                "Локальные изображения без JSON не удаляются ни при каких условиях. "
-                "Если при обработке возникнет ошибка, исходные файлы сохраняются.\n\n"
+                "После штатной обработки будут удаляться исходные изображения и их одноимённые JSON, "
+                "в том числе если лицо не найдено. Для локальных изображений без JSON действует то же правило.\n\n"
+                "При ошибке чтения изображения, импорта или базы исходники сохраняются. Если создание CROP выключено "
+                "и исходник с лицами нужен для восстановления отсутствующих CROP, он также будет сохранён.\n\n"
                 "Продолжить сканирование?",
                 parent=self.root,
             )
@@ -7256,6 +7254,7 @@ class FaceSearchGUI:
                                             create_crop_files=create_crop_files,
                                             overwrite_existing_crops=overwrite_existing_crops,
                                             metadata=metadata,
+                                            source_root=directory,
                                         )
                                     else:
                                         # Один url_source импортируется под блокировкой.
@@ -7270,6 +7269,7 @@ class FaceSearchGUI:
                                                     create_crop_files=create_crop_files,
                                                     overwrite_existing_crops=overwrite_existing_crops,
                                                     metadata=metadata,
+                                                    source_root=directory,
                                                 )
                                             except Exception:
                                                 try:
@@ -7290,6 +7290,7 @@ class FaceSearchGUI:
                                 overwrite_existing_crops=overwrite_existing_crops,
                                 store_metadata=False,
                                 clear_metadata=True,
+                                source_root=directory,
                             )
                             return path, int(result["faces"]), None, result
 
@@ -7300,6 +7301,7 @@ class FaceSearchGUI:
                             delete_source=delete_processed,
                             create_crop_files=create_crop_files,
                             overwrite_existing_crops=overwrite_existing_crops,
+                            source_root=directory,
                         )
                         return path, int(result["faces"]), None, result
 
@@ -11016,6 +11018,7 @@ def scan_directory(
                         json_path,
                         delete_source=delete_processed,
                         metadata=metadata,
+                        source_root=directory,
                     )
                 else:
                     # При любом sidecar JSON EXIF не читается и не сохраняется.
@@ -11026,6 +11029,7 @@ def scan_directory(
                         delete_source=False,
                         store_metadata=False,
                         clear_metadata=True,
+                        source_root=directory,
                     )
                 count = int(result["faces"])
                 deleted = bool(result.get("deleted"))
@@ -11035,6 +11039,7 @@ def scan_directory(
                     app,
                     path,
                     delete_source=delete_processed,
+                    source_root=directory,
                 )
                 count = int(result["faces"])
                 deleted = bool(result.get("deleted"))
