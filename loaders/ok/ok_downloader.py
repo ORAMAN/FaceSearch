@@ -28,7 +28,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 _LOADER_SHARED_DIR = str(Path(__file__).resolve().parents[1])
 if _LOADER_SHARED_DIR not in sys.path:
     sys.path.insert(0, _LOADER_SHARED_DIR)
-from ui_theme import ThemeManager
+from ui_theme import ThemeManager, browser_window_args, place_tk_window_half
 
 
 START_URL = "https://ok.ru"
@@ -1483,11 +1483,7 @@ def launch_browser_context(playwright, profile_directory: str | Path, chrome_exe
         no_viewport=True,
         locale="ru-RU",
         accept_downloads=True,
-        args=[
-            "--start-maximized",
-            "--window-size=1920,1080",
-            "--window-position=0,0",
-        ],
+        args=browser_window_args("right"),
     )
 
 
@@ -2363,8 +2359,10 @@ def main():
     root.title("OK.ru — загрузчик фотографий и импорт FaceSearch")
     initial_paths = load_gui_paths()
     theme_manager = ThemeManager(root, initial_paths.get("theme", "light"))
-    root.geometry("950x750")
-    root.minsize(830, 690)
+    # На Windows форма занимает левую половину рабочего стола; Chrome запускается справа.
+    if not place_tk_window_half(root, "left", min_width=620, min_height=480):
+        root.geometry("950x750")
+        root.minsize(830, 690)
     root.resizable(True, True)
 
     frame = ttk.Frame(root, padding=12, style="App.TFrame")
