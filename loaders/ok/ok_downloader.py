@@ -24,6 +24,12 @@ from tkinter import ttk, filedialog, messagebox
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
+# Shared visual theme, also available when this script is started directly from loaders/ok.
+_LOADER_SHARED_DIR = str(Path(__file__).resolve().parents[1])
+if _LOADER_SHARED_DIR not in sys.path:
+    sys.path.insert(0, _LOADER_SHARED_DIR)
+from ui_theme import ThemeManager
+
 
 START_URL = "https://ok.ru"
 OUT_DIR = Path(__file__).resolve().parent / "OK_Download"
@@ -1388,6 +1394,7 @@ def load_gui_paths() -> dict[str, str]:
         "browser_profile_dir": str(PROFILE_DIR),
         "chrome_exe_path": default_chrome_executable(),
         "delete_processed_files": False,
+        "theme": "light",
     }
     try:
         if APP_SETTINGS_PATH.is_file():
@@ -1414,6 +1421,10 @@ def load_gui_paths() -> dict[str, str]:
                 defaults["browser_profile_dir"] = str(data.get("browser_profile_dir") or defaults["browser_profile_dir"])
                 defaults["chrome_exe_path"] = str(data.get("chrome_exe_path") or defaults["chrome_exe_path"])
                 defaults["delete_processed_files"] = bool(data.get("delete_processed_files", False))
+                defaults["theme"] = (
+                    "dark" if str(data.get("theme") or "light").strip().lower()
+                    in {"dark", "night", "тёмная", "темная"} else "light"
+                )
     except Exception as exc:
         print(f"[WARN] Не удалось загрузить настройки окна: {exc}")
     return defaults
@@ -1427,6 +1438,7 @@ def save_gui_paths(
     browser_profile_dir: str = "",
     chrome_exe_path: str = "",
     delete_processed_files: bool = False,
+    theme: str = "light",
 ) -> None:
     payload = {
         "facesearch_dir": str(facesearch_dir or "").strip(),
@@ -1436,6 +1448,8 @@ def save_gui_paths(
         "browser_profile_dir": str(browser_profile_dir or "").strip(),
         "chrome_exe_path": str(chrome_exe_path or "").strip(),
         "delete_processed_files": bool(delete_processed_files),
+        "theme": "dark" if str(theme or "light").strip().lower()
+        in {"dark", "night", "тёмная", "темная"} else "light",
     }
     tmp = APP_SETTINGS_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2347,25 +2361,40 @@ def main():
 
     root = tk.Tk()
     root.title("OK.ru — загрузчик фотографий и импорт FaceSearch")
+    initial_paths = load_gui_paths()
+    theme_manager = ThemeManager(root, initial_paths.get("theme", "light"))
     root.geometry("950x750")
     root.minsize(830, 690)
     root.resizable(True, True)
 
-    frame = ttk.Frame(root, padding=12)
+    frame = ttk.Frame(root, padding=12, style="App.TFrame")
     frame.pack(fill="both", expand=True)
     frame.columnconfigure(0, weight=1)
 
+    def toggle_theme():
+        theme_manager.toggle(on_change=persist_settings)
+
+    header_frame = ttk.Frame(frame, style="App.TFrame")
+    header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+    header_frame.columnconfigure(0, weight=1)
+    ttk.Label(header_frame, text="Загрузчик фотографий OK.ru", style="Header.TLabel").grid(
+        row=0, column=0, sticky="w", pady=(0, 3)
+    )
+    theme_button = ttk.Button(
+        header_frame, text="☾ Тёмная тема", command=toggle_theme, style="TButton"
+    )
+    theme_button.grid(row=0, column=1, sticky="e", padx=(12, 0), pady=2)
+    theme_manager.set_button(theme_button)
     ttk.Label(
-        frame,
+        header_frame,
         text="Откройте профиль OK.ru → Фото. Новые фотографии будут сохранены и импортированы в активный профиль FaceSearch.",
-        wraplength=800,
-    ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        style="Muted.TLabel", wraplength=1200,
+    ).grid(row=1, column=0, columnspan=2, sticky="w")
 
     paths_frame = ttk.LabelFrame(frame, text="Настройки FaceSearch и браузера", padding=8)
     paths_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
     paths_frame.columnconfigure(1, weight=1)
 
-    initial_paths = load_gui_paths()
     facesearch_dir_var = tk.StringVar(value=initial_paths["facesearch_dir"])
     auto_import_var = tk.BooleanVar(value=bool(initial_paths.get("auto_import", True)))
     create_crop_files_var = tk.BooleanVar(value=bool(initial_paths.get("create_crop_files", True)))
@@ -2403,6 +2432,7 @@ def main():
                 browser_profile_dir_var.get(),
                 chrome_exe_path_var.get(),
                 delete_processed_files_var.get(),
+                theme_manager.current,
             )
         except Exception as exc:
             print(f"[WARN] Не удалось сохранить настройки формы: {exc}")
@@ -2646,6 +2676,7 @@ def main():
         frame,
         text="Получить изображения и импортировать в FaceSearch",
         command=start_collect,
+        style="Accent.TButton",
     ).grid(row=8, column=0, sticky="ew", ipady=6)
 
     ttk.Label(
@@ -2653,6 +2684,8 @@ def main():
         text=f"Папка загрузки: {OUT_DIR}",
         wraplength=800,
     ).grid(row=9, column=0, sticky="w", pady=(8, 0))
+
+    theme_manager.apply(initial_paths.get("theme", "light"), recolor=True)
 
     worker = threading.Thread(target=browser_worker, daemon=True)
     worker.start()
