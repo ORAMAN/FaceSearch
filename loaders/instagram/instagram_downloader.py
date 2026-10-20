@@ -1881,7 +1881,7 @@ def collect_instagram(context, status_callback, progress_callback,
 def main():
     if sync_playwright is None:
         root = tk.Tk()
-    install_edit_shortcuts(root)
+        install_edit_shortcuts(root)
         root.withdraw()
         messagebox.showerror("Playwright не установлен", "Установите зависимости через setup.bat в папке загрузчика.")
         root.destroy()
@@ -1894,6 +1894,7 @@ def main():
     browser_state = {"error": None}
 
     root = tk.Tk()
+    install_edit_shortcuts(root)
     root.title("Instagram — загрузчик изображений и импорт FaceSearch")
     theme_manager = ThemeManager(root, saved.get("theme", "light"), accent_variant="instagram")
     # На Windows форма занимает левую половину рабочего стола; Chrome запускается справа.
