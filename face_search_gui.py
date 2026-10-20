@@ -2589,12 +2589,10 @@ def process_local_image(
 
     Для каждого найденного лица создаётся отдельная запись images/faces.
     При create_crop_files=False embedding и ожидаемый путь CROP сохраняются
-    в БД, но JPEG не записывается. Исходная фотография остаётся на месте,
-    чтобы CROP можно было позднее восстановить кнопкой «Проверить CROP».
-    В images.source_url хранится file://-ссылка на исходник.
-    Исходный локальный файл никогда не удаляется; удаление разрешено только
-    для пары изображение+JSON в import_image_bundle(). Параметр delete_source
-    сохранён для совместимости со старыми вызывающими участками.
+    в БД, но JPEG не записывается. Исходник с найденными лицами сохраняется,
+    чтобы CROP можно было позднее восстановить. Если лица не найдены, это
+    штатный результат: при delete_source=True исходник удаляется. Пустые
+    вложенные каталоги очищаются только внутри source_root.
     """
     delete_source = bool(delete_source)
     overwrite_existing_crops = bool(overwrite_existing_crops)
@@ -2686,8 +2684,8 @@ def process_local_image(
                     conn, existing_image, existing_faces, existing_rows
                 )
 
-        # Local source photos are preserved even on repeat scans. Crop repair
-        # performs SELECTs only, so close its read transaction before returning.
+        # Закрываем read-only транзакцию. Исходник удаляем при включённом чекбоксе,
+        # кроме случая, когда он нужен для восстановления отсутствующих CROP.
         try:
             conn.rollback()
         except Exception:
@@ -6880,7 +6878,7 @@ class FaceSearchGUI:
         crop_text = (
             ", создание CROP ВКЛ"
             if create_crop_files
-            else ", создание CROP ВЫКЛ (исходники сохраняются)"
+            else ", создание CROP ВЫКЛ (исходники с лицами могут сохраняться для восстановления)"
         )
         overwrite_text = ", перезапись CROP ВКЛ" if overwrite_existing_crops else ""
         batch_text = (
