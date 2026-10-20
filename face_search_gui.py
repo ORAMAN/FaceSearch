@@ -6717,9 +6717,13 @@ class FaceSearchGUI:
         self.pause_scan_btn.config(state="disabled")
         self.stop_scan_btn.config(state="disabled")
         self.scan_control_status_var.set(
-            f"Остановка: завершаются уже начатые задачи ({operation_label})..."
+            f"Остановка: новые задачи не запускаются; завершаются распознавание, "
+            f"запись в БД и очистка файлов ({operation_label})..."
         )
-        self.status_var.set(f"Останавливаем {operation_label}...")
+        self.status_var.set(
+            f"Останавливаем {operation_label}: ожидаю завершения активных задач, "
+            "записи результатов в БД и очистки обработанных файлов..."
+        )
 
     # --------------------------------------------------------
     # Local scan
