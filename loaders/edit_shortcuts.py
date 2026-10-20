@@ -249,9 +249,9 @@ def install_edit_shortcuts(root: tk.Misc) -> bool:
             return None
 
         is_cyrillic = keysym.startswith("cyrillic_") or char in _CYRILLIC_CHARS
-        if action in {"copy", "cut", "paste"} and not is_cyrillic:
-            # Tk's standard class binding has already performed the English-key
-            # operation before bind_all. Do not repeat it (especially for paste).
+        if action in {"copy", "cut", "paste", "undo", "redo"} and not is_cyrillic:
+            # Tk's standard class binding has already handled the English-key
+            # operation before bind_all. Do not repeat it (especially paste/undo).
             return "break"
 
         if action == "select_all":
