@@ -39,16 +39,17 @@ def _iter_card_values(value: Any):
     if value is None:
         return
 
-    yield str(value)
     if isinstance(value, str):
         candidate = value.lstrip()
         if candidate.startswith(("{", "[")):
             try:
                 parsed = json.loads(candidate)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                return
+            except (TypeError, ValueError):
+                parsed = None
             if isinstance(parsed, (dict, list)):
                 yield from _iter_card_values(parsed)
+                return
+    yield str(value)
 
 
 def filter_results_by_card_text(
