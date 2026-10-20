@@ -1505,6 +1505,20 @@ def collect_instagram(context, status_callback, progress_callback,
 
     entries, scan_warning = collect_grid_entries_with_scroll(page, status_callback, username)
     if not entries:
+        if stop_event is not None and stop_event.is_set():
+            message = "Остановлено до начала загрузки изображений; новых задач не запускалось."
+            status_callback(message)
+            progress_callback(1, 1, "Остановлено")
+            report_path = OUT_DIR / f"{safe_filename(username)}_instagram_run_report.json"
+            return {
+                "posts": 0, "media": 0, "downloaded": 0, "reused": 0,
+                "duplicate_images": 0, "imported": 0, "db_added_faces": 0,
+                "db_updated_records": 0, "db_no_face": 0, "db_noop": 0,
+                "db_metadata_refreshed": 0, "failed": 0, "foreign_posts_skipped": 0,
+                "import_failed": 0, "import_error_samples": [], "incomplete_posts": [],
+                "scan_warning": scan_warning, "run_report_path": str(report_path),
+                "username": username, "mode": mode, "stopped": True,
+            }
         current_url = page.url
         try:
             diagnostics = page.evaluate(r"""() => {
