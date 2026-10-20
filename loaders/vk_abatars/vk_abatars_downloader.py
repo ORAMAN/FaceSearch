@@ -22,9 +22,10 @@ from tkinter import ttk, filedialog, messagebox
 APP_DIR = Path(__file__).resolve().parent
 VK_TOKEN_FILE = APP_DIR / "vk_token.txt"
 VK_FAVICON_URL = "https://vk.ru/favicon.ico"
-# VKHost-style OAuth implicit flow: app 8101047, friends + photos + status.
+# VKHost-style OAuth implicit flow: app 8101047, friends + photos + status + offline.
+# Bitmask: friends=2, photos=4, status=1024, offline=65536; total=66566.
 VK_AUTH_URL = (
-    "https://oauth.vk.com/authorize?client_id=8101047&scope=1030&"
+    "https://oauth.vk.com/authorize?client_id=8101047&scope=66566&"
     "redirect_uri=https%3A%2F%2Foauth.vk.com%2Fblank.html&"
     "display=page&response_type=token&revoke=1"
 )
@@ -152,9 +153,17 @@ def validate_access_token(token: str) -> str:
     payload = response.json()
     error = payload.get("error")
     if error:
+        error_message = str(error.get("error_msg", error))
+        error_code = error.get("error_code", "?")
+        if error_code == 5 and "another ip address" in error_message.lower():
+            raise RuntimeError(
+                "VK отклонил токен из-за привязки к IP-адресу. Получите новый токен через кнопку "
+                "«Получить токен через VK ID»: обновлённая ссылка включает право «Доступ в любое время» "
+                "(offline). Старый токен не получает это право автоматически. "
+                "Можно вставить часть от access_token= до &expires_in либо полный URL blank.html."
+            )
         raise RuntimeError(
-            f"VK API отклонил токен: {error.get('error_msg', error)} "
-            f"(код {error.get('error_code', '?')})."
+            f"VK API отклонил токен: {error_message} (код {error_code})."
         )
     users = payload.get("response") or []
     if not users:
