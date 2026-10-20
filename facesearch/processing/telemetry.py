@@ -667,11 +667,20 @@ class AdaptiveWorkerController:
         self.last_reason = reason
 
         gpu_text = f"{gpu:.0f}%" if gpu is not None else "н/д"
-        net_text = f"{float(metrics.get('net_mbps') or 0):.1f} Mbps"
+        net_mbps = float(metrics.get("net_mbps") or 0.0)
+        # Не округляем небольшие сетевые скорости до «0.0 Mbps»:
+        # при загрузке множества небольших файлов они часто ниже 0.1 Mbps.
+        if net_mbps >= 0.01:
+            net_text = f"{net_mbps:.2f} Mbps"
+        elif net_mbps > 0:
+            net_text = f"{net_mbps * 1000.0:.1f} Kbps"
+        else:
+            net_text = "0 Mbps"
         same_io_disk = bool(metrics.get("input_output_same_disk"))
+        write_label = "WRITE" if self.operation == "vk_download" else "CROP-WRITE"
         disk_text = (
-            f"READ[{metrics.get('input_disk_label', 'источник')}] {input_disk_rate:.0f} MB/s"
-            f" / CROP-WRITE[{metrics.get('crop_disk_label', 'CROP')}] {crop_disk_rate:.0f} MB/s"
+            f"READ[{metrics.get('input_disk_label', 'источник')}] {input_disk_rate:.1f} MB/s"
+            f" / {write_label}[{metrics.get('crop_disk_label', 'CROP')}] {crop_disk_rate:.1f} MB/s"
             + (" (общий физический диск)" if same_io_disk else "")
         )
         report = {
