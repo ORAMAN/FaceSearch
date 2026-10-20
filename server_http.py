@@ -32,6 +32,11 @@ from urllib.parse import parse_qs, urlparse
 import face_search_gui as face_search
 from facesearch.settings import _load_gui_settings
 from facesearch.database_profiles import _load_db_profiles, _default_profile
+from facesearch.card_text_filter import (
+    MAX_CARD_TEXT_FILTER_LENGTH,
+    candidate_count_for_text_filter,
+    filter_results_by_card_text,
+)
 
 APP_DIR = Path(__file__).resolve().parent
 MAX_BODY_BYTES = 24 * 1024 * 1024
@@ -531,6 +536,11 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       <label for="top-k">Количество результатов</label>
       <input id="top-k" class="numeric-input" type="number" min="1" max="500" step="1" value="__DEFAULT_TOP_K__">
     </div>
+    <div class="field" style="grid-column:1/-1">
+      <label for="description-filter">Фильтр описания карточки</label>
+      <input id="description-filter" type="text" maxlength="500" autocomplete="off" placeholder="Например: Москва или katerina">
+      <span class="hint">Частичное совпадение без учёта регистра во всех полях и вложенных метаданных карточки.</span>
+    </div>
     <div class="toggle-field">
       <label class="toggle-label" for="use-crop"><input id="use-crop" type="checkbox" __CROP_CHECKED__> Использовать CROP</label>
       <span class="hint">Показывать локальные вырезки лиц, если они доступны.</span>
@@ -621,6 +631,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   const resultCount=document.getElementById("result-count");
   const similarityInput=document.getElementById("similarity");
   const topKInput=document.getElementById("top-k");
+  const descriptionFilterInput=document.getElementById("description-filter");
   const useCropCheckbox=document.getElementById("use-crop");
   const themeButton=document.getElementById("theme-button");
   const lightbox=document.getElementById("image-lightbox");
@@ -766,6 +777,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     loadUrlButton.disabled=value;
     cameraInput.disabled=value;
     cameraButton.disabled=value||cameraOpening;
+    descriptionFilterInput.disabled=value;
   }
   function useDataUrl(sourceDataUrl){
     dataUrl=String(sourceDataUrl||"");
@@ -1245,7 +1257,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     try{
       const data=await postJson("/api/search",{
         query_id:queryId,face_index:selectedFace,
-        min_similarity:minimum,top_k:Math.trunc(topK)
+        min_similarity:minimum,top_k:Math.trunc(topK),
+        text_filter:String(descriptionFilterInput.value||"").trim()
       });
       renderResults(data.results||[]);
       setStatus("Поиск завершён. Найдено результатов: "+(data.results||[]).length+".");
@@ -1253,6 +1266,9 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     finally{setBusy(false);}
   }
   searchButton.addEventListener("click",searchSimilar);
+  descriptionFilterInput.addEventListener("keydown",function(event){
+    if(event.key==="Enter"){event.preventDefault();searchSimilar();}
+  });
 })();
 </script>
 </body>
