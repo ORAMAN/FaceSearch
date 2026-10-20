@@ -11057,7 +11057,7 @@ def scan_directory(
                         conn,
                         app,
                         path,
-                        delete_source=False,
+                        delete_source=delete_processed,
                         store_metadata=False,
                         clear_metadata=True,
                         source_root=directory,
