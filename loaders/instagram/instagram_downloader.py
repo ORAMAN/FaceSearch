@@ -1455,6 +1455,20 @@ def collect_instagram(context, status_callback, progress_callback,
                       build_index_after: bool, delete_processed_files: bool,
                       stop_event: threading.Event | None = None) -> dict:
     """Collects images from the profile tab already open in Chrome; does not navigate it."""
+    index_built = False
+
+    def build_index_if_requested() -> None:
+        nonlocal index_built
+        if importer is not None and build_index_after and not index_built:
+            message = (
+                "Загрузка остановлена; строю FAISS-индекс по итоговой базе…"
+                if stop_event is not None and stop_event.is_set()
+                else "Создаю индекс FAISS после завершения импорта…"
+            )
+            status_callback(message)
+            importer.build_index(progress_callback=progress_callback)
+            index_built = True
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     page = find_open_instagram_page(context)
     try:
@@ -1515,6 +1529,7 @@ def collect_instagram(context, status_callback, progress_callback,
         page, status_callback, username, stop_event=stop_event
     )
     if stop_event is not None and stop_event.is_set():
+        build_index_if_requested()
         message = "Остановлено до начала загрузки изображений; новые задачи не запускаются."
         status_callback(message)
         progress_callback(1, 1, "Остановлено")
@@ -1530,6 +1545,7 @@ def collect_instagram(context, status_callback, progress_callback,
         }
     if not entries:
         if stop_event is not None and stop_event.is_set():
+            build_index_if_requested()
             message = "Остановлено до начала загрузки изображений; новых задач не запускалось."
             status_callback(message)
             progress_callback(1, 1, "Остановлено")
@@ -1688,6 +1704,7 @@ def collect_instagram(context, status_callback, progress_callback,
 
     if not candidates:
         if stop_event is not None and stop_event.is_set():
+            build_index_if_requested()
             message = "Остановлено. Новые изображения не загружались; начатые действия завершены."
             status_callback(message)
             progress_callback(1, 1, "Остановлено")
@@ -1947,9 +1964,10 @@ def collect_instagram(context, status_callback, progress_callback,
         progress_callback(idx, total, f"Изображения: {idx}/{total}")
 
     stopped = bool(stop_event is not None and stop_event.is_set())
-    # Не запускаем необязательное построение индекса после запроса Stop.
-    if not stopped and importer and build_index_after and (db_added_faces or db_updated_records):
-        importer.build_index(progress_callback=progress_callback)
+    # Stop прекращает новые загрузки, но не отменяет отмеченный пользователем
+    # финальный этап. К этому моменту текущая загрузка/импорт/очистка завершены.
+    # При включённом флажке индекс строится даже если новых записей в этой сессии нет.
+    build_index_if_requested()
     save_run_report(final=True)
     progress_callback(1, 1, "Остановлено; активные операции завершены" if stopped else "Готово")
     if stopped:
