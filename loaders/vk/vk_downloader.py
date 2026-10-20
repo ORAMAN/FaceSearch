@@ -2547,10 +2547,13 @@ def run_download_job(
                                         )
                                     elif detected_faces == 0:
                                         db_no_faces_total += 1
+                                        # Ноль лиц — штатный завершённый результат, а не ошибка.
+                                        # При включённом удалении не сохраняем заведомо бесполезную пару.
+                                        should_cleanup_source = True
                                         print(
                                             f"[DB-NO-FACE] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
                                             f"детектор не обнаружил лиц; новые/обновлённые записи не созданы; "
-                                            f"исходники сохранены для проверки: {image_path.parent}; {detail}."
+                                            f"при включённой очистке исходники будут удалены; {detail}."
                                         )
                                     elif detected_faces is not None and detected_faces > 0:
                                         # Импортёр успешно обработал изображение и обнаружил лицо,
@@ -2586,7 +2589,13 @@ def run_download_job(
                                             and updated_records == 0
                                         )
                                     )
-                                    can_cleanup_without_crops = crop_files_enabled or existing_crop_confirmed
+                                    # Файл без лиц также считается обработанным: CROP для него
+                                    # создавать нечего, поэтому очищаем его независимо от настройки CROP.
+                                    can_cleanup_without_crops = (
+                                        crop_files_enabled
+                                        or detected_faces == 0
+                                        or existing_crop_confirmed
+                                    )
                                     if delete_processed_files and should_cleanup_source and can_cleanup_without_crops:
                                         try:
                                             # Сначала удаляем JSON: если удаление метаданных не удастся,
