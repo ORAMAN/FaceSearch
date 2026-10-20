@@ -1544,7 +1544,21 @@ def collect_photos(
     build_index_after: bool = False,
     progress_callback=None,
     delete_processed_files: bool = False,
+    stop_event: threading.Event | None = None,
 ):
+    def stop_requested() -> bool:
+        return bool(stop_event is not None and stop_event.is_set())
+
+    def stopped_result():
+        message = (
+            "Остановлено. Все начатые операции с текущими файлами завершены; "
+            "новые загрузки и импорты не запускаются."
+        )
+        print(f"[STOP] {message}")
+        status_callback(message)
+        report_progress(1, 1, "Остановлено; активные файлы обработаны")
+        return {"stopped": True}
+
     def report_progress(current=None, total=None, message=""):
         if progress_callback is not None:
             try:
@@ -1556,10 +1570,14 @@ def collect_photos(
 
     def finish_successfully():
         nonlocal index_built
+        # Индекс — необязательный следующий этап: после Stop новые этапы не запускаем.
+        if stop_requested():
+            return False
         if importer and build_index_after and not index_built:
             importer.build_index(progress_callback=report_progress)
             index_built = True
         report_progress(1, 1, "Обработка завершена")
+        return True
 
     report_progress(None, None, "Поиск активной вкладки OK.ru…")
     page = find_photos_page(context)
@@ -1731,6 +1749,8 @@ def collect_photos(
     # уже импортированы в активный профиль FaceSearch.
     preflight_progress_step = max(1, len(photo_ids) // 100)
     for preflight_index, pid in enumerate(photo_ids, start=1):
+        if stop_requested():
+            return stopped_result()
         if (
             preflight_index == 1
             or preflight_index % preflight_progress_step == 0
@@ -1767,6 +1787,8 @@ def collect_photos(
     report_progress(0, max(1, len(photo_ids)), f"Проверка существующих URL: 0/{len(photo_ids)}")
     url_check_progress_step = max(1, len(photo_ids) // 100)
     for check_index, (pid, entry) in enumerate(entries.items(), start=1):
+        if stop_requested():
+            return stopped_result()
         if (
             check_index == 1
             or check_index % url_check_progress_step == 0
@@ -1889,6 +1911,8 @@ def collect_photos(
 
     if importer and pending_entries:
         for pid in list(pending_entries):
+            if stop_requested():
+                return stopped_result()
             image_path, json_path, old_meta = local_paths.get(pid, (None, Path(str(photo_stem(pid)) + ".json"), {}))
             if _meta_get(old_meta, _META_DUPLICATE_OF):
                 # Shared duplicate sidecars do not own separate CROP rows.
@@ -1954,9 +1978,13 @@ def collect_photos(
     if importer and pending_entries:
         resolved_candidates = []
         for pid in pending_entries:
+            if stop_requested():
+                return stopped_result()
             resolved_candidates.extend((url_map.get(pid, ""), preview_map.get(pid, "")))
         resolved_db_urls = importer.lookup_existing_urls(resolved_candidates, profile_url=profile_url)
         for pid in list(pending_entries):
+            if stop_requested():
+                return stopped_result()
             candidate_keys = {
                 normalized_url_key(url_map.get(pid, "")),
                 normalized_url_key(preview_map.get(pid, "")),
@@ -2007,6 +2035,8 @@ def collect_photos(
     if revalidate_ids:
         backup_dir.mkdir(parents=True, exist_ok=True)
         for pid in revalidate_ids:
+            if stop_requested():
+                return stopped_result()
             old_image = existing_image_for_stem(photo_stem(pid))
             if not old_image:
                 continue
@@ -2067,6 +2097,10 @@ def collect_photos(
     report_progress(0, max(1, total), f"Скачивание и импорт: 0/{total}")
     image_progress_step = max(1, total // 100)
     for index, pid in enumerate(photo_ids, start=1):
+        # Проверяем Stop только на границе файлов. Текущий download/import/delete
+        # выполняется до конца, включая фиксацию БД и очистку исходников.
+        if stop_requested():
+            return stopped_result()
         if index == 1 or index % image_progress_step == 0 or index == total:
             report_progress(
                 index,
@@ -2137,6 +2171,8 @@ def collect_photos(
                 if candidate and not is_non_photo_url(candidate) and all(normalized_url_key(prev) != key for prev in candidates):
                     candidates.append(candidate)
             for candidate in candidates:
+                if stop_requested():
+                    break
                 candidate_key = normalized_url_key(candidate)
                 if candidate_key and candidate_key in known_urls:
                     # URL совпадает с уже сохранённым; если другой кандидат (preview)
@@ -2248,6 +2284,11 @@ def collect_photos(
                 imported_errors += 1
                 print(f"[DB-IMPORT-ERROR] {image_path.name}: {exc}")
                 status_callback(f"Изображение сохранено, но импорт в FaceSearch не выполнен: {exc}")
+
+    # Если Stop нажат во время обработки изображения, текущая итерация уже закончила
+    # импорт/commit и удаление успешной пары. Не запускаем индекс и следующий файл.
+    if stop_requested():
+        return stopped_result()
 
     # Если часть записей не удалось обработать, не уничтожаем оставшиеся резервные копии.
     # Они лежат в .recheck_backup и могут быть восстановлены вручную.
