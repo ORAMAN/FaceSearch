@@ -69,6 +69,7 @@ class ThemeManager:
             font=("Segoe UI", 10, "bold"), padding=(4, 0),
         )
         style.configure("TLabel", background=p["panel"], foreground=p["text"])
+        style.configure("App.TLabel", background=p["app"], foreground=p["text"])
         style.configure(
             "Header.TLabel", background=p["app"], foreground=p["text"],
             font=("Segoe UI", 19, "bold"),
@@ -76,6 +77,11 @@ class ThemeManager:
         style.configure(
             "Muted.TLabel", background=p["app"], foreground=p["muted"],
             font=("Segoe UI", 9),
+        )
+        style.configure("App.TCheckbutton", background=p["app"], foreground=p["text"], padding=(3, 3))
+        style.map(
+            "App.TCheckbutton", background=[("active", p["app"])],
+            foreground=[("disabled", p["disabled_text"])],
         )
         style.configure("TCheckbutton", background=p["panel"], foreground=p["text"], padding=(3, 3))
         style.map(
