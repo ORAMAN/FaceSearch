@@ -32,7 +32,7 @@ from ui_theme import ThemeManager
 
 
 START_URL = "https://ok.ru"
-OUT_DIR = Path(__file__).resolve().parent / "OK_Download"
+OUT_DIR = Path(__file__).resolve().parent / "downloads"
 PROFILE_DIR = Path(__file__).resolve().parent / "OK_Browser_Profile"
 APP_SETTINGS_PATH = Path(__file__).resolve().with_name("ok_downloader_settings.json")
 DEFAULT_FACESEARCH_DIR = Path(r"C:\FaceSearch")
