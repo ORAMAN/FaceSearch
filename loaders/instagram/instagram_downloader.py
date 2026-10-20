@@ -448,6 +448,24 @@ def remember_fingerprint(
         dhash_buckets.setdefault((band_index, band), []).append(record)
 
 
+def _remove_empty_download_directories(start_path: str | Path) -> None:
+    """Удаляет только пустые вложенные каталоги загрузок, не удаляя OUT_DIR."""
+    root = OUT_DIR.resolve()
+    current = Path(start_path)
+    try:
+        current = current.resolve()
+        current.relative_to(root)
+    except (OSError, ValueError):
+        return
+    while current != root:
+        try:
+            current.relative_to(root)
+            current.rmdir()
+        except (ValueError, OSError):
+            return
+        current = current.parent
+
+
 def write_metadata(path: Path, metadata: dict) -> None:
     clean = {
         "url_source": str(metadata.get("url_source") or ""),
@@ -1850,8 +1868,11 @@ def collect_instagram(context, status_callback, progress_callback,
                     db_noop += 1
                 print(f"[DB-IMPORT] {image_path.name}: {import_status}")
                 if delete_processed_files:
-                    image_path.unlink(missing_ok=True)
+                    # Удаляем JSON первым: если его удалить не удастся, изображение
+                    # останется для повторного импорта. После очистки удаляем пустые каталоги.
                     json_path.unlink(missing_ok=True)
+                    image_path.unlink(missing_ok=True)
+                    _remove_empty_download_directories(image_path.parent)
             except Exception as exc:
                 import_failed += 1
                 if len(import_error_samples) < 5:
