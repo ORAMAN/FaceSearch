@@ -7300,7 +7300,7 @@ class FaceSearchGUI:
                                 conn,
                                 worker_app,
                                 path,
-                                delete_source=False,
+                                delete_source=delete_processed,
                                 create_crop_files=create_crop_files,
                                 overwrite_existing_crops=overwrite_existing_crops,
                                 store_metadata=False,
