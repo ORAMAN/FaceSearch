@@ -2554,6 +2554,7 @@ def main():
         text="Синхронизировать с FaceSearch: новые для БД изображения импортировать, для известных URL обновлять только метаданные",
         variable=auto_import_var,
         command=persist_settings,
+        style="App.TCheckbutton",
     )
     auto_import_check.grid(row=2, column=0, sticky="w", pady=(0, 6))
 
@@ -2562,6 +2563,7 @@ def main():
         frame,
         text="Получать оригиналы фотографий (медленнее; без галочки — использовать миниатюры)",
         variable=fullsize_var,
+        style="App.TCheckbutton",
     ).grid(row=3, column=0, sticky="w", pady=(0, 5))
 
     options_frame = ttk.LabelFrame(frame, text="После загрузки", padding=(8, 5))
@@ -2589,11 +2591,11 @@ def main():
     delete_processed_check.pack(anchor="w", pady=1)
 
     status_var = tk.StringVar(value="Запуск браузера…")
-    status_label = ttk.Label(frame, textvariable=status_var, wraplength=800)
+    status_label = ttk.Label(frame, textvariable=status_var, wraplength=800, style="App.TLabel")
     status_label.grid(row=5, column=0, sticky="ew", pady=(0, 4))
 
     progress_stage_var = tk.StringVar(value="Ожидание задания")
-    ttk.Label(frame, textvariable=progress_stage_var, wraplength=800).grid(
+    ttk.Label(frame, textvariable=progress_stage_var, wraplength=800, style="App.TLabel").grid(
         row=6, column=0, sticky="ew", pady=(0, 3)
     )
     progress_bar = ttk.Progressbar(frame, mode="determinate", maximum=100, value=0)
@@ -2683,6 +2685,7 @@ def main():
         frame,
         text=f"Папка загрузки: {OUT_DIR}",
         wraplength=800,
+        style="App.TLabel",
     ).grid(row=9, column=0, sticky="w", pady=(8, 0))
 
     theme_manager.apply(initial_paths.get("theme", "light"), recolor=True)
