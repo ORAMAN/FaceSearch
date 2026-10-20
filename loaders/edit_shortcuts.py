@@ -188,22 +188,22 @@ def install_edit_shortcuts(root: tk.Misc) -> bool:
     def _refresh_menu(widget):
         selected = _has_selection(widget)
         editable = _can_edit(widget)
-        menu.entryconfigure("Вырезать", state="normal" if selected and editable else "disabled")
-        menu.entryconfigure("Копировать", state="normal" if selected else "disabled")
+        menu.entryconfigure(0, state="normal" if selected and editable else "disabled")
+        menu.entryconfigure(1, state="normal" if selected else "disabled")
         try:
             root.clipboard_get()
             clipboard_has_text = True
         except tk.TclError:
             clipboard_has_text = False
-        menu.entryconfigure("Вставить", state="normal" if editable and clipboard_has_text else "disabled")
+        menu.entryconfigure(2, state="normal" if editable and clipboard_has_text else "disabled")
         try:
             has_text = bool(widget.get("1.0", "end-1c")) if _is_text_widget(widget) else bool(widget.get())
         except (tk.TclError, AttributeError):
             has_text = True
-        menu.entryconfigure("Выделить всё", state="normal" if has_text else "disabled")
+        menu.entryconfigure(4, state="normal" if has_text else "disabled")
         history_state = "normal" if _is_text_widget(widget) and editable else "disabled"
-        menu.entryconfigure("Отменить", state=history_state)
-        menu.entryconfigure("Повторить", state=history_state)
+        menu.entryconfigure(6, state=history_state)
+        menu.entryconfigure(7, state=history_state)
 
     def _show_menu(event=None, keyboard=False):
         widget = getattr(event, "widget", None) if event is not None else None
