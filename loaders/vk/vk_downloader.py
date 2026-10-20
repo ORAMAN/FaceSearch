@@ -26,6 +26,13 @@ _LOADER_SHARED_DIR = str(APP_DIR.parent)
 if _LOADER_SHARED_DIR not in sys.path:
     sys.path.insert(0, _LOADER_SHARED_DIR)
 from edit_shortcuts import install_edit_shortcuts
+
+# Адаптивное управление потоками использует тот же контроллер, что и основная форма.
+_REPOSITORY_ROOT = str(APP_DIR.parent.parent)
+if _REPOSITORY_ROOT not in sys.path:
+    sys.path.insert(0, _REPOSITORY_ROOT)
+from facesearch.config import AUTO_WORKERS_DEFAULT
+from facesearch.processing.telemetry import AdaptiveWorkerController
 VK_TOKEN_FILE = APP_DIR / "vk_token.txt"
 # VKHost-style OAuth implicit flow: app 8101047, friends + photos + status + offline.
 # Bitmask: friends=2, photos=4, status=1024, offline=65536; total=66566.
@@ -2151,6 +2158,7 @@ def run_download_job(
     selected_system_albums: list[int] | tuple[int, ...] | set[int] | None = None,
     download_tagged_photos: bool = False,
     source_mode: str = "counter", specific_ids: str = "", friend_depth: int = 0,
+    auto_workers: bool = False,
 ):
     """Обрабатывает либо последовательные ID, либо конкретные ID и их друзей."""
     global EXISTING_PROFILE_IDS
@@ -2173,7 +2181,68 @@ def run_download_job(
     _load_tokens_if_needed()
     output_root = Path(output_dir).expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
-    worker_count = max(1, min(64, int(max_workers)))
+    requested_worker_count = max(1, min(64, int(max_workers)))
+    auto_workers = bool(auto_workers)
+
+    # В автоматическом режиме стартовый и максимальный пределы берём из того же
+    # алгоритма, что и в основной форме FaceSearch. Контроллер продолжает
+    # наблюдать нагрузку и в ручном режиме, но не меняет выбранное число потоков.
+    profile_data = {}
+    if importer is not None:
+        importer_config = getattr(importer, "config", {})
+        if isinstance(importer_config, dict):
+            profile_data = importer_config.get("profile") or {}
+    db_type = str(
+        profile_data.get("type")
+        or profile_data.get("backend")
+        or profile_data.get("driver")
+        or ""
+    ).strip().lower() if isinstance(profile_data, dict) else ""
+    remote_db = db_type not in ("", "sqlite", "sqlite3", "local", "file")
+
+    worker_controller = None
+    try:
+        worker_controller = AdaptiveWorkerController(
+            initial_workers=0 if auto_workers else requested_worker_count,
+            backend="cpu",
+            operation="vk_download",
+            input_paths=[],
+            output_path=output_root,
+            input_is_network=True,
+            remote_db=remote_db,
+            auto_adjust=auto_workers,
+        )
+    except Exception as exc:
+        if auto_workers:
+            raise RuntimeError(
+                "Не удалось запустить автоматическое определение числа потоков. "
+                "Проверьте facesearch/processing/telemetry.py и зависимости FaceSearch."
+            ) from exc
+        print(f"[WORKERS-WARN] Мониторинг ресурсов недоступен; ручное число потоков сохранено: {exc}")
+
+    worker_count = (
+        max(1, int(worker_controller.current_workers))
+        if worker_controller is not None else requested_worker_count
+    )
+    pool_worker_limit = (
+        max(worker_count, int(worker_controller.max_workers))
+        if worker_controller is not None else worker_count
+    )
+    adaptive_completed = 0
+    if auto_workers and worker_controller is not None:
+        initial_worker_status = (
+            f"Авто: старт {worker_controller.current_workers} "
+            f"из {worker_controller.max_workers} потоков"
+        )
+    elif worker_controller is not None:
+        initial_worker_status = (
+            f"Мониторинг (ручной режим): фиксировано {worker_count} поток(ов)"
+        )
+    else:
+        initial_worker_status = f"Ручной режим: фиксировано {worker_count} поток(ов)"
+    post_ui_event("workers_status", initial_worker_status)
+    print(f"[WORKERS] {initial_worker_status}")
+
     download_albums = bool(download_albums)
     all_albums = bool(all_albums) and download_albums
     try:
@@ -2249,7 +2318,9 @@ def run_download_job(
     with requests.Session() as session:
         # Сетевые загрузки выполняются параллельно, а импорт в БД остаётся в
         # потоке, где создано соединение FaceSearch (важно для SQLite).
-        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="VKDownload") as executor:
+        # AUTO использует пул с верхним пределом контроллера, а фактическое число
+        # одновременно подаваемых заданий меняется без пересоздания ThreadPoolExecutor.
+        with ThreadPoolExecutor(max_workers=pool_worker_limit, thread_name_prefix="VKDownload") as executor:
             while not STOP_REQUESTED.is_set():
                 if specific_mode:
                     if specific_cursor >= len(specific_user_ids):
@@ -2413,6 +2484,23 @@ def run_download_job(
                     completed_futures, _ = wait(pending, return_when=FIRST_COMPLETED)
                     for future in completed_futures:
                         uid = pending.pop(future)
+
+                        # Подстраиваем целевое число активных профилей по фактической
+                        # скорости завершения задач и показателям системной нагрузки.
+                        adaptive_completed += 1
+                        if worker_controller is not None:
+                            report = worker_controller.observe(adaptive_completed)
+                            if report is not None:
+                                worker_count = max(
+                                    1, min(pool_worker_limit, int(report.get("workers") or worker_count))
+                                )
+                                worker_status = worker_controller.status_text(report).replace(
+                                    "ф/с", "проф./с"
+                                )
+                                post_ui_event("workers_status", worker_status)
+                                if report.get("changed"):
+                                    print(f"[AUTO-WORKERS] {worker_status}")
+
                         # Сразу запускаем следующую сетевую задачу до импорта
                         # результата: свободный worker не простаивает на записи в БД.
                         submit_next_tasks()
@@ -3093,14 +3181,28 @@ def main():
     settings_frame = ttk.LabelFrame(outer, text="Параметры загрузки", padding=8)
     settings_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
     settings_frame.columnconfigure(2, weight=1)
+    settings_frame.columnconfigure(3, weight=1)
     ttk.Label(settings_frame, text="Потоков загрузки:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
     workers_var = tk.StringVar(value="8")
-    ttk.Spinbox(settings_frame, from_=1, to=64, textvariable=workers_var, width=8).grid(row=0, column=1, sticky="w", pady=3)
+    workers_spinbox = ttk.Spinbox(
+        settings_frame, from_=1, to=64, textvariable=workers_var, width=8,
+    )
+    workers_spinbox.grid(row=0, column=1, sticky="w", pady=3)
+    auto_workers_var = tk.BooleanVar(value=AUTO_WORKERS_DEFAULT)
+    auto_workers_check = ttk.Checkbutton(
+        settings_frame,
+        text="Автоподстройка",
+        variable=auto_workers_var,
+        command=lambda: (update_worker_control_state(), save_gui_settings()),
+    )
+    auto_workers_check.grid(row=0, column=2, sticky="w", padx=(12, 0), pady=3)
+    workers_status_var = tk.StringVar(value="Автоподстройка числа потоков включена.")
     ttk.Label(
         settings_frame,
-        text="ID передаются на обработку по порядку; сетевые операции выполняются параллельно.",
+        textvariable=workers_status_var,
         wraplength=560,
-    ).grid(row=0, column=2, sticky="w", padx=(12, 0), pady=3)
+        anchor="w",
+    ).grid(row=6, column=0, columnspan=4, sticky="ew", pady=(8, 1))
 
     download_albums_var = tk.BooleanVar(value=False)
     all_albums_var = tk.BooleanVar(value=False)
@@ -3254,6 +3356,7 @@ def main():
             "specific_ids": "",
             "friend_depth": 0,
             "workers": 8,
+            "auto_workers": AUTO_WORKERS_DEFAULT,
             "download_albums": False,
             "all_albums": False,
             "system_albums": {str(album_id): True for album_id, _label in SYSTEM_ALBUM_OPTIONS},
@@ -3284,7 +3387,12 @@ def main():
             friend_depth_var.set(str(max(0, min(10, int(defaults.get("friend_depth", 0) or 0)))))
         except (TypeError, ValueError):
             friend_depth_var.set("0")
-        workers_var.set(str(defaults["workers"]))
+        try:
+            configured_workers = max(1, min(64, int(defaults.get("workers", 8) or 8)))
+        except (TypeError, ValueError):
+            configured_workers = 8
+        workers_var.set(str(configured_workers))
+        auto_workers_var.set(bool(defaults.get("auto_workers", AUTO_WORKERS_DEFAULT)))
         download_albums_var.set(bool(defaults["download_albums"]))
         all_albums_var.set(bool(defaults["all_albums"]))
         download_tagged_photos_var.set(bool(defaults.get("download_tagged_photos", False)))
@@ -3314,6 +3422,7 @@ def main():
             "specific_ids": specific_ids_text.get("1.0", "end-1c").strip(),
             "friend_depth": friend_depth_var.get().strip() or "0",
             "workers": workers_var.get().strip(),
+            "auto_workers": bool(auto_workers_var.get()),
             "download_albums": bool(download_albums_var.get()),
             "all_albums": bool(all_albums_var.get()),
             "system_albums": {str(album_id): bool(variable.get()) for album_id, variable in system_album_vars.items()},
@@ -3348,6 +3457,12 @@ def main():
         start_id_entry.configure(state="normal" if counter_mode else "disabled")
         specific_ids_text.configure(state="disabled" if counter_mode else "normal")
         friend_depth_spin.configure(state="disabled" if counter_mode else "normal")
+
+    def update_worker_control_state():
+        """Как в основной форме: ручное поле недоступно при включённой автоподстройке."""
+        workers_spinbox.configure(
+            state="disabled" if auto_workers_var.get() else "normal"
+        )
 
     db_test_running = {"value": False}
 
@@ -3433,6 +3548,7 @@ def main():
     update_import_state()
     update_album_settings_state()
     update_id_source_state()
+    update_worker_control_state()
     for variable in (output_var, facesearch_dir_var, start_id_var, workers_var, album_photo_limit_var, friend_depth_var):
         variable.trace_add("write", lambda *_args: save_gui_settings())
 
@@ -3684,6 +3800,10 @@ def main():
         running["value"] = active
         start_button.configure(state="disabled" if active else "normal")
         stop_button.configure(state="normal" if active else "disabled")
+        auto_workers_check.configure(state="disabled" if active else "normal")
+        workers_spinbox.configure(
+            state="disabled" if active or auto_workers_var.get() else "normal"
+        )
 
     def start_job():
         try:
@@ -3726,6 +3846,7 @@ def main():
             return
 
         reload_token_cache()
+        auto_workers = bool(auto_workers_var.get())
         auto_import = bool(auto_import_var.get())
         create_crop_files = bool(create_crop_var.get())
         build_index_after = bool(build_index_var.get())
@@ -3741,6 +3862,10 @@ def main():
         progress_bar.configure(mode="indeterminate")
         progress_bar.start(10)
         progress_text_var.set("Подготовка задания…")
+        workers_status_var.set(
+            "Подготовка автоматической подстройки потоков…"
+            if auto_workers else f"Ручной режим: фиксировано {workers} поток(ов)"
+        )
         status_var.set("Задание выполняется в фоновом потоке; интерфейс остаётся доступен.")
         log_text.configure(state="normal")
         log_text.insert("end", "\n" + "=" * 68 + "\nНовое задание\n")
@@ -3779,6 +3904,7 @@ def main():
                     source_mode=source_mode,
                     specific_ids=raw_specific_ids,
                     friend_depth=friend_depth,
+                    auto_workers=auto_workers,
                 )
                 if source_mode == "counter":
                     events.put(("start_id_updated", next_start_id))
@@ -3876,6 +4002,8 @@ def main():
                     start_id_var.set(str(event[1]))
                 elif kind == "status":
                     status_var.set(event[1])
+                elif kind == "workers_status":
+                    workers_status_var.set(str(event[1] or ""))
                 elif kind == "token_check_progress":
                     auth_status_var.set(event[3])
                 elif kind == "db_test_finished":
@@ -3937,6 +4065,7 @@ def main():
                     progress_bar.stop()
                     progress_bar.configure(mode="determinate")
                     set_running(False)
+                    workers_status_var.set("")
                     progress_text_var.set("Задание остановлено" if event[1] else "Задание завершено")
                     status_var.set(
                         "Остановлено. Все начатые загрузки, импорты в БД и очистка обработанных файлов завершены."
