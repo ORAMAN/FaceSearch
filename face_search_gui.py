@@ -2584,6 +2584,8 @@ def process_local_image(
     store_metadata: bool = True,
     clear_metadata: bool = False,
     source_root: Path | str | None = None,
+    delete_on_no_faces: bool = False,
+    no_face_metadata_path: Path | None = None,
 ) -> dict[str, int | bool | str]:
     """Сканирует локальную фотографию без JSON-метаданных.
 
@@ -2737,8 +2739,12 @@ def process_local_image(
         # Отсутствие лиц — штатный завершённый результат. При включённом чекбоксе
         # удаляем обработанный файл и очищаем ставшие пустыми вложенные каталоги.
         deleted = (
-            _delete_processed_source_files(image_path, stop_at=source_root)
-            if delete_source else False
+            _delete_processed_source_files(
+                image_path,
+                no_face_metadata_path if delete_on_no_faces else None,
+                stop_at=source_root,
+            )
+            if delete_source or delete_on_no_faces else False
         )
         return {
             "faces": 0,
@@ -6843,10 +6849,10 @@ class FaceSearchGUI:
             confirmed = messagebox.askyesno(
                 "Подтверждение удаления исходников",
                 "Включено удаление исходников.\n\n"
-                "После штатной обработки будут удаляться исходные изображения и их одноимённые JSON, "
-                "в том числе если лицо не найдено. Для локальных изображений без JSON действует то же правило.\n\n"
-                "При ошибке чтения изображения, импорта или базы исходники сохраняются. Если создание CROP выключено "
-                "и исходник с лицами нужен для восстановления отсутствующих CROP, он также будет сохранён.\n\n"
+                "Если лицо не найдено, после штатной обработки удаляются изображение и его одноимённый JSON "
+                "(если он есть), в том числе у локальных изображений без стандартных метаданных.\n\n"
+                "При ошибке чтения изображения, импорта или базы исходники сохраняются. Изображения с лицами при "
+                "выключенном создании CROP могут сохраняться для последующего восстановления CROP.\n\n"
                 "Продолжить сканирование?",
                 parent=self.root,
             )
@@ -7289,6 +7295,8 @@ class FaceSearchGUI:
                                 store_metadata=False,
                                 clear_metadata=True,
                                 source_root=directory,
+                                delete_on_no_faces=delete_processed,
+                                no_face_metadata_path=json_path,
                             )
                             return path, int(result["faces"]), None, result
 
@@ -11028,6 +11036,8 @@ def scan_directory(
                         store_metadata=False,
                         clear_metadata=True,
                         source_root=directory,
+                        delete_on_no_faces=delete_processed,
+                        no_face_metadata_path=json_path,
                     )
                 count = int(result["faces"])
                 deleted = bool(result.get("deleted"))
