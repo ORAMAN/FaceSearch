@@ -35,6 +35,7 @@ _LOADER_SHARED_DIR = str(Path(__file__).resolve().parents[1])
 if _LOADER_SHARED_DIR not in sys.path:
     sys.path.insert(0, _LOADER_SHARED_DIR)
 from ui_theme import ThemeManager, browser_window_args, place_tk_window_half
+from edit_shortcuts import install_edit_shortcuts
 
 
 BASE_URL = "https://www.instagram.com/"
@@ -1880,6 +1881,7 @@ def collect_instagram(context, status_callback, progress_callback,
 def main():
     if sync_playwright is None:
         root = tk.Tk()
+    install_edit_shortcuts(root)
         root.withdraw()
         messagebox.showerror("Playwright не установлен", "Установите зависимости через setup.bat в папке загрузчика.")
         root.destroy()
