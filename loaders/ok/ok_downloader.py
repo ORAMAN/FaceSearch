@@ -29,6 +29,7 @@ _LOADER_SHARED_DIR = str(Path(__file__).resolve().parents[1])
 if _LOADER_SHARED_DIR not in sys.path:
     sys.path.insert(0, _LOADER_SHARED_DIR)
 from ui_theme import ThemeManager, browser_window_args, place_tk_window_half
+from edit_shortcuts import install_edit_shortcuts
 
 
 START_URL = "https://ok.ru"
@@ -2356,6 +2357,7 @@ def main():
             browser_ready.set()
 
     root = tk.Tk()
+    install_edit_shortcuts(root)
     root.title("OK.ru — загрузчик фотографий и импорт FaceSearch")
     initial_paths = load_gui_paths()
     theme_manager = ThemeManager(root, initial_paths.get("theme", "light"), accent_variant="ok")
