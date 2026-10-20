@@ -2572,10 +2572,22 @@ def run_download_job(
                                             f"{image_path.parent}; {detail}."
                                         )
 
-                                    # Не считать простой возврат без исключения гарантией записи в БД.
-                                    # При нуле лиц или неясном результате исходники сохраняются для проверки;
-                                    # распознанные дубликаты считаются обработанными и очищаются по настройке.
-                                    if delete_processed_files and should_cleanup_source:
+                                    # Сохраняем исходник при новом импорте без CROP: он понадобится
+                                    # для последующего восстановления CROP. Если источник уже есть в БД,
+                                    # CROP восстановлены или импортёр подтвердил дубликат, исходник можно удалить.
+                                    crop_files_enabled = bool(getattr(importer, "create_crop_files", True))
+                                    existing_crop_confirmed = (
+                                        known_existing_source
+                                        or restored_crops > 0
+                                        or (
+                                            detected_faces is not None
+                                            and detected_faces > 0
+                                            and new_records == 0
+                                            and updated_records == 0
+                                        )
+                                    )
+                                    can_cleanup_without_crops = crop_files_enabled or existing_crop_confirmed
+                                    if delete_processed_files and should_cleanup_source and can_cleanup_without_crops:
                                         try:
                                             # Сначала удаляем JSON: если удаление метаданных не удастся,
                                             # изображение останется для повторного импорта/проверки.
@@ -2585,7 +2597,7 @@ def run_download_job(
                                             print(
                                                 f"[CLEANUP] ID {downloaded_uid}: удалена импортированная пара "
                                                 f"{image_path.name} после успешного результата БД/подтверждённого "
-                                                "пропуска уже существующего источника."
+                                                "пропуска уже существующего источника или CROP."
                                             )
                                         except Exception as exc:
                                             cleanup_errors_total += 1
@@ -2593,10 +2605,16 @@ def run_download_job(
                                                 f"[CLEANUP-ERROR] ID {downloaded_uid}: импорт завершился, "
                                                 f"но не удалось удалить {image_path.name} и/или JSON: {exc}"
                                             )
+                                    elif delete_processed_files and should_cleanup_source and not crop_files_enabled:
+                                        print(
+                                            f"[CLEANUP-SKIP] ID {downloaded_uid}: исходники {image_path.name} сохранены, "
+                                            "поскольку создание CROP отключено, а наличие CROP для нового импорта "
+                                            "не подтверждено."
+                                        )
                                     elif delete_processed_files:
                                         print(
                                             f"[CLEANUP-SKIP] ID {downloaded_uid}: пара {image_path.name} не удалена, "
-                                            "поскольку новая/обновлённая запись не подтверждена или результат импортёра неясен."
+                                            "поскольку результат импортёра не подтвердил успешную обработку."
                                         )
                                 else:
                                     saved_for_user += 1
