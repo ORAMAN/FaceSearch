@@ -1,5 +1,4 @@
-# VK ID: OAuth 2.1 Authorization Code Flow с PKCE.
-# Старые access_token по-прежнему можно вставить вручную.
+# Загрузчик аватарок VK: ручное добавление пользовательских API-токенов v1.
 
 import os
 import re
@@ -12,28 +11,22 @@ import webbrowser
 import importlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import urlparse, urlsplit, parse_qs, unquote
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 import requests
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-try:
-    from playwright.sync_api import sync_playwright
-except ImportError:
-    sync_playwright = None
-
 # === ПАРАМЕТРЫ === #
 APP_DIR = Path(__file__).resolve().parent
 VK_TOKEN_FILE = APP_DIR / "vk_token.txt"
+VK_FAVICON_URL = "https://vk.ru/favicon.ico"
+VK_FAVICON_PATH = APP_DIR / "vk_favicon.ico"
 LOG_FILE = APP_DIR / "Log.txt"
 DEFAULT_OUTPUT_DIR = APP_DIR / "VK_Avatars_Downloads"
 APP_SETTINGS_PATH = APP_DIR / "vk_abatars_settings.json"
 DEFAULT_FACESEARCH_DIR = Path(r"C:\FaceSearch")
-DEFAULT_BROWSER_PROFILE_DIR = APP_DIR.parent / "vk" / "VK_Browser_Profile"
-VK_SERVICE_TOKEN_FILE = APP_DIR.parent / "vk" / "vk_service_token.txt"
-VK_SILENT_TOKEN_FILE = APP_DIR.parent / "vk" / "vk_silent_token.json"
 _META_RESOLUTION = "_url_resolution"
 _META_VERSION = "_resolution_version"
 _META_DUPLICATE_OF = "_duplicate_of"
@@ -41,28 +34,12 @@ _META_DUPLICATE_REASON = "_duplicate_reason"
 API_VERSION = "5.199"
 BASE_URL = "https://api.vk.ru/method"
 FRIENDS_PAGE_SIZE = 5000
-USER_BATCH_SIZE = 1000  # users.get поддерживает не более 1000 ID в запросе.
-AUTH_STOP_REQUESTED = threading.Event()
-# ID пользователей, чьи профили уже заведены в активной БД FaceSearch.
+USER_BATCH_SIZE = 1000
 EXISTING_PROFILE_IDS: set[int] = set()
 EXISTING_PROFILE_IDS_LOCK = threading.Lock()
-_AUTH_THREAD = None
-
-# VK ID flow для загрузчика: silent_token -> auth.exchangeSilentAuthToken.
-# OAuth 2.1 Authorization Code Flow выдаёт vk2.a токены, несовместимые с
-# используемыми загрузчиком методами photos.get/friends.get.
-VKID_CLIENT_ID = "8101047"
-VKID_REDIRECT_URI = "https://oauth.vk.ru/blank.html"
-VKID_SILENT_AUTH_URL = (
-    "https://id.vk.ru/auth?return_auth_hash=1f3f97d3e974a20acf"
-    "&redirect_uri=https%3A%2F%2Foauth.vk.ru%2Fblank.html"
-    "&redirect_uri_hash=96188d4fed90d04a34&force_hash=1&app_id=8101047"
-    "&response_type=token&code_challenge=&code_challenge_method=&scope=327684&state="
-)
 UI_EVENTS = None
 STOP_REQUESTED = threading.Event()
 _TOKEN_FILE_LOCK = threading.Lock()
-# === ========= === #
 
 # ============================================================
 # ACCESS_TOKENS
@@ -75,7 +52,7 @@ _TOKEN_LOCK = threading.Lock()
 
 
 def _read_all_token_file() -> list[str]:
-    """Читает все сохранённые строки токенов, включая несовместимые токены VK ID."""
+    """Читает все непустые строки файла, чтобы избежать повторного добавления токенов."""
     if not VK_TOKEN_FILE.exists():
         return []
     tokens = []
@@ -89,15 +66,18 @@ def _read_all_token_file() -> list[str]:
     return tokens
 
 
+def _is_v1_token(token: str) -> bool:
+    """Принимает пользовательские access_token v1 с префиксом vk1.a."""
+    return (token or "").strip().lower().startswith("vk1.a")
+
+
 def _read_token_file() -> list[str]:
-    """Возвращает токены, пригодные для legacy-методов загрузчика (photos.get/friends.get)."""
-    # vk2.a.* — токены нового OAuth VK ID. Они могут успешно проходить вход,
-    # но не подходят для требуемых загрузчику методов VK API.
-    return [token for token in _read_all_token_file() if not token.lower().startswith("vk2.")]
+    """Возвращает только токены v1, совместимые с используемыми методами VK API."""
+    return [token for token in _read_all_token_file() if _is_v1_token(token)]
 
 
 def reload_token_cache() -> int:
-    """Сбрасывает кэш токенов, например после добавления нового токена."""
+    """Перечитывает список токенов из vk_token.txt."""
     global _TOKEN_LIST, count_tokens, current_token
     tokens = _read_token_file()
     with _TOKEN_LOCK:
@@ -108,14 +88,15 @@ def reload_token_cache() -> int:
 
 
 def _load_tokens_if_needed():
-    """Загружает токены из файла только тогда, когда кэш пуст."""
+    """Загружает кэш токенов, если он пуст."""
     global _TOKEN_LIST, count_tokens, current_token
     if _TOKEN_LIST:
         return
     tokens = _read_token_file()
     if not tokens:
         raise RuntimeError(
-            f"В {VK_TOKEN_FILE.name} нет токенов. Добавьте токен через кнопку авторизации."
+            f"В {VK_TOKEN_FILE.name} нет токенов v1 формата vk1.a… . "
+            "Добавьте рабочий токен через кнопку «Добавить токен v1»."
         )
     with _TOKEN_LOCK:
         if not _TOKEN_LIST:
@@ -125,7 +106,7 @@ def _load_tokens_if_needed():
 
 
 def reload_tokens():
-    """Возвращает следующий токен из vk_token.txt по кругу."""
+    """Возвращает следующий сохранённый токен v1 по кругу."""
     global current_token
     _load_tokens_if_needed()
     with _TOKEN_LOCK:
@@ -134,134 +115,16 @@ def reload_tokens():
         return token
 
 
-def extract_vk_auth_payload(value: str) -> dict:
-    """Разбирает callback VK ID query/fragment, включая legacy #payload={...}."""
-    value = (value or "").strip()
-    if not value:
-        return {}
-
-    try:
-        parsed = urlsplit(value)
-        query = parse_qs(parsed.query, keep_blank_values=True)
-
-        # Современный VK ID может вернуть ошибку в query-параметрах.
-        if query.get("error"):
-            return {
-                "type": "authorization_error",
-                "error": (query.get("error") or [""])[0],
-                "error_description": (query.get("error_description") or [""])[0],
-            }
-
-        code = (query.get("code") or [""])[0].strip()
-        callback_type = str((query.get("type") or [""])[0]).strip().lower()
-        if code:
-            if callback_type == "code_v2" and code.lower().startswith("vk2."):
-                return {
-                    "type": "access_token",
-                    "access_token": code,
-                    "token_format": "code_v2",
-                }
-            return {
-                "type": "authorization_code",
-                "code": code,
-                "state": (query.get("state") or [""])[0],
-                "device_id": (query.get("device_id") or [""])[0],
-                "code_format": callback_type,
-            }
-
-        fragment = parse_qs(parsed.fragment, keep_blank_values=True)
-
-        # Некоторые callbacks помещают payload во fragment, другие — в query.
-        # Берём сырую строку параметра и используем unquote, а не unquote_plus:
-        # символ '+' в JSON-поле не должен превращаться в пробел.
-        raw_payload = None
-        for component in (parsed.fragment, parsed.query):
-            for part in component.split("&"):
-                key, separator, raw_value = part.partition("=")
-                if separator and unquote(key) == "payload":
-                    raw_payload = unquote(raw_value)
-                    break
-            if raw_payload is not None:
-                break
-
-        if raw_payload is not None:
-            candidate = raw_payload
-            last_error = None
-            for _ in range(3):
-                try:
-                    data = json.loads(candidate)
-                    if isinstance(data, dict):
-                        return data
-                    return {
-                        "type": "authorization_error",
-                        "error": "invalid_payload",
-                        "error_description": "VK ID callback payload имеет неожиданный формат.",
-                    }
-                except (json.JSONDecodeError, TypeError) as exc:
-                    last_error = exc
-                    decoded = unquote(candidate)
-                    if decoded == candidate:
-                        break
-                    candidate = decoded
-            return {
-                "type": "authorization_error",
-                "error": "invalid_payload",
-                "error_description": (
-                    "Callback VK ID содержит параметр payload, но JSON не удалось разобрать "
-                    f"({type(last_error).__name__ if last_error else 'ошибка формата'})."
-                ),
-            }
-
-        # Старый implicit flow: #access_token=...&user_id=...
-        for params in (fragment, query):
-            token = (params.get("access_token") or [""])[0].strip()
-            if token:
-                return {
-                    "type": "access_token",
-                    "access_token": token,
-                    "user_id": (params.get("user_id") or [""])[0],
-                }
-    except Exception as exc:
-        return {
-            "type": "authorization_error",
-            "error": "callback_parse_error",
-            "error_description": f"Не удалось разобрать URL ответа VK ID ({type(exc).__name__}).",
-        }
-
-    match = re.search(r"(?:^|[&#?\s])access_token(?:_[^=&#\s]+)?=([^&#\s]+)", value)
-    if match:
-        return {"type": "access_token", "access_token": unquote(match.group(1)).strip()}
-
-    # Ручной ввод ранее полученного токена по-прежнему поддерживается.
-    if " " not in value and "://" not in value and "access_token=" not in value:
-        return {"type": "access_token", "access_token": value}
-    return {}
-
-
-def extract_access_token(value: str) -> str:
-    """Извлекает API access_token; silent_token VK ID нельзя использовать напрямую."""
-    payload = extract_vk_auth_payload(value)
-    token_type = str(payload.get("type") or "").lower()
-    if token_type == "silent_token":
-        return ""
-    token = payload.get("access_token")
-    if token:
-        return str(token).strip()
-    if token_type == "access_token":
-        return str(payload.get("token") or "").strip()
-    return ""
-
 def validate_access_token(token: str) -> str:
-    """Проверяет совместимый API-токен через users.get и возвращает имя пользователя."""
+    """Проверяет пользовательский API-токен v1 через users.get и возвращает имя владельца."""
     token = (token or "").strip()
-    if token.lower().startswith("vk2."):
+    if not _is_v1_token(token):
         raise ValueError(
-            "Получен токен нового формата VK ID (vk2.a.…). Для загрузчика он не подходит: "
-            "методы photos.get и friends.get требуют совместимый пользовательский API-токен. "
-            "Токен vk2 нельзя превратить в vk1 заменой префикса. Он не сохранён. "
-            "Используйте ранее полученный рабочий vk1.a токен либо другой поддерживаемый "
-            "VK API OAuth-поток, который выдаёт токен для этих методов."
+            "Поддерживаются только пользовательские API-токены v1 с префиксом vk1.a… . "
+            "Вставьте сам токен, без URL и кода авторизации."
         )
+    if any(character.isspace() for character in token):
+        raise ValueError("Токен не должен содержать пробелы или переносы строк.")
     response = requests.get(
         f"{BASE_URL}/users.get",
         params={"access_token": token, "v": API_VERSION},
@@ -283,15 +146,12 @@ def validate_access_token(token: str) -> str:
 
 
 def save_access_token(token: str) -> tuple[bool, int]:
-    """Добавляет совместимый API-токен в vk_token.txt, не создавая повторов."""
+    """Добавляет только токен v1 в vk_token.txt и не создаёт дубликатов."""
     token = (token or "").strip()
-    if not token:
-        raise ValueError("Токен пустой.")
-    if token.lower().startswith("vk2."):
-        raise ValueError(
-            "Токен vk2.a… не подходит для photos.get/friends.get и не может быть сохранён "
-            "как рабочий токен загрузчика. Нужен совместимый пользовательский API-токен."
-        )
+    if not _is_v1_token(token):
+        raise ValueError("Можно сохранить только API-токен v1 с префиксом vk1.a… .")
+    if any(character.isspace() for character in token):
+        raise ValueError("Токен не должен содержать пробелы или переносы строк.")
     with _TOKEN_FILE_LOCK:
         existing_all = _read_all_token_file()
         if token in existing_all:
@@ -304,547 +164,27 @@ def save_access_token(token: str) -> tuple[bool, int]:
     return True, count
 
 
-def read_service_token() -> str:
-    """Читает service token из переменной окружения либо локального файла."""
-    value = os.environ.get("VK_SERVICE_TOKEN", "").strip()
-    if value:
-        return value
-    try:
-        if VK_SERVICE_TOKEN_FILE.is_file():
-            return VK_SERVICE_TOKEN_FILE.read_text(encoding="utf-8-sig").strip()
-    except OSError:
-        pass
-    return ""
-
-
-def default_chrome_executable() -> str:
-    """Находит стандартную установку Chrome в Windows."""
-    candidates = [
-        Path(os.environ.get("PROGRAMFILES") or "C:/Program Files") / "Google" / "Chrome" / "Application" / "chrome.exe",
-        Path(os.environ.get("PROGRAMFILES(X86)") or "C:/Program Files (x86)") / "Google" / "Chrome" / "Application" / "chrome.exe",
-        Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "Google" / "Chrome" / "Application" / "chrome.exe",
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return str(candidate)
-    return str(candidates[0])
-
-
-def _save_pending_silent_token(payload: dict) -> None:
-    """Сохраняет только необходимые поля silent_token для последующего обмена."""
-    user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
-    safe_payload = {
-        "type": "silent_token",
-        "token": str(payload.get("token") or ""),
-        "uuid": str(payload.get("uuid") or ""),
-        "hash": str(payload.get("hash") or ""),
-        "user_id": user.get("id"),
-        "first_name": user.get("first_name", ""),
-        "last_name": user.get("last_name", ""),
-        "ttl": max(1, int(payload.get("ttl") or 600)),
-        "saved_at": int(time.time()),
-    }
-    VK_SILENT_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = VK_SILENT_TOKEN_FILE.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(safe_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(VK_SILENT_TOKEN_FILE)
-
-
-def load_pending_silent_token() -> dict:
-    """Загружает silent_token, сохранённый после автоматического браузерного входа."""
-    if not VK_SILENT_TOKEN_FILE.is_file():
-        raise FileNotFoundError(
-            f"Файл {VK_SILENT_TOKEN_FILE.name} не найден. Сначала выполните вход VK ID через Chrome."
-        )
-    payload = json.loads(VK_SILENT_TOKEN_FILE.read_text(encoding="utf-8-sig"))
-    if not isinstance(payload, dict) or not payload.get("token"):
-        raise ValueError(f"В {VK_SILENT_TOKEN_FILE.name} нет корректного silent_token.")
-    saved_at = int(payload.get("saved_at") or 0)
-    ttl = max(1, int(payload.get("ttl") or 600))
-    if not saved_at or time.time() - saved_at > ttl:
-        try:
-            VK_SILENT_TOKEN_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise ValueError(
-            "Срок действия silent_token истёк. Нажмите «Войти через Chrome автоматически» и выполните вход повторно."
-        )
-    return payload
-
-
-def exchange_silent_token(silent_token: str, service_token: str, uuid: str = "") -> dict:
-    """Обменивает VK ID silent_token на API access_token с помощью service token."""
-    if not silent_token:
-        raise ValueError("VK ID не вернул silent_token.")
-    if not service_token:
-        raise ValueError(
-            "Не указан service token приложения. Silent token VK ID не является API access_token."
-        )
-    response = requests.post(
-        f"{BASE_URL}/auth.exchangeSilentAuthToken",
-        data={
-            "v": API_VERSION,
-            "token": silent_token,
-            "uuid": uuid or "",
-            "access_token": service_token,
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    data = response.json()
-    error = data.get("error")
-    if error:
-        raise RuntimeError(
-            "VK не смог обменять silent_token: "
-            f"{error.get('error_msg', error)} (код {error.get('error_code', '?')}). "
-            "Проверьте service token и права приложения."
-        )
-    result = data.get("response") or {}
-    if not isinstance(result, dict) or not result.get("access_token"):
-        raise RuntimeError(f"VK не вернул access_token при обмене: {data}")
-    return result
-
-
-def _browser_session_from_context(context) -> tuple[requests.Session, int]:
-    """Создаёт requests-сессию с cookies авторизованного браузерного контекста."""
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/150.0.0.0 Safari/537.36"
-        )
-    })
-    copied = 0
-    for cookie in context.cookies():
-        name = str(cookie.get("name") or "").strip()
-        value = cookie.get("value")
-        if not name or value is None:
-            continue
-        options = {
-            "path": str(cookie.get("path") or "/"),
-            "secure": bool(cookie.get("secure", False)),
-        }
-        domain = cookie.get("domain")
-        if domain:
-            options["domain"] = str(domain)
-        session.cookies.set(name, str(value), **options)
-        copied += 1
-    return session, copied
-
-
-def _extract_access_token_from_oauth_url(url: str) -> str:
-    """Извлекает access_token из URL OAuth, включая вложенный authorize_url."""
-    candidates = [url]
-    parsed = urlsplit(url or "")
-    query = parse_qs(parsed.query, keep_blank_values=True)
-    nested = (query.get("authorize_url") or [""])[0]
-    if nested:
-        if nested.startswith("https%3A") or "%3A%2F%2F" in nested:
-            nested = unquote(nested)
-        candidates.insert(0, nested)
-
-    for candidate in candidates:
-        parsed_candidate = urlsplit(candidate)
-        for params in (
-            parse_qs(parsed_candidate.query, keep_blank_values=True),
-            parse_qs(parsed_candidate.fragment, keep_blank_values=True),
-        ):
-            token = str((params.get("access_token") or [""])[0]).strip()
-            if token:
-                return token
-    return ""
-
-
-def exchange_browser_session_for_legacy_user_token(
-    context, payload: dict | None = None, app_id: str = VKID_CLIENT_ID, scope: int = 327684
-) -> str:
-    """Получает legacy user API token из авторизованной браузерной сессии.
-
-    Алгоритм основан на рабочем auth-потоке vk_api: oauth.vk.ru/authorize,
-    извлечение data.hash.return_auth из window.init, connect_internal и
-    auth.getOauthToken. Callback silent_token используется как сигнал, что
-    пользователь завершил подтверждение, но его hash не считается return_auth_hash.
-    """
-    session, cookie_count = _browser_session_from_context(context)
-    if cookie_count == 0:
-        raise RuntimeError(
-            "VK вернул страницу callback, но браузер не передал cookies в обмен. "
-            "Повторите вход через окно Chrome, открытое загрузчиком."
-        )
-
-    response = session.get(
-        "https://oauth.vk.ru/authorize",
-        params={
-            "client_id": app_id,
-            "scope": scope,
-            "response_type": "token",
-        },
-        timeout=30,
-        allow_redirects=True,
-    )
-    response.raise_for_status()
-    if "act=blocked" in response.url:
-        raise RuntimeError("VK заблокировал legacy OAuth для этого приложения или аккаунта.")
-
-    token = _extract_access_token_from_oauth_url(response.url)
-    if token:
-        if token.lower().startswith("vk2."):
-            raise RuntimeError(
-                "OAuth вернул токен vk2.a…, несовместимый с photos.get/friends.get. "
-                "VK не выдал legacy user API token для этого приложения."
-            )
-        return token
-
-    # В некоторых ответах OAuth сначала отдаёт URL, на который перенаправляет JS.
-    redirect_match = re.search(r'location\.href\s*=\s*"([^"]+)"\s*\+\s*addr;', response.text)
-    if redirect_match:
-        redirect_url = redirect_match.group(1)
-        if not redirect_url.startswith(("http://", "https://")):
-            from urllib.parse import urljoin
-            redirect_url = urljoin(response.url, redirect_url)
-        response = session.get(redirect_url, timeout=30, allow_redirects=True)
-        response.raise_for_status()
-        token = _extract_access_token_from_oauth_url(response.url)
-        if token:
-            if token.lower().startswith("vk2."):
-                raise RuntimeError("VK вернул vk2-токен вместо legacy user API token.")
-            return token
-
-    # Рабочий legacy-поток возвращает hash внутри window.init, именно
-    # data.hash.return_auth (а не поле hash из payload silent_token).
-    return_auth_hash = ""
-    auth_json_match = re.search(r"window\.init\s*=\s*(\{.*?\});", response.text, re.DOTALL)
-    if auth_json_match:
-        try:
-            auth_json = json.loads(auth_json_match.group(1))
-            return_auth_hash = str(
-                (((auth_json.get("data") or {}).get("hash") or {}).get("return_auth")) or ""
-            ).strip()
-        except (json.JSONDecodeError, AttributeError, TypeError):
-            return_auth_hash = ""
-
-    # Fallback для callback-реализаций, где поле hash действительно содержит return_auth.
-    # Основной путь выше использует значение из OAuth HTML, как в vk_api.
-    if not return_auth_hash and isinstance(payload, dict):
-        return_auth_hash = str(payload.get("hash") or "").strip()
-
-    if not return_auth_hash:
-        location = urlsplit(response.url)
-        raise RuntimeError(
-            "VK не выдал return_auth_hash в ответе oauth.vk.ru/authorize. "
-            f"Ответ: {location.scheme}://{location.netloc}{location.path}; "
-            "доступность legacy OAuth для приложения могла быть ограничена."
-        )
-
-    connect_response = session.post(
-        "https://login.vk.ru/?act=connect_internal",
-        data={
-            "uuid": "",
-            "service_group": "",
-            "return_auth_hash": return_auth_hash,
-            "version": 1,
-            "app_id": app_id,
-        },
-        headers={"Origin": "https://id.vk.ru", "Referer": "https://id.vk.ru/"},
-        timeout=30,
-    )
-    connect_response.raise_for_status()
-    try:
-        connect_data = connect_response.json()
-    except ValueError as exc:
-        raise RuntimeError("VK вернул некорректный JSON из connect_internal.") from exc
-
-    if not isinstance(connect_data, dict) or connect_data.get("type") != "okay":
-        reason = ""
-        if isinstance(connect_data, dict):
-            reason = str(connect_data.get("error") or connect_data.get("message") or connect_data.get("type") or "")
-        raise RuntimeError(
-            "VK отклонил connect_internal."
-            + (f" Ответ VK: {reason}" if reason else "")
-        )
-
-    data = connect_data.get("data") or {}
-    temporary_token = str(data.get("access_token") or "").strip()
-    auth_user_hash = str(data.get("auth_user_hash") or "").strip()
-    if not temporary_token or not auth_user_hash:
-        raise RuntimeError("connect_internal не вернул access_token/auth_user_hash.")
-
-    oauth_response = session.post(
-        "https://api.vk.ru/method/auth.getOauthToken",
-        data={
-            "hash": return_auth_hash,
-            "auth_user_hash": auth_user_hash,
-            "app_id": app_id,
-            "client_id": app_id,
-            "scope": scope,
-            "access_token": temporary_token,
-            "is_seamless_auth": 1,
-            "v": "5.207",
-        },
-        headers={"Origin": "https://id.vk.ru"},
-        timeout=30,
-    )
-    oauth_response.raise_for_status()
-    try:
-        oauth_data = oauth_response.json()
-    except ValueError as exc:
-        raise RuntimeError("VK вернул некорректный JSON из auth.getOauthToken.") from exc
-
-    error = oauth_data.get("error") if isinstance(oauth_data, dict) else None
-    if error:
-        raise RuntimeError(
-            "VK не выдал пользовательский API-токен: "
-            f"{error.get('error_msg', error)} (код {error.get('error_code', '?')})."
-        )
-    result = oauth_data.get("response") if isinstance(oauth_data, dict) else None
-    if isinstance(result, str):
-        token = result.strip()
-    elif isinstance(result, dict):
-        token = str(result.get("access_token") or "").strip()
-    else:
-        token = ""
-    if not token:
-        raise RuntimeError("VK не вернул access_token из auth.getOauthToken.")
-    if token.lower().startswith("vk2."):
-        raise RuntimeError(
-            "VK снова вернул токен vk2.a…, несовместимый с photos.get/friends.get."
-        )
-    return token
-
-
-def _validate_and_save_access_token(token: str) -> tuple[str, bool, int]:
-    """Проверяет API access_token и сохраняет его в общий список токенов."""
-    user_name = validate_access_token(token)
-    added, count = save_access_token(token)
-    return user_name, added, count
-
-
-def _exchange_and_store_pending_token(service_token: str) -> None:
-    """Повторно обменивает сохранённый silent_token в фоновом потоке."""
-    try:
-        pending = load_pending_silent_token()
-        result = exchange_silent_token(
-            str(pending.get("token") or ""),
-            service_token,
-            str(pending.get("uuid") or ""),
-        )
-        user_name, added, count = _validate_and_save_access_token(str(result.get("access_token") or ""))
-        try:
-            VK_SILENT_TOKEN_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
-        post_ui_event("token_saved", True, user_name, added, count, "")
-        post_ui_event("auth_status", f"Авторизация VK завершена: {user_name}. API access_token сохранён.")
-    except Exception as exc:
-        post_ui_event("auth_error", str(exc))
-
-
-def _browser_auth_worker(profile_directory: str, chrome_executable: str, service_token: str = "") -> None:
-    """Получает VK ID silent_token и обменивает его на API access_token для загрузчика."""
-    if sync_playwright is None:
-        post_ui_event(
-            "auth_error",
-            "Для автоматической авторизации установите Playwright: python -m pip install playwright.",
-        )
-        return
-
-    context = None
-    try:
-        profile_path = Path(profile_directory).expanduser()
-        profile_path.mkdir(parents=True, exist_ok=True)
-        executable = Path(chrome_executable).expanduser()
-        if not executable.is_file():
-            raise FileNotFoundError(f"Не найден chrome.exe: {executable}")
-
-        post_ui_event(
-            "auth_status",
-            "Открываю VK ID; после возврата blank.html получу API-токен через OAuth-сессию…",
-        )
-        with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(profile_path.resolve()),
-                executable_path=str(executable.resolve()),
-                headless=False,
-                viewport=None,
-                no_viewport=True,
-                locale="ru-RU",
-                accept_downloads=True,
-                args=["--start-maximized", "--window-size=1920,1080", "--window-position=0,0"],
-            )
-            page = context.pages[0] if context.pages else context.new_page()
-            try:
-                page.goto(VKID_SILENT_AUTH_URL, wait_until="domcontentloaded", timeout=45000)
-            except Exception:
-                # VK ID может перенаправить на blank.html до истечения стандартного timeout.
-                pass
-
-            deadline = time.monotonic() + 600
-            last_callback_status = None
-            last_seen_urls = {}
-            while not AUTH_STOP_REQUESTED.is_set() and time.monotonic() < deadline:
-                pages = list(context.pages)
-                if not pages:
-                    if last_callback_status != "pages_missing":
-                        post_ui_event(
-                            "auth_status",
-                            "Chrome запущен, но Playwright сейчас не видит ни одной вкладки. "
-                            "Закройте авторизацию и запустите её повторно из загрузчика.",
-                        )
-                        last_callback_status = "pages_missing"
-                    time.sleep(0.25)
-                    continue
-
-                for page_index, current_page in enumerate(pages):
-                    current_url = current_page.url or ""
-                    parsed_current = urlsplit(current_url)
-                    current_location = f"{parsed_current.scheme}://{parsed_current.netloc}{parsed_current.path}"
-
-                    # Не ждём, пока fragment #payload будет распознан. Сам callback
-                    # blank.html означает, что VK завершил экран согласия; дальше
-                    # токен запрашивается через cookies авторизованного браузера.
-                    is_vk_callback = (
-                        parsed_current.netloc.lower() in {"oauth.vk.ru", "oauth.vk.com"}
-                        and parsed_current.path.rstrip("/") == "/blank.html"
-                    )
-                    if is_vk_callback:
-                        if last_seen_urls.get(page_index) != current_url:
-                            last_seen_urls[page_index] = current_url
-                            print(
-                                f"[VK AUTH] Callback обнаружен: {current_location}. "
-                                "Запускаю получение legacy user API token через OAuth-сессию."
-                            )
-                        post_ui_event(
-                            "auth_status",
-                            "VK ID вернул callback. Получаю пользовательский API-токен через OAuth-сессию…",
-                        )
-                        payload = extract_vk_auth_payload(current_url)
-                        if str(payload.get("type") or "").lower() == "authorization_error":
-                            # Невалидный payload не блокирует попытку, если cookies уже авторизованы.
-                            print("[VK AUTH] Payload callback не распознан; продолжаю обмен по cookies браузера.")
-                            payload = {}
-                        token = exchange_browser_session_for_legacy_user_token(context, payload)
-                        user_name, added, count = _validate_and_save_access_token(token)
-                        try:
-                            VK_SILENT_TOKEN_FILE.unlink(missing_ok=True)
-                        except OSError:
-                            pass
-                        post_ui_event("token_saved", True, user_name, added, count, "")
-                        post_ui_event(
-                            "auth_status",
-                            f"Авторизация VK завершена: {user_name}. Совместимый API access_token сохранён.",
-                        )
-                        return
-
-                    payload = extract_vk_auth_payload(current_url)
-                    if last_seen_urls.get(page_index) != current_url:
-                        last_seen_urls[page_index] = current_url
-                        fragment_keys = sorted(
-                            key for key in parse_qs(parsed_current.fragment, keep_blank_values=True).keys()
-                        )
-                        query_keys = sorted(
-                            key for key in parse_qs(parsed_current.query, keep_blank_values=True).keys()
-                        )
-                        payload_type_for_log = str(payload.get("type") or "") if payload else "unparsed"
-                        # Намеренно не записываем значения URL, token, hash или payload в журнал.
-                        diagnostic = (
-                            f"[VK AUTH] Tab {page_index + 1}: {current_location}; "
-                            f"query_keys={query_keys}; fragment_keys={fragment_keys}; "
-                            f"parsed_type={payload_type_for_log or 'none'}"
-                        )
-                        print(diagnostic)
-                        if "blank.html" in parsed_current.path and "payload" in (
-                            fragment_keys + query_keys
-                        ) and payload.get("type") == "authorization_error":
-                            raise RuntimeError(str(payload.get("error_description") or "Не удалось разобрать payload VK ID."))
-
-                    if not payload:
-                        if (
-                            parsed_current.netloc.lower() in {"oauth.vk.ru", "oauth.vk.com"}
-                            and parsed_current.path.rstrip("/") == "/blank.html"
-                        ):
-                            callback_status = (
-                                "VK открыл blank.html, но URL не содержит распознанного payload/code. "
-                                "В журнал добавлен безопасный диагноз без токена: проверьте строку [VK AUTH]."
-                            )
-                            if last_callback_status != callback_status:
-                                post_ui_event("auth_status", callback_status)
-                                last_callback_status = callback_status
-                        continue
-
-                    payload_type = str(payload.get("type") or "").lower()
-                    if payload_type == "authorization_error":
-                        description = payload.get("error_description") or payload.get("error") or "авторизация отклонена"
-                        raise RuntimeError(f"VK ID не завершил авторизацию: {description}")
-
-                    if payload_type == "silent_token":
-                        if not payload.get("token"):
-                            raise RuntimeError("VK ID вернул payload silent_token без поля token.")
-                        if int(payload.get("auth") or 0) != 1:
-                            raise RuntimeError("VK ID не подтвердил успешную авторизацию (auth != 1).")
-
-                        _save_pending_silent_token(payload)
-                        post_ui_event(
-                            "auth_status",
-                            "VK ID подтвердил вход. Получаю пользовательский API-токен через браузерную сессию…",
-                        )
-                        token = exchange_browser_session_for_legacy_user_token(context, payload)
-                        user_name, added, count = _validate_and_save_access_token(token)
-                        try:
-                            VK_SILENT_TOKEN_FILE.unlink(missing_ok=True)
-                        except OSError:
-                            pass
-                        post_ui_event("token_saved", True, user_name, added, count, "")
-                        post_ui_event(
-                            "auth_status",
-                            f"Авторизация VK завершена: {user_name}. Совместимый API access_token сохранён.",
-                        )
-                        return
-
-                    token = str(payload.get("access_token") or "")
-                    if token:
-                        if token.lower().startswith("vk2."):
-                            raise RuntimeError(
-                                "VK ID вернул токен vk2.a… в параметре code (type=code_v2), а не silent_token. "
-                                "Загрузчик распознал ответ и остановил ожидание. Этот токен не поддерживает требуемые "
-                                "photos.get/friends.get (ошибка VK API 1051); обменивать его через "
-                                "auth.exchangeSilentAuthToken нельзя. Для текущего приложения VK ID не выдал "
-                                "совместимый пользовательский API-токен vk1.a…. Нужен поддерживаемый VK способ "
-                                "выдачи legacy user token или помощь поддержки VK; заменой префикса это не исправить."
-                            )
-                        user_name, added, count = _validate_and_save_access_token(token)
-                        post_ui_event("token_saved", True, user_name, added, count, "")
-                        post_ui_event("auth_status", f"Совместимый API access_token сохранён: {user_name}.")
-                        return
-
-                time.sleep(0.25)
-
-            if AUTH_STOP_REQUESTED.is_set():
-                post_ui_event("auth_status", "Ожидание авторизации остановлено.")
-            else:
-                raise RuntimeError(
-                    "За 10 минут VK ID не вернул silent_token. Возможно, старый silent-auth flow "
-                    "отключён для приложения; проверьте актуальные возможности приложения VK ID."
-                )
-    except Exception as exc:
-        post_ui_event("auth_error", f"Ошибка автоматической авторизации VK ID: {exc}")
-    finally:
-        if context is not None:
-            try:
-                context.close()
-            except Exception:
-                pass
-
-
 def post_ui_event(*event):
-    """Передаёт событие в GUI-поток, если интерфейс запущен."""
     if UI_EVENTS is not None:
         UI_EVENTS.put(event)
 
 
-# ============================================================
-# УТИЛИТЫ
-# ============================================================
+def apply_vk_window_icon(root) -> None:
+    """Загружает и кеширует иконку окна из vk.ru/favicon.ico."""
+    try:
+        if not VK_FAVICON_PATH.is_file() or VK_FAVICON_PATH.stat().st_size == 0:
+            response = requests.get(VK_FAVICON_URL, timeout=4)
+            response.raise_for_status()
+            data = response.content
+            if len(data) < 8:
+                raise ValueError("vk.ru вернул слишком короткий favicon.ico")
+            temporary = VK_FAVICON_PATH.with_suffix(".ico.tmp")
+            temporary.write_bytes(data)
+            temporary.replace(VK_FAVICON_PATH)
+        root.iconbitmap(str(VK_FAVICON_PATH))
+    except Exception:
+        # При недоступности favicon форма всё равно должна запускаться.
+        pass
 
 def sanitize_filename(name: str) -> str:
     """Очистка строки от недопустимых символов (Windows)."""
@@ -2281,6 +1621,7 @@ def main():
     UI_EVENTS = events
 
     root = tk.Tk()
+    apply_vk_window_icon(root)
     root.title("VK.ru — загрузчик аватарок")
     root.geometry("1100x960")
     root.minsize(900, 700)
@@ -2439,17 +1780,20 @@ def main():
     )
     delete_processed_check.grid(row=4, column=0, columnspan=3, sticky="w", pady=1)
 
-    auth_frame = ttk.LabelFrame(outer, text="Авторизация VK", padding=8)
+    auth_frame = ttk.LabelFrame(outer, text="Токены VK API v1", padding=8)
     auth_frame.grid(row=5, column=0, sticky="ew", pady=(0, 8))
-    auth_frame.columnconfigure(1, weight=1)
-    browser_profile_var = tk.StringVar(value=str(DEFAULT_BROWSER_PROFILE_DIR))
-    chrome_exe_var = tk.StringVar(value=default_chrome_executable())
-    service_token_var = tk.StringVar(value=read_service_token())
-    auth_status_var = tk.StringVar(value="Готово к автоматической авторизации.")
-    token_count_var = tk.StringVar(value=f"Токенов в {VK_TOKEN_FILE.name}: {len(_read_token_file())}")
-    ttk.Label(auth_frame, textvariable=token_count_var).grid(row=0, column=0, sticky="w", pady=(0, 4))
+    auth_frame.columnconfigure(0, weight=1)
+    token_count_var = tk.StringVar(value=f"Рабочих токенов v1 в {VK_TOKEN_FILE.name}: {len(_read_token_file())}")
+    auth_status_var = tk.StringVar(value="Добавляйте только пользовательские токены с префиксом vk1.a… .")
+    ttk.Label(auth_frame, textvariable=token_count_var).grid(row=0, column=0, sticky="w", pady=(0, 3))
+    ttk.Label(
+        auth_frame,
+        text="Автоматический вход через VK ID и Chrome удалён. Вставьте готовый токен v1 вручную; перед сохранением он проверяется через VK API.",
+        wraplength=980,
+    ).grid(row=1, column=0, sticky="w", pady=(0, 6))
     auth_buttons = ttk.Frame(auth_frame)
-    auth_buttons.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+    auth_buttons.grid(row=2, column=0, sticky="ew", pady=(0, 3))
+    ttk.Label(auth_frame, textvariable=auth_status_var, wraplength=980).grid(row=3, column=0, sticky="ew", pady=(3, 0))
 
     def load_gui_settings():
         defaults = {
@@ -2461,8 +1805,6 @@ def main():
             "delete_processed_files": False,
             "start_id": "",
             "workers": 8,
-            "browser_profile_dir": str(DEFAULT_BROWSER_PROFILE_DIR),
-            "chrome_exe_path": default_chrome_executable(),
         }
         try:
             if APP_SETTINGS_PATH.is_file():
@@ -2481,10 +1823,6 @@ def main():
         delete_processed_var.set(bool(defaults["delete_processed_files"]))
         start_id_var.set(str(defaults["start_id"]))
         workers_var.set(str(defaults["workers"]))
-        browser_profile_var.set(str(defaults["browser_profile_dir"]))
-        chrome_exe_var.set(str(defaults["chrome_exe_path"]))
-        if not service_token_var.get().strip():
-            service_token_var.set(read_service_token())
 
     def save_gui_settings():
         payload = {
@@ -2496,8 +1834,6 @@ def main():
             "delete_processed_files": bool(delete_processed_var.get()),
             "start_id": start_id_var.get().strip(),
             "workers": workers_var.get().strip(),
-            "browser_profile_dir": browser_profile_var.get().strip(),
-            "chrome_exe_path": chrome_exe_var.get().strip(),
         }
         try:
             temp_path = APP_SETTINGS_PATH.with_suffix(".tmp")
@@ -2532,157 +1868,24 @@ def main():
         except Exception as exc:
             messagebox.showerror("Файл токенов", f"Не удалось открыть файл:\n{exc}", parent=root)
 
-    ttk.Button(auth_buttons, text="Вставить старый access_token…", command=lambda: open_auth_dialog()).pack(side="left", padx=(0, 6))
+    ttk.Button(auth_buttons, text="Добавить токен v1…", command=lambda: open_auth_dialog()).pack(side="left", padx=(0, 6))
     ttk.Button(auth_buttons, text="Открыть vk_token.txt", command=open_token_file).pack(side="left", padx=(0, 6))
-    ttk.Button(auth_buttons, text="Обновить список токенов", command=refresh_token_count).pack(side="left")
-
-    ttk.Label(
-        auth_frame,
-        text="После входа VK ID загрузчик получает пользовательский API-токен через браузерную сессию. Если VK не разрешит этот способ для приложения, причина отобразится здесь; code-flow с токеном vk2 не подходит для photos.get/friends.get.",
-        wraplength=980,
-    ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 6))
-
-    ttk.Label(auth_frame, text="Профиль Chrome:").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=3)
-    ttk.Entry(auth_frame, textvariable=browser_profile_var).grid(row=3, column=1, sticky="ew", pady=3)
-
-    def browse_browser_profile():
-        current = browser_profile_var.get().strip()
-        selected = filedialog.askdirectory(
-            parent=root,
-            title="Выберите постоянный профиль браузера для VK",
-            initialdir=current if current and Path(current).expanduser().is_dir() else str(APP_DIR),
-            mustexist=False,
-        )
-        if selected:
-            browser_profile_var.set(selected)
-            save_gui_settings()
-
-    ttk.Button(auth_frame, text="Обзор…", command=browse_browser_profile).grid(row=3, column=2, padx=(8, 0), pady=3)
-
-    ttk.Label(auth_frame, text="Путь к chrome.exe:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
-    ttk.Entry(auth_frame, textvariable=chrome_exe_var).grid(row=4, column=1, sticky="ew", pady=3)
-
-    def browse_chrome_executable():
-        current = chrome_exe_var.get().strip()
-        initial_dir = str(Path(current).expanduser().parent) if current and Path(current).expanduser().parent.is_dir() else str(Path.home())
-        selected = filedialog.askopenfilename(
-            parent=root,
-            title="Выберите Chrome",
-            initialdir=initial_dir,
-            filetypes=[("Google Chrome", "chrome.exe"), ("Исполняемые файлы", "*.exe"), ("Все файлы", "*.*")],
-        )
-        if selected:
-            chrome_exe_var.set(selected)
-            save_gui_settings()
-
-    ttk.Button(auth_frame, text="Обзор…", command=browse_chrome_executable).grid(row=4, column=2, padx=(8, 0), pady=3)
-
-    ttk.Label(auth_frame, text="Service token приложения:").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=3)
-    ttk.Entry(auth_frame, textvariable=service_token_var, show="*").grid(row=5, column=1, sticky="ew", pady=3)
-
-    def save_service_token(show_message=True):
-        token = service_token_var.get().strip()
-        if not token:
-            try:
-                VK_SERVICE_TOKEN_FILE.unlink(missing_ok=True)
-            except OSError:
-                pass
-            auth_status_var.set("Service token не задан.")
-            if show_message:
-                messagebox.showinfo("Service token", "Поле очищено. Для обмена silent_token нужен service token приложения.", parent=root)
-            return
-        VK_SERVICE_TOKEN_FILE.write_text(token + "\n", encoding="utf-8")
-        auth_status_var.set(f"Service token сохранён локально в {VK_SERVICE_TOKEN_FILE.name}.")
-        if show_message:
-            messagebox.showinfo("Service token", f"Ключ сохранён в {VK_SERVICE_TOKEN_FILE.name}; он не записывается в JSON-настройки.", parent=root)
-
-    ttk.Button(auth_frame, text="Сохранить", command=save_service_token).grid(row=5, column=2, padx=(8, 0), pady=3)
-
-    auth_action_frame = ttk.Frame(auth_frame)
-    auth_action_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(6, 2))
-    for column in range(3):
-        auth_action_frame.columnconfigure(column, weight=1)
-
-    def start_vk_browser_auth():
-        global _AUTH_THREAD
-        if sync_playwright is None:
-            messagebox.showerror("Playwright не установлен", "Для автоматической авторизации установите пакет:\\npython -m pip install playwright", parent=root)
-            return
-        executable = Path(chrome_exe_var.get().strip()).expanduser()
-        if not executable.is_file():
-            messagebox.showerror("Chrome не найден", f"Проверьте путь к chrome.exe:\\n{executable}", parent=root)
-            return
-        profile = browser_profile_var.get().strip()
-        if not profile:
-            messagebox.showerror("Профиль Chrome", "Укажите каталог постоянного профиля Chrome.", parent=root)
-            return
-        if _AUTH_THREAD is not None and _AUTH_THREAD.is_alive():
-            messagebox.showinfo("Авторизация VK", "Ожидание авторизации уже выполняется.", parent=root)
-            return
-        if service_token_var.get().strip():
-            try:
-                save_service_token(show_message=False)
-            except Exception as exc:
-                messagebox.showerror("Service token", f"Не удалось сохранить service token: {exc}", parent=root)
-                return
-        save_gui_settings()
-        AUTH_STOP_REQUESTED.clear()
-        auth_status_var.set("Запускаю Chrome и ожидаю ответ VK ID…")
-        _AUTH_THREAD = threading.Thread(
-            target=_browser_auth_worker,
-            args=(profile, str(executable), service_token_var.get().strip()),
-            daemon=True,
-            name="VKBrowserAuthWorker",
-        )
-        _AUTH_THREAD.start()
-
-    def stop_vk_browser_auth():
-        AUTH_STOP_REQUESTED.set()
-        auth_status_var.set("Запрошена остановка ожидания авторизации…")
-
-    def exchange_pending_silent_token():
-        service_token = service_token_var.get().strip() or read_service_token()
-        if not service_token:
-            messagebox.showwarning("Нужен service token", "Silent token нельзя использовать для photos.get/friends.get как API access_token. Укажите service token приложения и сохраните его.", parent=root)
-            return
-        if service_token_var.get().strip():
-            try:
-                save_service_token(show_message=False)
-            except Exception as exc:
-                messagebox.showerror("Service token", str(exc), parent=root)
-                return
-        try:
-            load_pending_silent_token()
-        except Exception as exc:
-            messagebox.showerror("Нет сохранённого silent_token", str(exc), parent=root)
-            return
-        threading.Thread(
-            target=_exchange_and_store_pending_token,
-            args=(service_token,),
-            daemon=True,
-            name="VKSilentTokenExchangeWorker",
-        ).start()
-        auth_status_var.set("Обмениваю сохранённый silent_token на API access_token…")
-
-    ttk.Button(auth_action_frame, text="Войти через Chrome автоматически", command=start_vk_browser_auth).grid(row=0, column=0, sticky="ew", padx=(0, 5))
-    ttk.Button(auth_action_frame, text="Обменять silent_token", command=exchange_pending_silent_token).grid(row=0, column=1, sticky="ew", padx=5)
-    ttk.Button(auth_action_frame, text="Остановить ожидание", command=stop_vk_browser_auth).grid(row=0, column=2, sticky="ew", padx=(5, 0))
-    ttk.Label(auth_frame, textvariable=auth_status_var, wraplength=980).grid(row=7, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+    ttk.Button(auth_buttons, text="Обновить список", command=refresh_token_count).pack(side="left")
 
     def open_auth_dialog():
         dialog = tk.Toplevel(root)
-        dialog.title("Добавить токен VK")
+        dialog.title("Добавить токен VK API v1")
         dialog.transient(root)
-        dialog.geometry("720x390")
-        dialog.minsize(620, 330)
+        dialog.geometry("680x280")
+        dialog.minsize(600, 230)
         dialog.columnconfigure(0, weight=1)
         dialog.rowconfigure(1, weight=1)
         ttk.Label(
             dialog,
-            text="Вставьте ранее полученный API access_token. Значение code=... из URL VK ID — временный код, его нельзя использовать как токен:",
-            wraplength=680,
+            text="Вставьте готовый пользовательский API-токен версии v1 (начинается с vk1.a…). Вставляйте только сам токен, не URL и не код авторизации.",
+            wraplength=640,
         ).grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
-        token_input = tk.Text(dialog, height=6, wrap="word", undo=True)
+        token_input = tk.Text(dialog, height=4, wrap="word", undo=True)
         token_input.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
         buttons = ttk.Frame(dialog)
         buttons.grid(row=2, column=0, sticky="e", padx=10, pady=(0, 10))
@@ -2691,18 +1894,20 @@ def main():
         ttk.Button(buttons, text="Отмена", command=dialog.destroy).pack(side="right")
 
         def submit_token():
-            value = token_input.get("1.0", "end").strip()
-            token = extract_access_token(value)
-            if not token:
+            token = token_input.get("1.0", "end").strip()
+            if not token or not _is_v1_token(token):
                 messagebox.showerror(
-                    "Токен VK",
-                    "Вставьте ранее полученный API access_token или URL, содержащий access_token=. "
-                    "Код code=...&type=code_v2 не является access_token; используйте «Войти через Chrome автоматически».",
+                    "Токен VK API v1",
+                    "Принимается только готовый пользовательский токен с префиксом vk1.a… . "
+                    "Автоматический вход и обмен кода не поддерживаются.",
                     parent=dialog,
                 )
                 return
-
+            if any(character.isspace() for character in token):
+                messagebox.showerror("Токен VK API v1", "Вставьте один токен без пробелов и переносов строк.", parent=dialog)
+                return
             save_button.configure(state="disabled", text="Проверка…")
+            auth_status_var.set("Проверяю токен v1 через VK API…")
 
             def validate_worker():
                 try:
@@ -2712,12 +1917,10 @@ def main():
                 except Exception as exc:
                     events.put(("token_saved", False, "", False, len(_read_token_file()), str(exc)))
 
-            threading.Thread(target=validate_worker, daemon=True).start()
+            threading.Thread(target=validate_worker, daemon=True, name="VKTokenValidationWorker").start()
 
         save_button.configure(command=submit_token)
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
-        # Окно не блокирует основную форму; этот диалог предназначен только для
-        # добавления ранее полученного API access_token.
         dialog.focus_set()
         root._vk_token_dialog = dialog
         root._vk_token_save_button = save_button
@@ -2900,21 +2103,17 @@ def main():
             return
         token_count = len(_read_token_file())
         if token_count == 0:
-            unsupported_count = sum(
-                1 for saved_token in _read_all_token_file()
-                if saved_token.lower().startswith("vk2.")
-            )
+            saved_rows = _read_all_token_file()
+            incompatible_count = sum(1 for saved_token in saved_rows if not _is_v1_token(saved_token))
             message = (
-                f"В {VK_TOKEN_FILE.name} нет совместимых API-токенов для users.get/friends.get/groups.getById. "
-                "Нужен рабочий пользовательский токен старого совместимого формата vk1.a… ."
+                f"В {VK_TOKEN_FILE.name} нет рабочих токенов v1 с префиксом vk1.a… . "
+                "Добавьте токен через «Добавить токен v1»."
             )
-            if unsupported_count:
-                message += (
-                    f"\n\nНайдено токенов vk2.a…: {unsupported_count}. "
-                    "Это токены нового VK ID; загрузчик пропускает их и не использует."
-                )
-            messagebox.showwarning("Токены VK", message, parent=root)
+            if incompatible_count:
+                message += f"\n\nСтрок с неподдерживаемыми токенами: {incompatible_count}. Они не используются."
+            messagebox.showwarning("Токены VK API v1", message, parent=root)
             return
+
         reload_token_cache()
         auto_import = bool(auto_import_var.get())
         create_crop_files = bool(create_crop_var.get())
@@ -3033,14 +2232,6 @@ def main():
                     start_id_var.set(str(event[1]))
                 elif kind == "status":
                     status_var.set(event[1])
-                elif kind == "auth_status":
-                    auth_status_var.set(event[1])
-                elif kind == "auth_needs_service_token":
-                    auth_status_var.set(event[1])
-                    messagebox.showwarning("VK ID: требуется обмен токена", event[1], parent=root)
-                elif kind == "auth_error":
-                    auth_status_var.set(event[1])
-                    messagebox.showerror("Авторизация VK", event[1], parent=root)
                 elif kind == "token_saved":
                     success, user_name, added, count, error = event[1:]
                     token_count_var.set(f"Токенов в {VK_TOKEN_FILE.name}: {count}")
@@ -3058,9 +2249,11 @@ def main():
                             except tk.TclError:
                                 pass
                         if added:
-                            messagebox.showinfo("Токен VK сохранён", f"Авторизация проверена. Токен добавлен в {VK_TOKEN_FILE.name}.\nПользователь: {user_name}\nВсего токенов: {count}", parent=root)
+                            auth_status_var.set(f"Токен v1 добавлен. Пользователь: {user_name}; всего токенов: {count}.")
+                            messagebox.showinfo("Токен VK сохранён", f"Токен v1 проверен и добавлен в {VK_TOKEN_FILE.name}.\nПользователь: {user_name}\nВсего токенов: {count}", parent=root)
                         else:
-                            messagebox.showinfo("Токен уже есть", f"Этот токен уже присутствует в {VK_TOKEN_FILE.name}.\nПользователь: {user_name}\nВсего токенов: {count}", parent=root)
+                            auth_status_var.set(f"Этот токен v1 уже сохранён. Пользователь: {user_name}; всего токенов: {count}.")
+                            messagebox.showinfo("Токен уже есть", f"Этот токен v1 уже присутствует в {VK_TOKEN_FILE.name}.\nПользователь: {user_name}\nВсего токенов: {count}", parent=root)
                     else:
                         error_parent = getattr(root, "_vk_token_dialog", None)
                         try:
@@ -3068,7 +2261,8 @@ def main():
                                 error_parent = root
                         except tk.TclError:
                             error_parent = root
-                        messagebox.showerror("Не удалось добавить токен", error, parent=error_parent)
+                        auth_status_var.set(f"Не удалось добавить токен v1: {error}")
+                        messagebox.showerror("Не удалось добавить токен v1", error, parent=error_parent)
                 elif kind == "job_finished":
                     progress_bar.stop()
                     progress_bar.configure(mode="determinate")
@@ -3091,7 +2285,6 @@ def main():
                 return
             STOP_REQUESTED.set()
         window_closing.set()
-        AUTH_STOP_REQUESTED.set()
         sys.stdout = original_stdout
         sys.stderr = original_stderr
         root.destroy()
