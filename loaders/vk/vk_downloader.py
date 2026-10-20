@@ -20,6 +20,12 @@ from tkinter import ttk, filedialog, messagebox
 
 # === ПАРАМЕТРЫ === #
 APP_DIR = Path(__file__).resolve().parent
+
+# Общие горячие клавиши и контекстное меню для полей ввода.
+_LOADER_SHARED_DIR = str(APP_DIR.parent)
+if _LOADER_SHARED_DIR not in sys.path:
+    sys.path.insert(0, _LOADER_SHARED_DIR)
+from edit_shortcuts import install_edit_shortcuts
 VK_TOKEN_FILE = APP_DIR / "vk_token.txt"
 # VKHost-style OAuth implicit flow: app 8101047, friends + photos + status + offline.
 # Bitmask: friends=2, photos=4, status=1024, offline=65536; total=66566.
@@ -2569,15 +2575,17 @@ def run_download_job(
                                     # Не считать простой возврат без исключения гарантией записи в БД.
                                     # При нуле лиц или неясном результате исходники сохраняются для проверки;
                                     # распознанные дубликаты считаются обработанными и очищаются по настройке.
-                                    crop_files_enabled = bool(getattr(importer, "create_crop_files", True))
-                                    if delete_processed_files and should_cleanup_source and crop_files_enabled:
+                                    if delete_processed_files and should_cleanup_source:
                                         try:
-                                            image_path.unlink(missing_ok=True)
+                                            # Сначала удаляем JSON: если удаление метаданных не удастся,
+                                            # изображение останется для повторного импорта/проверки.
                                             json_path.unlink(missing_ok=True)
+                                            image_path.unlink(missing_ok=True)
                                             _remove_empty_directories_upwards(image_path.parent, output_root)
                                             print(
                                                 f"[CLEANUP] ID {downloaded_uid}: удалена импортированная пара "
-                                                f"{image_path.name} после подтверждённой записи/пропуска существующего источника."
+                                                f"{image_path.name} после успешного результата БД/подтверждённого "
+                                                "пропуска уже существующего источника."
                                             )
                                         except Exception as exc:
                                             cleanup_errors_total += 1
@@ -2585,12 +2593,6 @@ def run_download_job(
                                                 f"[CLEANUP-ERROR] ID {downloaded_uid}: импорт завершился, "
                                                 f"но не удалось удалить {image_path.name} и/или JSON: {exc}"
                                             )
-                                    elif delete_processed_files and should_cleanup_source and not crop_files_enabled:
-                                        print(
-                                            f"[CLEANUP-SKIP] ID {downloaded_uid}: пара {image_path.name} сохранена, "
-                                            "поскольку создание CROP-файлов отключено; исходник нужен для последующего "
-                                            "восстановления изображений CROP из БД."
-                                        )
                                     elif delete_processed_files:
                                         print(
                                             f"[CLEANUP-SKIP] ID {downloaded_uid}: пара {image_path.name} не удалена, "
@@ -3601,132 +3603,8 @@ def main():
     scroll.grid(row=0, column=1, sticky="ns")
     log_text.configure(yscrollcommand=scroll.set)
 
-    def install_edit_shortcuts():
-        editable_classes = (tk.Text, tk.Entry, tk.Spinbox, ttk.Entry, ttk.Spinbox, ttk.Combobox)
-        shortcuts = {
-            "c": "copy", "cyrillic_es": "copy", "с": "copy",
-            "v": "paste", "cyrillic_em": "paste", "м": "paste",
-            "x": "cut", "cyrillic_che": "cut", "ч": "cut",
-            "a": "select_all", "cyrillic_ef": "select_all", "ф": "select_all",
-            "z": "undo", "cyrillic_ya": "undo", "я": "undo",
-            "y": "redo", "cyrillic_en": "redo", "н": "redo",
-        }
+    install_edit_shortcuts(root)
 
-        def selection_exists(widget):
-            if isinstance(widget, tk.Text):
-                return bool(widget.tag_ranges("sel"))
-            try:
-                return bool(widget.selection_present())
-            except (AttributeError, tk.TclError):
-                return False
-
-        def selected_text(widget):
-            if isinstance(widget, tk.Text):
-                return widget.get("sel.first", "sel.last")
-            return widget.selection_get()
-
-        def delete_selection(widget):
-            if not selection_exists(widget):
-                return False
-            if isinstance(widget, tk.Text):
-                widget.delete("sel.first", "sel.last")
-            else:
-                widget.delete("sel.first", "sel.last")
-            return True
-
-        def handle_ctrl_shortcut(event):
-            widget = event.widget
-            if not isinstance(widget, editable_classes):
-                return None
-            # keysym при русской раскладке отличается, поэтому поддерживаем оба варианта.
-            action = shortcuts.get(str(event.keysym).lower())
-            if not action:
-                return None
-
-            is_text = isinstance(widget, tk.Text)
-            try:
-                state = str(widget.cget("state")).lower()
-            except (tk.TclError, AttributeError):
-                state = "normal"
-            can_edit = state not in {"disabled", "readonly"}
-
-            try:
-                if action == "select_all":
-                    if is_text:
-                        widget.tag_add("sel", "1.0", "end-1c")
-                        widget.mark_set("insert", "end-1c")
-                    else:
-                        widget.selection_range(0, "end")
-                        widget.icursor("end")
-                    return "break"
-
-                if action == "copy":
-                    if selection_exists(widget):
-                        text_value = selected_text(widget)
-                        root.clipboard_clear()
-                        root.clipboard_append(text_value)
-                    return "break"
-
-                if action == "cut":
-                    if not can_edit:
-                        return "break"
-                    if selection_exists(widget):
-                        text_value = selected_text(widget)
-                        root.clipboard_clear()
-                        root.clipboard_append(text_value)
-                        delete_selection(widget)
-                    return "break"
-
-                if action == "paste":
-                    if not can_edit:
-                        return "break"
-
-                    # bind_all выполняется ПОСЛЕ class-bindings Tkinter. Для
-                    # стандартного Ctrl+V Tk уже вызывает виртуальное событие
-                    # <<Paste>> и вставляет буфер обмена. Не вставляем повторно,
-                    # иначе содержимое появляется дважды. Ручная вставка нужна
-                    # только для русской раскладки, где keysym обычно Cyrillic_em.
-                    keysym = str(event.keysym).lower()
-                    if keysym == "v":
-                        return "break"
-
-                    try:
-                        value = root.clipboard_get()
-                    except tk.TclError:
-                        return "break"
-                    delete_selection(widget)
-                    widget.insert("insert", value)
-                    return "break"
-
-                if action == "undo":
-                    if is_text and can_edit:
-                        widget.edit_undo()
-                        return "break"
-                    return None
-
-                if action == "redo":
-                    if is_text and can_edit:
-                        widget.edit_redo()
-                        return "break"
-                    return None
-            except tk.TclError:
-                # Например, история Undo ещё пуста или фокус находится в readonly-поле.
-                return "break"
-            return None
-
-        root.bind_all("<Control-KeyPress>", handle_ctrl_shortcut, add="+")
-        # Дополнительные стандартные варианты, распространённые в Windows.
-        root.bind_all("<Control-Insert>", lambda event: handle_ctrl_shortcut(
-            type("ShortcutEvent", (), {"widget": event.widget, "keysym": "c"})()
-        ), add="+")
-        root.bind_all("<Shift-Insert>", lambda event: handle_ctrl_shortcut(
-            type("ShortcutEvent", (), {"widget": event.widget, "keysym": "v"})()
-        ), add="+")
-        root.bind_all("<Shift-Delete>", lambda event: handle_ctrl_shortcut(
-            type("ShortcutEvent", (), {"widget": event.widget, "keysym": "x"})()
-        ), add="+")
-
-    install_edit_shortcuts()
 
     action_frame = ttk.Frame(footer, style="App.TFrame")
     action_frame.grid(row=2, column=0, sticky="ew")
