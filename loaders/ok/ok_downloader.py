@@ -1508,15 +1508,30 @@ def delete_processed_pair(image_path: Path | None, json_path: Path | None, *, en
             print(f"[WARN] Не удаляю файл за пределами каталога загрузки: {path}")
         except OSError as exc:
             print(f"[WARN] Не удалось удалить обработанный файл {path}: {exc}")
+    if removed and image_path is not None:
+        # Убираем ставшие пустыми каталоги, но никогда сам OUT_DIR и каталоги вне него.
+        try:
+            parent = Path(image_path).resolve().parent
+            while parent != root:
+                parent.relative_to(root)
+                parent.rmdir()
+                parent = parent.parent
+        except (ValueError, OSError):
+            # Каталог непуст, отсутствует или находится вне папки загрузки.
+            pass
     if removed:
-        print(f"[CLEANUP-PROCESSED] Удалено файлов: {removed}")
+        print(f"[CLEANUP-PROCESSED] Удалено файлов: {removed}; пустые каталоги очищены")
     return removed
 
 
 def import_result_allows_cleanup(result: dict) -> bool:
-    """Не удаляет фото, где штатная детекция не нашла лица и импорт не создал запись."""
-    message = str(result.get("message") or "").strip().lower()
-    return not message.startswith("лицо не найдено")
+    """Штатный результат импорта, включая отсутствие лиц, разрешает очистку.
+
+    Ошибки импорта обрабатываются вызывающим кодом через исключение, поэтому
+    достигший этой проверки результат считается обработанным. Если лиц нет,
+    сохранять пару изображения/JSON при включённой очистке не требуется.
+    """
+    return isinstance(result, dict)
 
 
 # ============================ Основной сбор ============================
