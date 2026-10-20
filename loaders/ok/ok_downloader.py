@@ -2371,6 +2371,17 @@ def main():
                     if command[0] == "collect":
                         if context is None:
                             set_status("Chrome не запущен. Проверьте путь к chrome.exe и нажмите «Применить пути».")
+                            def reset_collect_ui():
+                                job_state["running"] = False
+                                try:
+                                    collect_button.configure(state="normal")
+                                    stop_button.configure(state="disabled")
+                                except tk.TclError:
+                                    pass
+                            try:
+                                root.after(0, reset_collect_ui)
+                            except tk.TclError:
+                                pass
                             continue
                         resolve = command[1]
                         settings_xml = command[2]
