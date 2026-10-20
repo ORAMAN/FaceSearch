@@ -981,7 +981,12 @@ POST_MEDIA_JS = r"""() => {
 }"""
 
 
-def collect_grid_entries_with_scroll(page, status_callback, profile_username: str = "") -> tuple[list[dict], str | None]:
+def collect_grid_entries_with_scroll(
+    page,
+    status_callback,
+    profile_username: str = "",
+    stop_event: threading.Event | None = None,
+) -> tuple[list[dict], str | None]:
     """Collect permalink cards and direct CDN images while scrolling in increments.
 
     Scrolling directly to scrollHeight repeatedly can stall on Instagram's lazy
@@ -998,6 +1003,9 @@ def collect_grid_entries_with_scroll(page, status_callback, profile_username: st
     scan_warning = None
     stopped_by_stability = False
     for turn in range(max_rounds):
+        # Текущая прокрутка/чтение DOM завершается; следующий цикл после Stop не начинается.
+        if stop_event is not None and stop_event.is_set():
+            break
         try:
             batch = page.evaluate(COLLECT_GRID_JS, profile_username) or []
         except Exception as exc:
@@ -1503,7 +1511,23 @@ def collect_instagram(context, status_callback, progress_callback,
     if cached_images_by_url:
         status_callback(f"Локальный кеш найден: {len(cached_images_by_url)} ранее сохранённых URL изображений.")
 
-    entries, scan_warning = collect_grid_entries_with_scroll(page, status_callback, username)
+    entries, scan_warning = collect_grid_entries_with_scroll(
+        page, status_callback, username, stop_event=stop_event
+    )
+    if stop_event is not None and stop_event.is_set():
+        message = "Остановлено до начала загрузки изображений; новые задачи не запускаются."
+        status_callback(message)
+        progress_callback(1, 1, "Остановлено")
+        report_path = OUT_DIR / f"{safe_filename(username)}_instagram_run_report.json"
+        return {
+            "posts": len(entries), "media": 0, "downloaded": 0, "reused": 0,
+            "duplicate_images": 0, "imported": 0, "db_added_faces": 0,
+            "db_updated_records": 0, "db_no_face": 0, "db_noop": 0,
+            "db_metadata_refreshed": 0, "failed": 0, "foreign_posts_skipped": 0,
+            "import_failed": 0, "import_error_samples": [], "incomplete_posts": [],
+            "scan_warning": scan_warning, "run_report_path": str(report_path),
+            "username": username, "mode": mode, "stopped": True,
+        }
     if not entries:
         if stop_event is not None and stop_event.is_set():
             message = "Остановлено до начала загрузки изображений; новых задач не запускалось."
