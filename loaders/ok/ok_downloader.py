@@ -1592,6 +1592,9 @@ def collect_photos(
         report_progress(1, 1, "Обработка завершена")
         return True
 
+    if stop_requested():
+        return stopped_result()
+
     report_progress(None, None, "Поиск активной вкладки OK.ru…")
     page = find_photos_page(context)
     if page is None:
@@ -1660,6 +1663,9 @@ def collect_photos(
     # Обновляем сведения профиля ДО пропуска уже известных URL. Это важно:
     # существующие фотографии не скачиваются и не анализируются повторно,
     # однако изменившиеся name/info должны попасть в sidecar и FaceSearch.
+    if stop_requested():
+        return stopped_result()
+
     profile_info_retrieved = False
     info: dict[str, str] = {}
     about_page = None
@@ -1705,6 +1711,9 @@ def collect_photos(
         except Exception as exc:
             print(f"[DB-METADATA-ERROR] Не удалось обновить метаданные профиля: {exc}")
             status_callback(f"Не удалось обновить метаданные профиля FaceSearch: {exc}")
+
+    if stop_requested():
+        return stopped_result()
 
     metadata_sidecars_updated = 0
 
@@ -1918,6 +1927,10 @@ def collect_photos(
             f"ошибок импорта: {imported_errors}. Папка: {OUT_DIR}"
         )
         return
+
+    # Не открываем новые лайтбоксы после запроса остановки.
+    if stop_requested():
+        return stopped_result()
 
     # Оригинал может быть недоступен прямым HTTP-запросом, хотя виден в браузере.
     # Поэтому при ошибке оригинала ниже автоматически пробуем URL миниатюры.
