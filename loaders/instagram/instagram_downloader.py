@@ -1931,8 +1931,10 @@ def collect_instagram(context, status_callback, progress_callback,
                     db_noop += 1
                 print(f"[DB-IMPORT] {image_path.name}: {import_status}")
                 if delete_processed_files:
-                    # Удаляем JSON первым: если его удалить не удастся, изображение
-                    # останется для повторного импорта. После очистки удаляем пустые каталоги.
+                    # Чекбокс управляет удалением локальных исходников независимо от
+                    # create_crop_files: URL остаётся в метаданных/БД, временный файл
+                    # не нужен для последующего восстановления CROP по URL.
+                    # Удаляем JSON первым, затем изображение и пустые каталоги.
                     json_path.unlink(missing_ok=True)
                     image_path.unlink(missing_ok=True)
                     _remove_empty_download_directories(image_path.parent)
