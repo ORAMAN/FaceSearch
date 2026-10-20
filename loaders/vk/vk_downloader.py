@@ -2211,10 +2211,9 @@ def run_download_job(
 
     if delete_processed_files and import_to_database:
         print(
-            "🧹 Очистка включена: после успешной обработки удаляются исходники без лиц "
-            "и случаи, когда БД подтвердила существующий источник/CROP; пустые папки удаляются. "
-            "При выключенном создании CROP новые исходники с найденными лицами сохраняются "
-            "для возможного последующего восстановления CROP."
+            "🧹 Очистка включена: после успешного результата импорта удаляются локальные "
+            "изображения и JSON, независимо от настройки создания CROP; пустые папки удаляются. "
+            "CROP и ссылки источников хранятся/восстанавливаются на стороне FaceSearch."
         )
     print("ℹ️ Режим последовательного обхода работает до нажатия «Остановить»." if not specific_mode else "ℹ️ Режим конкретных ID завершится после обработки списка или нажатия «Остановить».")
 
@@ -2586,28 +2585,11 @@ def run_download_job(
                                             f"{image_path.parent}; {detail}."
                                         )
 
-                                    # Сохраняем исходник при новом импорте без CROP: он понадобится
-                                    # для последующего восстановления CROP. Если источник уже есть в БД,
-                                    # CROP восстановлены или импортёр подтвердил дубликат, исходник можно удалить.
-                                    crop_files_enabled = bool(getattr(importer, "create_crop_files", True))
-                                    existing_crop_confirmed = (
-                                        known_existing_source
-                                        or restored_crops > 0
-                                        or (
-                                            detected_faces is not None
-                                            and detected_faces > 0
-                                            and new_records == 0
-                                            and updated_records == 0
-                                        )
-                                    )
-                                    # Файл без лиц также считается обработанным: CROP для него
-                                    # создавать нечего, поэтому очищаем его независимо от настройки CROP.
-                                    can_cleanup_without_crops = (
-                                        crop_files_enabled
-                                        or detected_faces == 0
-                                        or existing_crop_confirmed
-                                    )
-                                    if delete_processed_files and should_cleanup_source and can_cleanup_without_crops:
+                                    # Локальное изображение нужно для распознавания и текущего импорта.
+                                    # После подтверждённого результата БД его можно удалять независимо
+                                    # от create_crop_files: дальнейшее восстановление CROP использует URL
+                                    # источника/метаданные FaceSearch, а не временный файл загрузчика.
+                                    if delete_processed_files and should_cleanup_source:
                                         try:
                                             # Сначала удаляем JSON: если удаление метаданных не удастся,
                                             # изображение останется для повторного импорта/проверки.
@@ -2615,9 +2597,8 @@ def run_download_job(
                                             image_path.unlink(missing_ok=True)
                                             _remove_empty_directories_upwards(image_path.parent, output_root)
                                             print(
-                                                f"[CLEANUP] ID {downloaded_uid}: удалена импортированная пара "
-                                                f"{image_path.name} после успешного результата БД/подтверждённого "
-                                                "пропуска уже существующего источника или CROP."
+                                                f"[CLEANUP] ID {downloaded_uid}: удалены локальные файлы "
+                                                f"{image_path.name} и JSON после успешного результата обработки."
                                             )
                                         except Exception as exc:
                                             cleanup_errors_total += 1
@@ -2626,12 +2607,6 @@ def run_download_job(
                                                 f"[CLEANUP-ERROR] ID {downloaded_uid}: импорт завершился, "
                                                 f"но не удалось удалить {image_path.name} и/или JSON: {exc}"
                                             )
-                                    elif delete_processed_files and should_cleanup_source and not crop_files_enabled:
-                                        print(
-                                            f"[CLEANUP-SKIP] ID {downloaded_uid}: исходники {image_path.name} сохранены, "
-                                            "поскольку создание CROP отключено, а наличие CROP для нового импорта "
-                                            "не подтверждено."
-                                        )
                                     elif delete_processed_files:
                                         print(
                                             f"[CLEANUP-SKIP] ID {downloaded_uid}: пара {image_path.name} не удалена, "
