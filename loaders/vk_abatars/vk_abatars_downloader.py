@@ -126,7 +126,7 @@ def extract_v1_token_input(value: str) -> str:
     value = (value or "").strip()
     if _is_v1_token(value):
         return value
-    match = re.search(r"(?:^|[?#&])access_token=([^&#\\s]+)", value)
+    match = re.search(r"(?:^|[?#&])access_token=([^&#\s]+)", value)
     if not match:
         return ""
     token = unquote(match.group(1)).strip()
