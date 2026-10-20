@@ -34,7 +34,7 @@ except ImportError:
 _LOADER_SHARED_DIR = str(Path(__file__).resolve().parents[1])
 if _LOADER_SHARED_DIR not in sys.path:
     sys.path.insert(0, _LOADER_SHARED_DIR)
-from ui_theme import ThemeManager
+from ui_theme import ThemeManager, browser_window_args, place_tk_window_half
 
 
 BASE_URL = "https://www.instagram.com/"
@@ -1419,7 +1419,7 @@ def launch_browser_context(playwright, profile_directory: str, chrome_executable
     return playwright.chromium.launch_persistent_context(
         user_data_dir=str(profile_path.resolve()), executable_path=str(executable.resolve()),
         headless=False, viewport=None, no_viewport=True, locale="ru-RU", accept_downloads=True,
-        args=["--start-maximized", "--window-size=1920,1080", "--window-position=0,0"],
+        args=browser_window_args("right"),
     )
 
 
@@ -1894,8 +1894,10 @@ def main():
     root = tk.Tk()
     root.title("Instagram — загрузчик изображений и импорт FaceSearch")
     theme_manager = ThemeManager(root, saved.get("theme", "light"))
-    root.geometry("980x790")
-    root.minsize(850, 700)
+    # На Windows форма занимает левую половину рабочего стола; Chrome запускается справа.
+    if not place_tk_window_half(root, "left", min_width=620, min_height=480):
+        root.geometry("980x790")
+        root.minsize(850, 700)
     root.columnconfigure(0, weight=1)
     root.rowconfigure(0, weight=1)
     frame = ttk.Frame(root, padding=12, style="App.TFrame")
