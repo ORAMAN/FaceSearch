@@ -1432,6 +1432,11 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             minimum_percent = float(data.get("min_similarity", DEFAULT_MIN_SIMILARITY))
         except (TypeError, ValueError) as exc:
             raise ValueError("Параметры поиска имеют неверный формат.") from exc
+        text_filter = str(data.get("text_filter") or "").strip()
+        if len(text_filter) > MAX_CARD_TEXT_FILTER_LENGTH:
+            raise ValueError(
+                f"Длина текстового фильтра не должна превышать {MAX_CARD_TEXT_FILTER_LENGTH} символов."
+            )
         if not 0.0 <= minimum_percent <= 100.0:
             raise ValueError("Минимальное сходство должно быть от 0 до 100%.")
         if not token or len(token) > 128:
@@ -1451,13 +1456,18 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
 
         conn = _open_connection()
         try:
+            candidate_top_k = candidate_count_for_text_filter(top_k, text_filter)
             results = face_search.search_embedding(
                 conn,
                 embedding,
-                top_k=top_k,
+                top_k=candidate_top_k,
                 min_similarity=minimum_percent / 100.0,
                 backend=BACKEND,
             )
+            if text_filter:
+                results = filter_results_by_card_text(
+                    results, text_filter, limit=top_k
+                )
             # Cache all displayed image rows once per search. The CROP retry script
             # can then poll for several minutes without opening a DB connection for
             # every failed image request (important for PostgreSQL connection limits).
