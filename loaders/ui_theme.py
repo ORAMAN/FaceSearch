@@ -108,11 +108,39 @@ THEME_PALETTES = {
 }
 
 
-class ThemeManager:
-    """Applies the VK downloader's light/dark palette to a Tkinter window."""
+# Цветовые акценты отдельных загрузчиков. Базовая палитра остаётся палитрой VK.
+ACCENT_PALETTES = {
+    "ok": {
+        "light": {
+            "accent": "#FF7700", "accent_active": "#E66A00",
+            "accent_disabled": "#FFC08A", "selection": "#FFE2CC",
+        },
+        "dark": {
+            "accent": "#FF9A3C", "accent_active": "#FF7A00",
+            "accent_disabled": "#755234", "selection": "#5A402A",
+        },
+    },
+    "instagram": {
+        "light": {
+            "accent": "#9B59D0", "accent_active": "#8541BC",
+            "accent_disabled": "#D0A8EE", "selection": "#EAD5FA",
+        },
+        "dark": {
+            "accent": "#C084FC", "accent_active": "#A855F7",
+            "accent_disabled": "#62417B", "selection": "#49315D",
+        },
+    },
+}
 
-    def __init__(self, root: tk.Misc, theme: str = "light"):
+
+class ThemeManager:
+    """Applies the shared light/dark palette and a per-loader accent color."""
+
+    def __init__(
+        self, root: tk.Misc, theme: str = "light", accent_variant: str = "vk"
+    ):
         self.root = root
+        self.accent_variant = str(accent_variant or "vk").strip().lower()
         self.style = ttk.Style(root)
         self.current = "light"
         self.palette = dict(THEME_PALETTES["light"])
@@ -294,6 +322,7 @@ class ThemeManager:
         self.current = selected
         self.palette.clear()
         self.palette.update(THEME_PALETTES[selected])
+        self.palette.update(ACCENT_PALETTES.get(self.accent_variant, {}).get(selected, {}))
         try:
             self.root.configure(bg=self.palette["app"])
         except tk.TclError:
