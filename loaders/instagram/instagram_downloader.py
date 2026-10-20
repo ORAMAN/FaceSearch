@@ -1944,6 +1944,8 @@ def main():
     commands: queue.Queue[tuple] = queue.Queue()
     browser_ready = threading.Event()
     browser_state = {"error": None}
+    stop_event = threading.Event()
+    job_state = {"running": False, "error": False, "final_status": ""}
 
     root = tk.Tk()
     install_edit_shortcuts(root)
@@ -2133,6 +2135,8 @@ def main():
             return None
 
     def start_download():
+        if job_state["running"]:
+            return
         if not browser_ready.is_set():
             messagebox.showinfo("Chrome", "Chrome ещё запускается. Повторите немного позже.", parent=root)
             return
@@ -2142,17 +2146,66 @@ def main():
         if auto_import_var.get() and check_configuration(show_dialog=True) is None:
             return
         persist_settings()
+        stop_event.clear()
+        job_state.update({"running": True, "error": False, "final_status": ""})
+        download_button.configure(state="disabled")
+        stop_button.configure(state="normal")
         commands.put(("collect", fullsize_var.get(), facesearch_dir_var.get().strip(),
                       auto_import_var.get(), create_crop_files_var.get(), build_index_after_var.get(), delete_processed_files_var.get()))
         set_status("Задание отправлено. Проверяю открытую вкладку Instagram…")
         set_progress(None, None, "Подготовка к загрузке…")
 
-    ttk.Button(
-        frame,
+    download_controls = ttk.Frame(frame, style="App.TFrame")
+    download_controls.grid(row=7, column=0, sticky="ew")
+    download_controls.columnconfigure(0, weight=1)
+    download_button = ttk.Button(
+        download_controls,
         text="Загрузить с открытой страницы и импортировать в FaceSearch",
         command=start_download,
         style="Accent.TButton",
-    ).grid(row=7, column=0, sticky="ew", ipady=7)
+    )
+    download_button.grid(row=0, column=0, sticky="ew", ipady=7, padx=(0, 6))
+
+    def stop_download():
+        if not job_state["running"] or stop_event.is_set():
+            return
+        stop_event.set()
+        stop_button.configure(state="disabled")
+        set_status(
+            "Остановка запрошена: текущее изображение завершит загрузку, импорт в БД "
+            "и удаление обработанных файлов; новые изображения запускаться не будут…"
+        )
+        set_progress(None, None, "Остановка: завершаются активные операции…")
+
+    stop_button = ttk.Button(
+        download_controls,
+        text="■ Остановить",
+        command=stop_download,
+        state="disabled",
+        style="Danger.TButton",
+    )
+    stop_button.grid(row=0, column=1, sticky="ew", ipady=7)
+
+    def finish_download_ui(was_stopped: bool):
+        job_state["running"] = False
+        try:
+            download_button.configure(state="normal")
+            stop_button.configure(state="disabled")
+            if was_stopped:
+                message = str(job_state.get("final_status") or "")
+                if not message or message.startswith("Готово:"):
+                    if message.startswith("Готово:"):
+                        message = "Остановлено: " + message[len("Готово:"):].lstrip()
+                    else:
+                        message = "Остановлено. Все начатые загрузки, импорты в БД и очистка файлов завершены."
+                elif message.startswith("Ошибка:"):
+                    message = "Остановлено с ошибкой. " + message[len("Ошибка:"):].lstrip()
+                if job_state.get("error"):
+                    message += " Проверьте журнал ошибок."
+                status_var.set(message)
+                progress_label_var.set("Остановлено; активные операции завершены")
+        except tk.TclError:
+            pass
 
     def browser_worker():
         try:
@@ -2217,6 +2270,11 @@ def main():
                     if command[0] == "collect":
                         if context is None:
                             set_status("Chrome не запущен. Проверьте путь к chrome.exe.")
+                            job_state["final_status"] = "Chrome не запущен. Проверьте путь к chrome.exe."
+                            try:
+                                root.after(0, lambda: finish_download_ui(stop_event.is_set()))
+                            except tk.TclError:
+                                pass
                             continue
                         _, fullsize, fs_dir, auto_import, create_crop, build_index, delete_files = command
                         importer = None
@@ -2224,10 +2282,12 @@ def main():
                             if auto_import:
                                 importer = FaceSearchImporter(fs_dir, set_status, create_crop_files=create_crop)
                                 set_status(f"FaceSearch подключён: профиль «{importer.config['active_name']}».")
-                            result = collect_instagram(context, set_status, set_progress, fullsize,
-                                                       importer, build_index, delete_files)
+                            result = collect_instagram(
+                                context, set_status, set_progress, fullsize,
+                                importer, build_index, delete_files, stop_event=stop_event,
+                            )
                             summary = (
-                                f"Готово: публикаций {result['posts']}, кандидатов на изображения {result['media']}; "
+                                f"{'Остановлено' if result.get('stopped') or stop_event.is_set() else 'Готово'}: публикаций {result['posts']}, кандидатов на изображения {result['media']}; "
                                 f"скачиваний {result['downloaded']}, из кеша {result['reused']}, "
                                 f"повторов изображений пропущено {result['duplicate_images']}; "
                                 f"публикаций других аккаунтов пропущено {result.get('foreign_posts_skipped', 0)}; "
@@ -2250,15 +2310,27 @@ def main():
                             else:
                                 summary += " Импорт в FaceSearch выключен."
                             summary += f" Папка: {OUT_DIR}"
+                            job_state["final_status"] = summary
                             set_status(summary)
-                            set_progress(1, 1, "Загрузка завершена")
+                            set_progress(1, 1, "Остановлено; активные операции завершены" if result.get("stopped") else "Загрузка завершена")
                         except Exception as exc:
+                            job_state["error"] = True
+                            job_state["final_status"] = f"Ошибка: {exc}"
                             print(f"[ERROR] {exc}")
                             set_status(f"Ошибка: {exc}")
                             set_progress(0, 1, f"Ошибка: {exc}")
                         finally:
                             if importer:
-                                importer.close()
+                                try:
+                                    importer.close()
+                                except Exception as exc:
+                                    job_state["error"] = True
+                                    print(f"[WARN] Ошибка закрытия БД FaceSearch: {exc}")
+                            was_stopped = stop_event.is_set()
+                            try:
+                                root.after(0, lambda stopped=was_stopped: finish_download_ui(stopped))
+                            except tk.TclError:
+                                pass
                 if context:
                     context.close()
         except Exception as exc:
