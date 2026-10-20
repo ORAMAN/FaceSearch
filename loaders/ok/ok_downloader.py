@@ -1567,16 +1567,6 @@ def collect_photos(
     def stop_requested() -> bool:
         return bool(stop_event is not None and stop_event.is_set())
 
-    def stopped_result():
-        message = (
-            "Остановлено. Все начатые операции с текущими файлами завершены; "
-            "новые загрузки и импорты не запускаются."
-        )
-        print(f"[STOP] {message}")
-        status_callback(message)
-        report_progress(1, 1, "Остановлено; активные файлы обработаны")
-        return {"stopped": True}
-
     def report_progress(current=None, total=None, message=""):
         if progress_callback is not None:
             try:
@@ -1586,14 +1576,35 @@ def collect_photos(
 
     index_built = False
 
-    def finish_successfully():
+    def build_index_if_requested():
         nonlocal index_built
-        # Индекс — необязательный следующий этап: после Stop новые этапы не запускаем.
-        if stop_requested():
-            return False
         if importer and build_index_after and not index_built:
+            message = (
+                "Загрузка остановлена; строю FAISS-индекс по итоговой базе…"
+                if stop_requested()
+                else "Создаю индекс FAISS после завершения импорта…"
+            )
+            status_callback(message)
             importer.build_index(progress_callback=report_progress)
             index_built = True
+
+    def stopped_result():
+        # Stop прекращает новые загрузки, но не отменяет отмеченный пользователем
+        # финальный этап. К этому моменту активная итерация уже завершена.
+        build_index_if_requested()
+        message = (
+            "Остановлено. Все начатые операции с текущими файлами завершены; "
+            "новые загрузки и импорты не запускаются."
+        )
+        print(f"[STOP] {message}")
+        status_callback(message)
+        report_progress(1, 1, "Остановлено; активные файлы обработаны")
+        return {"stopped": True}
+
+    def finish_successfully():
+        # Если Stop был нажат на границе между проверкой и финализацией,
+        # индекс всё равно строится после завершения импорта.
+        build_index_if_requested()
         report_progress(1, 1, "Обработка завершена")
         return True
 
