@@ -1295,10 +1295,13 @@ def process_entity(
     print(f"\n{'=' * 60}")
     print(f"👤 {name} | ID: {display_id}")
     items = []
-    avatar_result_kind = "already_in_db" if already_in_db else None
+    # Если загружаем ещё и фотографии из альбомов, профиль не отбрасываем по ID:
+    # заново скачиваем и аватар, а штатный импортёр FaceSearch сам определит,
+    # нужно ли обновить источник или это уже известное изображение.
+    avatar_result_kind = None
     avatar_reason = None
 
-    if not already_in_db:
+    if not already_in_db or download_albums or is_group:
         post_ui_event("status", f"Загрузка аватарки VK ID {display_id} ({name})…")
         success, reason, result_kind = save_avatar_to_root(entity, base_dir, is_group=is_group)
         avatar_result_kind = result_kind
@@ -1504,6 +1507,7 @@ def process_users_with_friends(
     root_users: list, depth: int, MAX_WORKERS: int,
     base_output_dir: str | Path | None = None, importer=None,
     delete_processed_files: bool = False, import_to_database: bool = True,
+    download_albums: bool = False,
 ):
     """Скачивает корневых пользователей и их друзей до заданной глубины.
 
@@ -1539,8 +1543,8 @@ def process_users_with_friends(
                 continue
             if uid <= 0 or uid in visited or uid in level_ids:
                 continue
-            if uid in EXISTING_PROFILE_IDS:
-                print(f"[DB-SKIP] ID {uid} уже есть в profiles.profile_url активной БД; пропускаем.")
+            if uid in EXISTING_PROFILE_IDS and not download_albums:
+                print(f"[DB-SKIP] ID {uid} уже есть в profiles.profile_url активной БД; пропускаем в режиме только аватарок.")
                 continue
             level_ids.add(uid)
             visited.add(uid)
@@ -1570,6 +1574,7 @@ def process_users_with_friends(
                     user, base_dir, is_group=False, MAX_WORKERS=MAX_WORKERS,
                     importer=importer, delete_processed_files=delete_processed_files,
                     import_to_database=import_to_database,
+                    download_albums=download_albums,
                 )
             except Exception as e:
                 print(f"💥 Ошибка обработки пользователя {uid}: {e}")
@@ -1595,7 +1600,7 @@ def process_users_with_friends(
                         continue
                     if (friend_id > 0 and friend_id not in visited
                             and friend_id not in next_level
-                            and friend_id not in EXISTING_PROFILE_IDS):
+                            and (download_albums or friend_id not in EXISTING_PROFILE_IDS)):
                         friend["_friend_depth"] = level + 1
                         next_level[friend_id] = friend
                         added += 1
@@ -2542,11 +2547,16 @@ def run_download_job(
                                             f"исходники сохранены для проверки: {image_path.parent}; {detail}."
                                         )
                                     elif detected_faces is not None and detected_faces > 0:
+                                        # Импортёр успешно обработал изображение и обнаружил лицо,
+                                        # но запись уже представлена другим CROP. Считаем такой
+                                        # результат обработанным: при включённой очистке исходник
+                                        # можно удалить так же, как при совпадении source_key.
                                         db_skipped_duplicate_total += 1
+                                        should_cleanup_source = True
                                         print(
                                             f"[DB-SKIP-DUPLICATE] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
-                                            f"детектор обнаружил лица, но новые/обновлённые записи не созданы; "
-                                            f"вероятен дубликат CROP; исходники сохранены для проверки: {image_path.parent}; {detail}."
+                                            f"лицо обнаружено, но новые/обновлённые записи не нужны (вероятный дубликат CROP); "
+                                            f"{detail}."
                                         )
                                     else:
                                         db_unclassified_total += 1
@@ -2557,8 +2567,8 @@ def run_download_job(
                                         )
 
                                     # Не считать простой возврат без исключения гарантией записи в БД.
-                                    # При нуле лиц, дедупликации или неясном результате исходники
-                                    # сохраняются: иначе теряется возможность перепроверить импорт.
+                                    # При нуле лиц или неясном результате исходники сохраняются для проверки;
+                                    # распознанные дубликаты считаются обработанными и очищаются по настройке.
                                     crop_files_enabled = bool(getattr(importer, "create_crop_files", True))
                                     if delete_processed_files and should_cleanup_source and crop_files_enabled:
                                         try:
