@@ -176,6 +176,11 @@ from facesearch.metadata import (
     metadata_json as _image_metadata_json,
     is_standard_metadata_document as _is_standard_metadata_document,
 )
+from facesearch.card_text_filter import (
+    MAX_CARD_TEXT_FILTER_LENGTH,
+    candidate_count_for_text_filter,
+    filter_results_by_card_text,
+)
 from facesearch.indexing.cleanup import image_record_has_recoverable_source
 from facesearch.indexing.embeddings import embedding_blob_to_view
 from facesearch.database.schema import (
@@ -4599,6 +4604,7 @@ class FaceSearchGUI:
             self.query_var,
             self.topk_var,
             self.min_similarity_var,
+            self.description_filter_var,
         )
 
         for variable in variables:
@@ -4846,6 +4852,7 @@ class FaceSearchGUI:
                 "create_crops_on_html": bool(self.create_crops_on_html_var.get()),
                 "top_k": int(self.topk_var.get()),
                 "min_similarity": float(self.min_similarity_var.get()),
+                "description_filter": str(self.description_filter_var.get()),
                 "collapsible_sections": {
                     key: bool(group.get("expanded", True))
                     for key, group in getattr(self, "_collapsible_groups", {}).items()
@@ -6169,6 +6176,28 @@ class FaceSearchGUI:
         )
         self.min_similarity_spinbox.pack(fill="x")
 
+        description_filter_control = ttk.Frame(controls, style="Surface.TFrame")
+        description_filter_control.grid(
+            row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0)
+        )
+        ttk.Label(
+            description_filter_control,
+            text="Фильтр описания карточки",
+            style="SurfaceMuted.TLabel",
+        ).pack(anchor="w", pady=(0, 3))
+        self.description_filter_var = tk.StringVar(
+            value=str(self.gui_settings.get("description_filter") or "")
+        )
+        self.description_filter_entry = ttk.Entry(
+            description_filter_control, textvariable=self.description_filter_var
+        )
+        self.description_filter_entry.pack(fill="x")
+        ttk.Label(
+            description_filter_control,
+            text="Частичное совпадение без учёта регистра; поиск по всем полям карточки.",
+            style="SurfaceMuted.TLabel", wraplength=520, justify="left",
+        ).pack(anchor="w", pady=(3, 0))
+
         ttk.Label(left, text="Поиск по лицу", style="Section.TLabel").pack(anchor="w")
         ttk.Label(
             left,
@@ -6479,7 +6508,7 @@ class FaceSearchGUI:
         # одновременно с обработкой, когда worker использует текущий профиль.
         for name in (
             "choose_folder_btn", "choose_query_btn", "topk_spinbox",
-            "min_similarity_spinbox", "db_combo", "connect_db_btn",
+            "min_similarity_spinbox", "description_filter_entry", "db_combo", "connect_db_btn",
             "refresh_db_btn", "new_db_btn", "edit_db_btn",
             "delete_db_btn", "migrate_db_btn",
         ):
@@ -8870,6 +8899,13 @@ class FaceSearchGUI:
             max(0.0, float(self.min_similarity_var.get())),
         )
         min_similarity = min_similarity_percent / 100.0
+        description_filter = str(self.description_filter_var.get() or "").strip()
+        if len(description_filter) > MAX_CARD_TEXT_FILTER_LENGTH:
+            messagebox.showwarning(
+                "Слишком длинный фильтр",
+                f"Максимальная длина текстового фильтра — {MAX_CARD_TEXT_FILTER_LENGTH} символов.",
+            )
+            return
 
         self.operation = "search"
         self._set_busy(True)
@@ -8900,6 +8936,7 @@ class FaceSearchGUI:
                 bool(self.create_crops_on_html_var.get()),
                 bool(self.use_local_crops_var.get()),
                 self.theme_mode,
+                description_filter,
             ),
             daemon=True,
         ).start()
@@ -8914,18 +8951,24 @@ class FaceSearchGUI:
         create_crops_on_html=False,
         use_local_crops=True,
         theme="dark",
+        description_filter="",
     ):
         try:
             conn = create_database()
 
             try:
+                candidate_top_k = candidate_count_for_text_filter(top_k, description_filter)
                 results = search_embedding(
                     conn,
                     embedding,
-                    top_k,
+                    candidate_top_k,
                     min_similarity,
                     backend,
                 )
+                if description_filter:
+                    results = filter_results_by_card_text(
+                        results, description_filter, limit=top_k
+                    )
             finally:
                 conn.close()
 
