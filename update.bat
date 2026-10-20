@@ -95,12 +95,41 @@ echo Обновление отменено во избежание измене�
 goto :error
 
 :origin_ok
-REM Не затираем пользовательские изменения в отслеживаемых Git-файлах.
+REM Проверяем локальные изменения в отслеживаемых файлах.
+REM Если они есть, пользователь сможет отменить обновление или явно разрешить перезапись.
 git diff --quiet
 if errorlevel 1 goto :local_changes
 git diff --cached --quiet
 if errorlevel 1 goto :local_changes
 
+goto :fetch_and_update
+
+:local_changes
+echo.
+echo [WARN] В отслеживаемых файлах обнаружены локальные изменения:
+echo ------------------------------------------------------------
+git status --short --untracked-files=no
+echo ------------------------------------------------------------
+echo.
+echo Варианты действий:
+echo   [1] Выйти без изменений.
+echo   [2] Продолжить и ПЕРЕЗАПИСАТЬ локальные изменения в отслеживаемых файлах.
+echo.
+echo ВНИМАНИЕ: вариант 2 удалит локальные правки и staged-изменения в перечисленных
+echo          отслеживаемых файлах. Перед выбором сохраните нужные изменения отдельно.
+echo Неотслеживаемые файлы обычно сохраняются, но Git может удалить файл,
+echo если он мешает восстановить отслеживаемый файл из репозитория.
+echo.
+
+:local_changes_prompt
+set "LOCAL_CHANGE_CHOICE="
+set /p "LOCAL_CHANGE_CHOICE=Ваш выбор [1/2]: "
+if "!LOCAL_CHANGE_CHOICE!"=="1" goto:cancelled
+if "!LOCAL_CHANGE_CHOICE!"=="2" goto :force_update
+echo [WARN] Введите 1 или 2.
+goto :local_changes_prompt
+
+:fetch_and_update
 echo [STEP] Получение последних изменений с GitHub...
 git fetch --prune origin
 if errorlevel 1 (
@@ -121,12 +150,31 @@ echo.
 echo [OK] Репозиторий успешно обновлён.
 goto :post_update
 
-:local_changes
-echo [ERROR] В отслеживаемых файлах есть локальные изменения.
-echo Обновление остановлено, чтобы не перезаписать вашу работу.
-echo Сохраните изменения в коммите или сделайте резервную копию, затем повторите запуск.
-echo Примечание: неотслеживаемый update.bat сам по себе обновлению не мешает.
-goto :error
+:force_update
+echo.
+echo [STEP] Получение последних изменений с GitHub перед перезаписью...
+git fetch --prune origin
+if errorlevel 1 (
+    echo [ERROR] Не удалось получить изменения с GitHub. Локальные файлы не сбрасывались.
+    goto :error
+)
+echo [WARN] Сбрасываю текущую ветку к origin/%BRANCH% и удаляю локальные изменения...
+git reset --hard origin/%BRANCH%
+if errorlevel 1 (
+    echo [ERROR] Не удалось выполнить принудительное обновление.
+    goto :error
+)
+echo.
+echo [OK] Локальные изменения отслеживаемых файлов перезаписаны версией из GitHub.
+goto :post_update
+
+:cancelled
+echo.
+echo ============================================================
+echo [INFO] Обновление отменено. Локальные файлы не изменялись.
+echo ============================================================
+pause
+exit /b 0
 
 :zip_update
 echo [INFO] Git-клон не найден. Обнаружена папка с файлами проекта.
@@ -281,46 +329,7 @@ exit /b 0
 if exist "%TMP_DIR%" rmdir /s /q "%TMP_DIR%" >nul 2>&1
 exit /b 0
 
-REM ------------------------------------------------------------
-REM Устанавливает только новую зависимость drag-and-drop в уже
-REM существующее окружение .venv. Не переустанавливает PyTorch/ORT.
-REM ------------------------------------------------------------
-:ensure_tkinterdnd
-if not exist ".venv\Scripts\python.exe" (
-    echo [INFO] .venv не найден. tkinterdnd2 будет установлен через setup.bat.
-    exit /b 0
-)
-".venv\Scripts\python.exe" -c "import tkinterdnd2" >nul 2>&1
-if not errorlevel 1 exit /b 0
-
-set "UV_EXE="
-for /f "delims=" %%U in ('where uv 2^>nul') do if not defined UV_EXE set "UV_EXE=%%U"
-if not defined UV_EXE if exist "%USERPROFILE%\.local\bin\uv.exe" set "UV_EXE=%USERPROFILE%\.local\bin\uv.exe"
-if not defined UV_EXE if exist "%USERPROFILE%\.cargo\bin\uv.exe" set "UV_EXE=%USERPROFILE%\.cargo\bin\uv.exe"
-if not defined UV_EXE (
-    echo [WARN] tkinterdnd2 не установлен, а uv не найден.
-    echo [WARN] Установите зависимость вручную или запустите setup.bat.
-    exit /b 1
-)
-
-echo [STEP] Установка tkinterdnd2 для drag-and-drop ...
-"!UV_EXE!" pip install --python ".venv\Scripts\python.exe" "tkinterdnd2>=0.4.2"
-if errorlevel 1 (
-    echo [WARN] Не удалось автоматически установить tkinterdnd2.
-    echo [WARN] Запустите setup.bat или выполните установку вручную.
-    exit /b 1
-)
-".venv\Scripts\python.exe" -c "import tkinterdnd2" >nul 2>&1
-if errorlevel 1 (
-    echo [WARN] tkinterdnd2 не прошёл проверку импорта.
-    exit /b 1
-)
-echo [OK] Drag-and-drop зависимость установлена.
-exit /b 0
-
 :post_update
-call :ensure_tkinterdnd
-if errorlevel 1 echo [WARN] Автоматическая настройка drag-and-drop не завершена.
 echo.
 echo Для обновления/проверки Python-зависимостей можно запустить setup.bat.
 echo Он может переустановить PyTorch/ONNX Runtime в соответствии с обнаруженным GPU.
