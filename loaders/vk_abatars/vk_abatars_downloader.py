@@ -22,6 +22,12 @@ from tkinter import ttk, filedialog, messagebox
 APP_DIR = Path(__file__).resolve().parent
 VK_TOKEN_FILE = APP_DIR / "vk_token.txt"
 VK_FAVICON_URL = "https://vk.ru/favicon.ico"
+# VKHost-style OAuth implicit flow: app 8101047, friends + photos + status.
+VK_AUTH_URL = (
+    "https://oauth.vk.com/authorize?client_id=8101047&scope=1030&"
+    "redirect_uri=https%3A%2F%2Foauth.vk.com%2Fblank.html&"
+    "display=page&response_type=token&revoke=1"
+)
 VK_FAVICON_PATH = APP_DIR / "vk_favicon.ico"
 LOG_FILE = APP_DIR / "Log.txt"
 DEFAULT_OUTPUT_DIR = APP_DIR / "VK_Avatars_Downloads"
@@ -113,6 +119,18 @@ def reload_tokens():
         token = _TOKEN_LIST[current_token]
         current_token = (current_token + 1) % len(_TOKEN_LIST)
         return token
+
+
+def extract_v1_token_input(value: str) -> str:
+    """Extract a v1 token from a raw token or the blank.html redirect URL."""
+    value = (value or "").strip()
+    if _is_v1_token(value):
+        return value
+    match = re.search(r"(?:^|[?#&])access_token=([^&#\\s]+)", value)
+    if not match:
+        return ""
+    token = unquote(match.group(1)).strip()
+    return token if _is_v1_token(token) else ""
 
 
 def validate_access_token(token: str) -> str:
@@ -1788,7 +1806,7 @@ def main():
     ttk.Label(auth_frame, textvariable=token_count_var).grid(row=0, column=0, sticky="w", pady=(0, 3))
     ttk.Label(
         auth_frame,
-        text="Автоматический вход через VK ID и Chrome удалён. Вставьте готовый токен v1 вручную; перед сохранением он проверяется через VK API.",
+        text="Нажмите «Получить токен через VK ID», подтвердите доступ в обычном браузере и вставьте полный URL страницы blank.html. Загрузчик извлечёт токен v1, проверит его и сохранит; также доступен ручной ввод.",
         wraplength=980,
     ).grid(row=1, column=0, sticky="w", pady=(0, 6))
     auth_buttons = ttk.Frame(auth_frame)
@@ -1868,7 +1886,8 @@ def main():
         except Exception as exc:
             messagebox.showerror("Файл токенов", f"Не удалось открыть файл:\n{exc}", parent=root)
 
-    ttk.Button(auth_buttons, text="Добавить токен v1…", command=lambda: open_auth_dialog()).pack(side="left", padx=(0, 6))
+    ttk.Button(auth_buttons, text="Получить токен через VK ID…", command=lambda: start_v1_authorization()).pack(side="left", padx=(0, 6))
+    ttk.Button(auth_buttons, text="Добавить токен v1 вручную…", command=lambda: open_auth_dialog()).pack(side="left", padx=(0, 6))
     ttk.Button(auth_buttons, text="Открыть vk_token.txt", command=open_token_file).pack(side="left", padx=(0, 6))
     ttk.Button(auth_buttons, text="Обновить список", command=refresh_token_count).pack(side="left")
 
@@ -1882,7 +1901,7 @@ def main():
         dialog.rowconfigure(1, weight=1)
         ttk.Label(
             dialog,
-            text="Вставьте готовый пользовательский API-токен версии v1 (начинается с vk1.a…). Вставляйте только сам токен, не URL и не код авторизации.",
+            text="Вставьте токен vk1.a… или полный адрес страницы blank.html после подтверждения VK ID (URL содержит #access_token=…). Не публикуйте этот адрес.",
             wraplength=640,
         ).grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
         token_input = tk.Text(dialog, height=4, wrap="word", undo=True)
@@ -1894,17 +1913,17 @@ def main():
         ttk.Button(buttons, text="Отмена", command=dialog.destroy).pack(side="right")
 
         def submit_token():
-            token = token_input.get("1.0", "end").strip()
-            if not token or not _is_v1_token(token):
+            pasted_value = token_input.get("1.0", "end").strip()
+            token = extract_v1_token_input(pasted_value)
+            if not token:
                 messagebox.showerror(
                     "Токен VK API v1",
-                    "Принимается только готовый пользовательский токен с префиксом vk1.a… . "
-                    "Автоматический вход и обмен кода не поддерживаются.",
+                    "Не найден токен vk1.a… . Вставьте сам токен или полный URL blank.html, содержащий access_token=.",
                     parent=dialog,
                 )
                 return
             if any(character.isspace() for character in token):
-                messagebox.showerror("Токен VK API v1", "Вставьте один токен без пробелов и переносов строк.", parent=dialog)
+                messagebox.showerror("Токен VK API v1", "В извлечённом токене обнаружены пробелы или переносы строк.", parent=dialog)
                 return
             save_button.configure(state="disabled", text="Проверка…")
             auth_status_var.set("Проверяю токен v1 через VK API…")
@@ -1924,6 +1943,26 @@ def main():
         dialog.focus_set()
         root._vk_token_dialog = dialog
         root._vk_token_save_button = save_button
+
+    def start_v1_authorization():
+        """Открывает авторизацию VK ID в обычном браузере."""
+        auth_status_var.set("Открываю авторизацию VK ID в браузере…")
+        try:
+            opened = webbrowser.open(VK_AUTH_URL, new=2, autoraise=True)
+        except Exception as exc:
+            messagebox.showerror("Авторизация VK ID", f"Не удалось открыть браузер: {exc}", parent=root)
+            auth_status_var.set("Не удалось открыть браузер для авторизации.")
+            return
+        if not opened:
+            messagebox.showwarning(
+                "Авторизация VK ID",
+                "Браузер не открылся автоматически. Проверьте браузер по умолчанию и повторите попытку.",
+                parent=root,
+            )
+            auth_status_var.set("Не удалось открыть браузер для авторизации.")
+            return
+        open_auth_dialog()
+        auth_status_var.set("VK ID открыт в браузере. После подтверждения вставьте полный URL blank.html и нажмите «Проверить и сохранить».")
 
     footer = ttk.Frame(main_frame)
     footer.grid(row=1, column=0, sticky="nsew")
