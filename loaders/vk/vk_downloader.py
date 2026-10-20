@@ -32,7 +32,7 @@ _REPOSITORY_ROOT = str(APP_DIR.parent.parent)
 if _REPOSITORY_ROOT not in sys.path:
     sys.path.insert(0, _REPOSITORY_ROOT)
 from facesearch.config import AUTO_WORKERS_DEFAULT
-from facesearch.processing.telemetry import AdaptiveWorkerController
+from facesearch.processing.telemetry import AdaptiveWorkerController, _gpu_telemetry_worker
 VK_TOKEN_FILE = APP_DIR / "vk_token.txt"
 # VKHost-style OAuth implicit flow: app 8101047, friends + photos + status + offline.
 # Bitmask: friends=2, photos=4, status=1024, offline=65536; total=66566.
@@ -2198,13 +2198,30 @@ def run_download_job(
         or profile_data.get("driver")
         or ""
     ).strip().lower() if isinstance(profile_data, dict) else ""
-    remote_db = db_type not in ("", "sqlite", "sqlite3", "local", "file")
+    db_host = str(profile_data.get("host") or "").strip().lower() if isinstance(profile_data, dict) else ""
+    remote_db = (
+        db_type not in ("", "sqlite", "sqlite3", "local", "file")
+        and db_host not in ("", "localhost", "127.0.0.1", "::1")
+    )
+
+    saved_backend = ""
+    if importer is not None:
+        saved_settings = getattr(importer, "face_search_gui_settings", {})
+        if isinstance(saved_settings, dict):
+            saved_backend = str(saved_settings.get("backend") or "").strip().lower()
+    # Импортёр использует выбранный backend FaceSearch. Без импорта распознавания
+    # не нагружают GPU, поэтому автоограничение GPU применяется только при импорте.
+    worker_backend = (
+        "gpu"
+        if import_to_database and saved_backend not in ("cpu",)
+        else "cpu"
+    )
 
     worker_controller = None
     try:
         worker_controller = AdaptiveWorkerController(
             initial_workers=0 if auto_workers else requested_worker_count,
-            backend="cpu",
+            backend=worker_backend,
             operation="vk_download",
             input_paths=[],
             output_path=output_root,
@@ -3893,7 +3910,18 @@ def main():
 
         def worker():
             importer = None
+            telemetry_stop = threading.Event()
+            telemetry_thread = threading.Thread(
+                target=_gpu_telemetry_worker,
+                args=(telemetry_stop,),
+                daemon=True,
+                name="VKSystemTelemetry",
+            )
             try:
+                # В основной форме телеметрию обновляет фоновый worker GUI.
+                # В отдельном загрузчике запускаем тот же worker сами, иначе CPU/RAM
+                # остаются первым снимком, а GPU-кэш не заполняется вовсе.
+                telemetry_thread.start()
                 importer = FaceSearchImporter(
                     facesearch_dir,
                     status_callback=lambda message: events.put(("status", message)),
@@ -3948,6 +3976,9 @@ def main():
                 import traceback
                 traceback.print_exc()
             finally:
+                telemetry_stop.set()
+                if telemetry_thread.is_alive():
+                    telemetry_thread.join(timeout=3.0)
                 if importer is not None:
                     try:
                         importer.close()
