@@ -2210,7 +2210,12 @@ def run_download_job(
     )
 
     if delete_processed_files and import_to_database:
-        print("🧹 Очистка включена: после успешного импорта будут удаляться оба файла и пустая папка пользователя.")
+        print(
+            "🧹 Очистка включена: после успешной обработки удаляются исходники без лиц "
+            "и случаи, когда БД подтвердила существующий источник/CROP; пустые папки удаляются. "
+            "При выключенном создании CROP новые исходники с найденными лицами сохраняются "
+            "для возможного последующего восстановления CROP."
+        )
     print("ℹ️ Режим последовательного обхода работает до нажатия «Остановить»." if not specific_mode else "ℹ️ Режим конкретных ID завершится после обработки списка или нажатия «Остановить».")
 
     with requests.Session() as session:
@@ -2344,6 +2349,9 @@ def run_download_job(
                 next_task_index = 0
                 pending = {}
                 batch_errors = 0
+                # При остановке возобновляемся с самого раннего профиля,
+                # который не удалось обработать или который ещё не запускался.
+                batch_retry_ids = set()
                 batch_finished = 0
 
                 def submit_next_tasks():
@@ -2412,6 +2420,7 @@ def run_download_job(
                             if outcome_status == "download_error":
                                 download_errors_total += 1
                                 batch_errors += 1
+                                batch_retry_ids.add(int(uid))
                                 continue
 
                             if outcome_status != "downloaded":
@@ -2453,6 +2462,7 @@ def run_download_job(
                                             )
                                     except Exception as exc:
                                         batch_errors += 1
+                                        batch_retry_ids.add(int(downloaded_uid))
                                         import_errors_total += 1
                                         print(
                                             f"[DB-ERROR] ID {downloaded_uid} | {downloaded_name} | {image_path.name}: "
@@ -2611,6 +2621,7 @@ def run_download_job(
                                             )
                                         except Exception as exc:
                                             cleanup_errors_total += 1
+                                            batch_retry_ids.add(int(downloaded_uid))
                                             print(
                                                 f"[CLEANUP-ERROR] ID {downloaded_uid}: импорт завершился, "
                                                 f"но не удалось удалить {image_path.name} и/или JSON: {exc}"
@@ -2639,6 +2650,7 @@ def run_download_job(
 
                         except Exception as exc:
                             batch_errors += 1
+                            batch_retry_ids.add(int(uid))
                             download_errors_total += 1
                             print(
                                 f"[DOWNLOAD-ERROR] ID {uid} | {name_by_id.get(uid, f'user_{uid}')}: "
@@ -2670,9 +2682,21 @@ def run_download_job(
                     )
 
                 if STOP_REQUESTED.is_set():
-                    # В последовательном режиме сохраняем старт для возобновления.
+                    # Все уже отправленные задачи завершены. Возобновляемся с самого
+                    # раннего ID, который завершился ошибкой или ещё не был отправлен.
+                    # Не откатываемся на начало всей пачки только из-за одной ошибки.
                     if not specific_mode:
-                        current_id = batch_start if (next_task_index < len(tasks) or batch_errors) else batch_end
+                        resume_candidates = set(batch_retry_ids)
+                        if next_task_index < len(tasks):
+                            try:
+                                resume_candidates.add(int(tasks[next_task_index][0]))
+                            except (TypeError, ValueError, IndexError):
+                                pass
+                        current_id = min(resume_candidates) if resume_candidates else batch_end
+                        print(
+                            f"[STOP-CURSOR] Следующий запуск продолжится с ID {current_id}; "
+                            f"повторяемых/не запущенных профилей в текущей пачке: {len(resume_candidates)}."
+                        )
                     break
 
                 print(
