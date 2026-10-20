@@ -1886,6 +1886,9 @@ def collect_photos(
 
     if completed:
         print(f"[CACHE] Уже обработано: {len(completed)}; осталось: {len(pending_entries)}")
+    if stop_requested():
+        return stopped_result()
+
     if not pending_entries:
         finish_successfully()
         status_callback(
@@ -2315,6 +2318,8 @@ def main():
     commands: queue.Queue[tuple] = queue.Queue()
     browser_ready = threading.Event()
     browser_state = {"error": None}
+    stop_event = threading.Event()
+    job_state = {"running": False}
 
     def browser_worker():
         try:
@@ -2395,7 +2400,14 @@ def main():
                                 build_index_after=build_index_after,
                                 progress_callback=set_progress,
                                 delete_processed_files=delete_processed_files,
+                                stop_event=stop_event,
                             )
+                            if stop_event.is_set():
+                                set_status(
+                                    "Остановлено. Все начатые загрузки, импорты в БД "
+                                    "и удаление обработанных файлов завершены."
+                                )
+                                set_progress(1, 1, "Остановлено; активные операции завершены")
                         except Exception as exc:
                             print(f"[ERROR] {exc}")
                             set_status(f"Ошибка: {exc}")
@@ -2406,6 +2418,25 @@ def main():
                                     importer.close()
                                 except Exception as exc:
                                     print(f"[WARN] Ошибка закрытия БД FaceSearch: {exc}")
+                            # Разблокируем новый запуск только после закрытия импортёра/БД.
+                            was_stopped = stop_event.is_set()
+                            def finish_collect_ui():
+                                job_state["running"] = False
+                                try:
+                                    collect_button.configure(state="normal")
+                                    stop_button.configure(state="disabled")
+                                    if was_stopped:
+                                        status_var.set(
+                                            "Остановлено. Все начатые загрузки, импорты в БД "
+                                            "и очистка файлов завершены."
+                                        )
+                                        progress_stage_var.set("Остановлено; активные операции завершены")
+                                except tk.TclError:
+                                    pass
+                            try:
+                                root.after(0, finish_collect_ui)
+                            except tk.TclError:
+                                pass
                 if context is not None:
                     context.close()
         except Exception as exc:
@@ -2706,6 +2737,8 @@ def main():
     update_import_options_state()
 
     def start_collect():
+        if job_state["running"]:
+            return
         if not browser_ready.is_set():
             status_var.set("Браузер ещё запускается…")
             return
@@ -2717,6 +2750,10 @@ def main():
             if config is None:
                 return
         persist_settings()
+        stop_event.clear()
+        job_state["running"] = True
+        collect_button.configure(state="disabled")
+        stop_button.configure(state="normal")
         commands.put((
             "collect",
             fullsize_var.get(),
@@ -2730,12 +2767,35 @@ def main():
         set_progress(None, None, "Задание отправлено; выполняется подготовка…")
         status_var.set("Задание отправлено…")
 
-    ttk.Button(
-        frame,
+    collect_controls = ttk.Frame(frame, style="App.TFrame")
+    collect_controls.grid(row=8, column=0, sticky="ew")
+    collect_controls.columnconfigure(0, weight=1)
+    collect_button = ttk.Button(
+        collect_controls,
         text="Получить изображения и импортировать в FaceSearch",
         command=start_collect,
         style="Accent.TButton",
-    ).grid(row=8, column=0, sticky="ew", ipady=6)
+    )
+    collect_button.grid(row=0, column=0, sticky="ew", ipady=6, padx=(0, 6))
+    def stop_collect():
+        if not job_state["running"] or stop_event.is_set():
+            return
+        stop_event.set()
+        stop_button.configure(state="disabled")
+        status_var.set(
+            "Останавливаю: текущая фотография завершит загрузку, импорт в БД "
+            "и очистку, после чего новые фотографии запускаться не будут…"
+        )
+        progress_stage_var.set("Остановка запрошена; завершаются активные операции")
+
+    stop_button = ttk.Button(
+        collect_controls,
+        text="■ Остановить",
+        command=stop_collect,
+        state="disabled",
+        style="Danger.TButton",
+    )
+    stop_button.grid(row=0, column=1, sticky="ew", ipady=6)
 
     ttk.Label(
         frame,
