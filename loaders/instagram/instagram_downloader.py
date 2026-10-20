@@ -1961,16 +1961,16 @@ def main():
     delete_check.pack(anchor="w", pady=1)
 
     config_status_var = tk.StringVar(value="Папка FaceSearch: " + str(facesearch_dir_var.get()))
-    ttk.Label(frame, textvariable=config_status_var, wraplength=900).grid(row=3, column=0, sticky="ew", pady=(0, 5))
+    ttk.Label(frame, textvariable=config_status_var, wraplength=900, style="App.TLabel").grid(row=3, column=0, sticky="ew", pady=(0, 5))
     status_var = tk.StringVar(value="Запускается Chrome…")
-    ttk.Label(frame, textvariable=status_var, wraplength=900).grid(row=4, column=0, sticky="ew", pady=(0, 3))
+    ttk.Label(frame, textvariable=status_var, wraplength=900, style="App.TLabel").grid(row=4, column=0, sticky="ew", pady=(0, 3))
     progress_label_var = tk.StringVar(value="Ожидание задания")
-    ttk.Label(frame, textvariable=progress_label_var, wraplength=900).grid(row=5, column=0, sticky="ew", pady=(0, 3))
+    ttk.Label(frame, textvariable=progress_label_var, wraplength=900, style="App.TLabel").grid(row=5, column=0, sticky="ew", pady=(0, 3))
     progress_bar = ttk.Progressbar(frame, mode="determinate", maximum=100, value=0)
     progress_bar.grid(row=6, column=0, sticky="ew", pady=(0, 8))
     progress_state = {"mode": "determinate"}
 
-    ttk.Label(frame, text=f"Папка загрузки: {OUT_DIR}", wraplength=900).grid(row=8, column=0, sticky="w", pady=(6, 0))
+    ttk.Label(frame, text=f"Папка загрузки: {OUT_DIR}", wraplength=900, style="App.TLabel").grid(row=8, column=0, sticky="w", pady=(6, 0))
 
     def persist_settings():
         save_settings({
