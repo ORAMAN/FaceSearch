@@ -2552,14 +2552,13 @@ def import_image_bundle(
     if old_crop_rows:
         _cleanup_replaced_crop_files(old_crop_rows, created_files)
 
-    if delete_source and create_crop_files:
-        # При выключенном CROP сохраняем исходник с лицами для возможного
-        # восстановления crop-файлов; отсутствие лиц обрабатывается отдельно выше.
-        deleted = _delete_processed_source_files(
-            image_path, json_path, stop_at=source_root
-        )
-    else:
-        deleted = False
+    # Чекбокс удаления определяет судьбу локальной пары после успешного импорта.
+    # URL источника и метаданные уже сохранены в БД, поэтому отсутствие локального
+    # CROP-файла не является причиной оставлять скачанные image/JSON на диске.
+    deleted = (
+        _delete_processed_source_files(image_path, json_path, stop_at=source_root)
+        if delete_source else False
+    )
 
     return {
         "faces": created,
@@ -2591,10 +2590,10 @@ def process_local_image(
 
     Для каждого найденного лица создаётся отдельная запись images/faces.
     При create_crop_files=False embedding и ожидаемый путь CROP сохраняются
-    в БД, но JPEG не записывается. Исходник с найденными лицами сохраняется,
-    чтобы CROP можно было позднее восстановить. Если лица не найдены, это
-    штатный результат: при delete_source=True исходник удаляется. Пустые
-    вложенные каталоги очищаются только внутри source_root.
+    в БД, но JPEG не записывается. Если delete_source=True, обработанный
+    исходник (и переданный sidecar JSON) удаляется после успешной обработки
+    независимо от create_crop_files. Пустые вложенные каталоги очищаются
+    только внутри source_root; при ошибке файл сохраняется.
     """
     delete_source = bool(delete_source)
     overwrite_existing_crops = bool(overwrite_existing_crops)
@@ -2686,20 +2685,18 @@ def process_local_image(
                     conn, existing_image, existing_faces, existing_rows
                 )
 
-        # Закрываем read-only транзакцию. Исходник удаляем при включённом чекбоксе,
-        # кроме случая, когда он нужен для восстановления отсутствующих CROP.
+        # Закрываем read-only транзакцию и применяем явный выбор пользователя:
+        # после успешного результата обработанный локальный источник удаляется
+        # независимо от наличия локальных CROP-файлов.
         try:
             conn.rollback()
         except Exception:
             pass
-        # При выключенном создании CROP сохраняем исходник, если в БД ещё
-        # отсутствуют CROP-файлы: он может понадобиться для восстановления.
-        needs_source_for_repair = bool(missing_existing_rows) and (
-            not create_crop_files or restored_missing_crops < len(missing_existing_rows)
-        )
         deleted = (
-            _delete_processed_source_files(image_path, stop_at=source_root)
-            if delete_source and not needs_source_for_repair else False
+            _delete_processed_source_files(
+                image_path, no_face_metadata_path, stop_at=source_root
+            )
+            if delete_source else False
         )
         message = "исходник уже есть в БД"
         if restored_missing_crops:
@@ -2741,7 +2738,7 @@ def process_local_image(
         deleted = (
             _delete_processed_source_files(
                 image_path,
-                no_face_metadata_path if delete_on_no_faces else None,
+                no_face_metadata_path if (delete_source or delete_on_no_faces) else None,
                 stop_at=source_root,
             )
             if delete_source or delete_on_no_faces else False
@@ -2897,9 +2894,14 @@ def process_local_image(
             conn.rollback()
             _rollback_crop_file_writes(created_files, crop_file_backups)
 
-            # Все crop уже есть в БД. Даже после успешной обработки локальный
-            # исходник оставляем на диске: удаляются только пары image+JSON.
-            deleted = False
+            # Дубликат/уже существующие CROP — штатный результат обработки.
+            # При включённом чекбоксе удаляем локальный источник и sidecar JSON.
+            deleted = (
+                _delete_processed_source_files(
+                    image_path, no_face_metadata_path, stop_at=source_root
+                )
+                if delete_source else False
+            )
 
             return {
                 "faces": 0,
@@ -2924,9 +2926,14 @@ def process_local_image(
     if overwrite_existing_crops and existing_rows:
         _cleanup_replaced_crop_files(existing_rows, created_files)
 
-    # Даже если распознавание прошло успешно, отдельный локальный исходник
-    # без обработки пары image+JSON не удаляем.
-    deleted = False
+    # Удаляем обработанный локальный источник после успешного коммита,
+    # независимо от того, создавались ли физические CROP-файлы.
+    deleted = (
+        _delete_processed_source_files(
+            image_path, no_face_metadata_path, stop_at=source_root
+        )
+        if delete_source else False
+    )
 
     return {
         "faces": created,
@@ -6888,7 +6895,7 @@ class FaceSearchGUI:
         crop_text = (
             ", создание CROP ВКЛ"
             if create_crop_files
-            else ", создание CROP ВЫКЛ (исходники с лицами могут сохраняться для восстановления)"
+            else ", создание CROP ВЫКЛ (удаление исходников зависит от чекбокса)"
         )
         overwrite_text = ", перезапись CROP ВКЛ" if overwrite_existing_crops else ""
         batch_text = (
