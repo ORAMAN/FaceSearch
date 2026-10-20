@@ -3741,7 +3741,15 @@ def main():
                 )
                 if source_mode == "counter":
                     events.put(("start_id_updated", next_start_id))
-                if importer is not None and auto_import and build_index_after and not window_closing.is_set():
+                # После Stop новые этапы не запускаем: сначала run_download_job
+                # дожидается всех отправленных загрузок и импортирует их результаты.
+                if (
+                    importer is not None
+                    and auto_import
+                    and build_index_after
+                    and not window_closing.is_set()
+                    and not STOP_REQUESTED.is_set()
+                ):
                     importer.build_index()
                 if importer is not None and auto_import:
                     print(f"✅ FaceSearch: вызовов импортёра без исключения — {importer.imported_count}; фактические новые/обновлённые записи см. в строках [DB-NEW]/[DB-UPDATED]/[DB-CHANGED] и в [ИТОГ].")
@@ -3764,7 +3772,10 @@ def main():
     def stop_job():
         if running["value"]:
             STOP_REQUESTED.set()
-            status_var.set("Запрошена остановка. Текущий сетевой запрос/загрузка может завершиться перед остановкой.")
+            status_var.set(
+                "Остановка запрошена: новые профили не запускаются; уже начатые загрузки "
+                "завершатся, их результаты будут импортированы в БД и очищены по настройке."
+            )
             stop_button.configure(state="disabled")
 
     start_button = ttk.Button(action_frame, text="Начать загрузку", command=start_job, style="Accent.TButton")
@@ -3884,7 +3895,11 @@ def main():
                     progress_bar.configure(mode="determinate")
                     set_running(False)
                     progress_text_var.set("Задание остановлено" if event[1] else "Задание завершено")
-                    status_var.set("Задание остановлено. Скачанные файлы сохранены." if event[1] else "Задание завершено. Проверьте журнал для итогов.")
+                    status_var.set(
+                        "Остановлено. Все начатые загрузки, импорты в БД и очистка обработанных файлов завершены."
+                        if event[1]
+                        else "Задание завершено. Проверьте журнал для итогов."
+                    )
                     progress_bar["value"] = 0 if event[1] else progress_bar["maximum"]
         except queue.Empty:
             pass
