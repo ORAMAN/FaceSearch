@@ -3197,12 +3197,24 @@ def main():
     )
     auto_workers_check.grid(row=0, column=2, sticky="w", padx=(12, 0), pady=3)
     workers_status_var = tk.StringVar(value="Автоподстройка числа потоков включена.")
-    ttk.Label(
+    workers_status_label = ttk.Label(
         settings_frame,
         textvariable=workers_status_var,
         wraplength=560,
         anchor="w",
-    ).grid(row=6, column=0, columnspan=4, sticky="ew", pady=(8, 1))
+        justify="left",
+    )
+    # Информационная строка занимает всю ширину группы; перенос рассчитывается
+    # по доступной ширине, а не по фиксированным 560 пикселям.
+    workers_status_label.grid(
+        row=6, column=0, columnspan=4, sticky="ew", pady=(8, 1)
+    )
+
+    def resize_workers_status_label(event=None):
+        width = getattr(event, "width", 0) or settings_frame.winfo_width()
+        workers_status_label.configure(wraplength=max(200, int(width) - 24))
+
+    settings_frame.bind("<Configure>", resize_workers_status_label, add="+")
 
     download_albums_var = tk.BooleanVar(value=False)
     all_albums_var = tk.BooleanVar(value=False)
