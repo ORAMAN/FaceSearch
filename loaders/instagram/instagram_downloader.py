@@ -1444,7 +1444,8 @@ def launch_browser_context(playwright, profile_directory: str, chrome_executable
 
 def collect_instagram(context, status_callback, progress_callback,
                       fullsize: bool, importer: FaceSearchImporter | None,
-                      build_index_after: bool, delete_processed_files: bool) -> dict:
+                      build_index_after: bool, delete_processed_files: bool,
+                      stop_event: threading.Event | None = None) -> dict:
     """Collects images from the profile tab already open in Chrome; does not navigate it."""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     page = find_open_instagram_page(context)
@@ -1553,6 +1554,9 @@ def collect_instagram(context, status_callback, progress_callback,
                 pass
         foreign_posts_skipped = 0
         for pos, entry in enumerate(entries, 1):
+            if stop_event is not None and stop_event.is_set():
+                print("[STOP] Новые публикации не разбираются; завершится обработка текущего изображения.")
+                break
             code = str(entry.get("shortcode") or "")
             raw_preview = absolute_url(str(entry.get("preview") or ""), requested_url)
             assets = []
@@ -1645,6 +1649,22 @@ def collect_instagram(context, status_callback, progress_callback,
             pass
 
     if not candidates:
+        if stop_event is not None and stop_event.is_set():
+            message = "Остановлено. Новые изображения не загружались; начатые действия завершены."
+            status_callback(message)
+            progress_callback(1, 1, "Остановлено")
+            user_slug_for_report = safe_filename(username)
+            return {
+                "posts": len(entries), "media": 0, "downloaded": 0, "reused": 0,
+                "duplicate_images": duplicate_url_candidates, "imported": 0,
+                "db_added_faces": 0, "db_updated_records": 0, "db_no_face": 0,
+                "db_noop": 0, "db_metadata_refreshed": 0, "failed": 0,
+                "foreign_posts_skipped": 0, "import_failed": 0,
+                "import_error_samples": [], "incomplete_posts": [],
+                "scan_warning": scan_warning,
+                "run_report_path": str(OUT_DIR / f"{user_slug_for_report}_instagram_run_report.json"),
+                "username": username, "mode": mode, "stopped": True,
+            }
         raise RuntimeError("Instagram показал список публикаций, но URL изображений получить не удалось.")
 
     # Stable key makes repeated runs idempotent even when signed CDN URLs rotate.
@@ -1695,6 +1715,7 @@ def collect_instagram(context, status_callback, progress_callback,
             "db_metadata_refreshed": db_metadata_refreshed,
             "db_import_failures": import_failed,
             "db_import_error_samples": import_error_samples,
+            "stopped": bool(stop_event is not None and stop_event.is_set()),
         }
         tmp_report = run_report_path.with_suffix(".tmp")
         tmp_report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1702,6 +1723,10 @@ def collect_instagram(context, status_callback, progress_callback,
 
     save_run_report(final=False)
     for idx, item in enumerate(candidates, 1):
+        # Проверяем Stop только между изображениями; текущие загрузка, JSON,
+        # импорт/транзакция БД и удаление успешно обработанного файла завершаются.
+        if stop_event is not None and stop_event.is_set():
+            break
         code = str(item.get("shortcode") or "unknown")
         slide = int(item.get("slide") or 1)
         # Zero-padded slide number ensures stable filename ordering in Explorer.
@@ -1881,10 +1906,16 @@ def collect_instagram(context, status_callback, progress_callback,
                 status_callback(f"Ошибка импорта {image_path.name}: {exc}")
         progress_callback(idx, total, f"Изображения: {idx}/{total}")
 
-    if importer and build_index_after and (db_added_faces or db_updated_records):
+    stopped = bool(stop_event is not None and stop_event.is_set())
+    # Не запускаем необязательное построение индекса после запроса Stop.
+    if not stopped and importer and build_index_after and (db_added_faces or db_updated_records):
         importer.build_index(progress_callback=progress_callback)
     save_run_report(final=True)
-    progress_callback(1, 1, "Готово")
+    progress_callback(1, 1, "Остановлено; активные операции завершены" if stopped else "Готово")
+    if stopped:
+        status_callback(
+            "Остановлено. Все начатые загрузки, импорты в БД и очистка обработанных файлов завершены."
+        )
     return {
         "posts": len(entries), "media": len(candidates), "downloaded": downloaded,
         "reused": reused, "duplicate_images": duplicate_images,
@@ -1895,7 +1926,7 @@ def collect_instagram(context, status_callback, progress_callback,
         "import_failed": import_failed, "import_error_samples": import_error_samples,
         "incomplete_posts": incomplete_posts, "scan_warning": scan_warning,
         "run_report_path": str(run_report_path),
-        "username": username, "mode": mode,
+        "username": username, "mode": mode, "stopped": stopped,
     }
 
 
