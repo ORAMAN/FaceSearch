@@ -249,7 +249,14 @@ def install_edit_shortcuts(root: tk.Misc) -> bool:
             return None
 
         is_cyrillic = keysym.startswith("cyrillic_") or char in _CYRILLIC_CHARS
-        if action in {"copy", "cut", "paste", "undo", "redo"} and not is_cyrillic:
+        is_native_english = (
+            not is_cyrillic
+            and (
+                keysym in {"c", "v", "x", "z", "y"}
+                or char in {"c", "v", "x", "z", "y"}
+            )
+        )
+        if action in {"copy", "cut", "paste", "undo", "redo"} and is_native_english:
             # Tk's standard class binding has already handled the English-key
             # operation before bind_all. Do not repeat it (especially paste/undo).
             return "break"
