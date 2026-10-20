@@ -3741,15 +3741,17 @@ def main():
                 )
                 if source_mode == "counter":
                     events.put(("start_id_updated", next_start_id))
-                # После Stop новые этапы не запускаем: сначала run_download_job
-                # дожидается всех отправленных загрузок и импортирует их результаты.
+                # Stop прекращает запуск новых профилей, но не отменяет явно
+                # выбранный финальный этап. run_download_job к этому моменту уже
+                # дождался всех отправленных загрузок, импортов и очистки; поэтому
+                # при включённом флажке строим индекс по итоговой БД и после Stop.
                 if (
                     importer is not None
                     and auto_import
                     and build_index_after
                     and not window_closing.is_set()
-                    and not STOP_REQUESTED.is_set()
                 ):
+                    events.put(("status", "Загрузки остановлены/завершены; строю FAISS-индекс по итоговой базе…"))
                     importer.build_index()
                 if importer is not None and auto_import:
                     print(f"✅ FaceSearch: вызовов импортёра без исключения — {importer.imported_count}; фактические новые/обновлённые записи см. в строках [DB-NEW]/[DB-UPDATED]/[DB-CHANGED] и в [ИТОГ].")
