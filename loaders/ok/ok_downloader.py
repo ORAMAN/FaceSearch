@@ -739,7 +739,11 @@ def collect_photo_entries(page) -> dict[str, dict]:
         return out;
     }""")
 
-def collect_photo_entries_with_scroll(page, status_callback=None) -> dict[str, dict]:
+def collect_photo_entries_with_scroll(
+    page,
+    status_callback=None,
+    stop_event: threading.Event | None = None,
+) -> dict[str, dict]:
     """Собирает фотографии с ленивой подгрузкой и рано заканчивает на простое."""
     result: dict[str, dict] = {}
     idle_rounds = 0
@@ -747,6 +751,8 @@ def collect_photo_entries_with_scroll(page, status_callback=None) -> dict[str, d
     idle_limit = 4
 
     for i in range(max_rounds):
+        if stop_event is not None and stop_event.is_set():
+            break
         try:
             chunk = collect_photo_entries(page)
         except Exception as exc:
@@ -789,8 +795,12 @@ def collect_photo_entries_with_scroll(page, status_callback=None) -> dict[str, d
 
 # ============================ Резолв оригинала через лайтбокс ============================
 
-def resolve_fullsize_urls(context, photo_entries: dict[str, dict],
-                          status_callback=None) -> dict[str, str]:
+def resolve_fullsize_urls(
+    context,
+    photo_entries: dict[str, dict],
+    status_callback=None,
+    stop_event: threading.Event | None = None,
+) -> dict[str, str]:
     """Получает URL изображения из DOM, а при неудаче — из запросов текущего лайтбокса.
 
     Важно: сетевые ответы собираются отдельно для каждого photo_id. Смайлы,
@@ -841,6 +851,9 @@ def resolve_fullsize_urls(context, photo_entries: dict[str, dict],
     total = len(photo_entries)
     try:
         for i, (pid, entry) in enumerate(photo_entries.items(), 1):
+            # Текущий лайтбокс-запрос завершается; новые фото после Stop не открываем.
+            if stop_event is not None and stop_event.is_set():
+                break
             if status_callback:
                 status_callback(f"Получение оригинала {i}/{total}…")
 
@@ -1595,6 +1608,9 @@ def collect_photos(
     except PlaywrightTimeoutError:
         pass
 
+    if stop_requested():
+        return stopped_result()
+
     if not page.locator(PHOTO_CONTAINER).count():
         status_callback("Не найден div.photo-stream на активной вкладке.")
         report_progress(0, 1, "Операция не выполнена: раздел «Фото» не найден")
@@ -1622,7 +1638,9 @@ def collect_photos(
     # 1. Собираем photo_id -> {preview, href}
     status_callback("Собираю список фотографий…")
     report_progress(None, None, "Сбор списка фотографий и прокрутка ленты…")
-    entries = collect_photo_entries_with_scroll(page, status_callback)
+    entries = collect_photo_entries_with_scroll(page, status_callback, stop_event=stop_event)
+    if stop_requested():
+        return stopped_result()
 
     if not entries:
         status_callback("Не удалось собрать фотографии: не найдены карточки .photo-card или .photo_stream_photo-card.")
@@ -1906,7 +1924,9 @@ def collect_photos(
     if resolve_fullsize:
         status_callback(f"Получаю URL оригиналов: {len(pending_entries)} фотографий…")
         report_progress(None, None, f"Получение URL оригиналов: {len(pending_entries)} фотографий…")
-        url_map = resolve_fullsize_urls(context, pending_entries, status_callback)
+        url_map = resolve_fullsize_urls(
+            context, pending_entries, status_callback, stop_event=stop_event
+        )
     else:
         url_map = {pid: preview_map.get(pid, "") for pid in pending_entries}
         for pending_entry in pending_entries.values():
