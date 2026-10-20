@@ -11,7 +11,7 @@ import webbrowser
 import importlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 import requests
@@ -176,8 +176,8 @@ def apply_vk_window_icon(root) -> None:
             response = requests.get(VK_FAVICON_URL, timeout=4)
             response.raise_for_status()
             data = response.content
-            if len(data) < 8:
-                raise ValueError("vk.ru вернул слишком короткий favicon.ico")
+            if len(data) < 8 or data[:4] != b"\x00\x00\x01\x00":
+                raise ValueError("vk.ru не вернул корректный ICO-файл")
             temporary = VK_FAVICON_PATH.with_suffix(".ico.tmp")
             temporary.write_bytes(data)
             temporary.replace(VK_FAVICON_PATH)
@@ -1854,7 +1854,7 @@ def main():
 
     def refresh_token_count():
         count = reload_token_cache()
-        token_count_var.set(f"Токенов в {VK_TOKEN_FILE.name}: {count}")
+        token_count_var.set(f"Рабочих токенов v1 в {VK_TOKEN_FILE.name}: {count}")
 
     def open_token_file():
         VK_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -2234,7 +2234,7 @@ def main():
                     status_var.set(event[1])
                 elif kind == "token_saved":
                     success, user_name, added, count, error = event[1:]
-                    token_count_var.set(f"Токенов в {VK_TOKEN_FILE.name}: {count}")
+                    token_count_var.set(f"Рабочих токенов v1 в {VK_TOKEN_FILE.name}: {count}")
                     if hasattr(root, "_vk_token_save_button"):
                         try:
                             root._vk_token_save_button.configure(state="normal", text="Проверить и сохранить")
