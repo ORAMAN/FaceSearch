@@ -1502,7 +1502,12 @@ def launch_browser_context(playwright, profile_directory: str | Path, chrome_exe
 
 
 def delete_processed_pair(image_path: Path | None, json_path: Path | None, *, enabled: bool) -> int:
-    """Удаляет только пару изображения/JSON внутри OUT_DIR после успешной обработки."""
+    """Удаляет пару изображения/JSON внутри OUT_DIR после обработки.
+
+    Удаление определяется чекбоксом, а не настройкой создания CROP:
+    URL изображения уже сохраняется в метаданных/БД и не требует хранения
+    временной локальной копии после успешного результата импорта.
+    """
     if not enabled:
         return 0
     root = OUT_DIR.resolve()
