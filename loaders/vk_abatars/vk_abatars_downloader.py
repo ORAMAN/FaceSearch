@@ -1895,10 +1895,93 @@ def main():
         except Exception as exc:
             messagebox.showerror("Файл токенов", f"Не удалось открыть файл:\n{exc}", parent=root)
 
+    token_check_running = {"value": False}
+    token_check_button = None
+
+    def start_token_check():
+        """Проверяет сохранённые токены по одному, не блокируя Tkinter."""
+        if token_check_running["value"]:
+            return
+
+        try:
+            saved_tokens = _read_all_token_file()
+            valid_format_count = reload_token_cache()
+        except Exception as exc:
+            auth_status_var.set(f"Не удалось прочитать файл токенов: {exc}")
+            print(f"[TOKEN-CHECK-ERROR] Не удалось прочитать {VK_TOKEN_FILE.name}: {type(exc).__name__}: {exc}")
+            return
+
+        token_count_var.set(f"Рабочих токенов v1 в {VK_TOKEN_FILE.name}: {valid_format_count}")
+        print("\n" + "=" * 68)
+        print(f"[TOKEN-CHECK] Проверка авторизации токенов из {VK_TOKEN_FILE.name}.")
+        if not saved_tokens:
+            print(f"[TOKEN-CHECK-SUMMARY] Файл не содержит сохранённых токенов.")
+            auth_status_var.set(f"В {VK_TOKEN_FILE.name} нет сохранённых токенов для проверки.")
+            return
+
+        token_check_running["value"] = True
+        token_check_button.configure(state="disabled", text="Проверка…")
+        auth_status_var.set(f"Начата проверка токенов: {len(saved_tokens)} шт.")
+
+        def worker():
+            success_count = 0
+            failed_count = 0
+            skipped_count = 0
+            total = len(saved_tokens)
+            try:
+                print(f"[TOKEN-CHECK] Всего уникальных записей: {total}; формат vk1.a… поддерживается загрузчиком.")
+                for index, token in enumerate(saved_tokens, start=1):
+                    events.put(("token_check_progress", index, total, f"Проверка токена {index}/{total}…"))
+                    if not _is_v1_token(token):
+                        skipped_count += 1
+                        print(
+                            f"[TOKEN-CHECK-SKIP] Токен {index}/{total}: неподдерживаемый формат; "
+                            "авторизация не проверялась, загрузчик использует только токены vk1.a… ."
+                        )
+                        continue
+
+                    try:
+                        user_name = validate_access_token(token)
+                    except Exception as exc:
+                        failed_count += 1
+                        error_text = str(exc).replace(token, "[токен скрыт]")
+                        print(
+                            f"[TOKEN-CHECK-ERROR] Токен {index}/{total}: авторизация не прошла — "
+                            f"{type(exc).__name__}: {error_text}"
+                        )
+                    else:
+                        success_count += 1
+                        print(
+                            f"[TOKEN-CHECK-OK] Токен {index}/{total}: авторизация через VK API успешна; "
+                            f"пользователь: {user_name}."
+                        )
+            except Exception as exc:
+                failed_count += 1
+                error_text = str(exc)
+                print(f"[TOKEN-CHECK-ERROR] Проверка прервана: {type(exc).__name__}: {error_text}")
+            finally:
+                print(
+                    f"[TOKEN-CHECK-SUMMARY] Записей: {total}; проверок авторизации завершено: "
+                    f"{success_count + failed_count}; успешно: {success_count}; ошибок: {failed_count}; "
+                    f"пропущено (неподдерживаемый формат): {skipped_count}."
+                )
+                print("=" * 68)
+                events.put(("token_check_finished", success_count, failed_count, skipped_count, total))
+
+        try:
+            threading.Thread(target=worker, daemon=True, name="VKTokenCheckWorker").start()
+        except Exception as exc:
+            token_check_running["value"] = False
+            token_check_button.configure(state="normal", text="Проверить токены")
+            auth_status_var.set(f"Не удалось запустить проверку токенов: {exc}")
+            print(f"[TOKEN-CHECK-ERROR] Не удалось запустить проверку: {type(exc).__name__}: {exc}")
+
     ttk.Button(auth_buttons, text="Получить токен через VK ID…", command=lambda: start_v1_authorization()).pack(side="left", padx=(0, 6))
     ttk.Button(auth_buttons, text="Добавить токен v1 вручную…", command=lambda: open_auth_dialog()).pack(side="left", padx=(0, 6))
     ttk.Button(auth_buttons, text="Открыть vk_token.txt", command=open_token_file).pack(side="left", padx=(0, 6))
-    ttk.Button(auth_buttons, text="Обновить список", command=refresh_token_count).pack(side="left")
+    ttk.Button(auth_buttons, text="Обновить список", command=refresh_token_count).pack(side="left", padx=(0, 6))
+    token_check_button = ttk.Button(auth_buttons, text="Проверить токены", command=start_token_check)
+    token_check_button.pack(side="left")
 
     def open_auth_dialog():
         dialog = tk.Toplevel(root)
@@ -2239,15 +2322,15 @@ def main():
                     log_text.configure(state="normal")
                     entry_text = str(event[1])
                     entry_tag = None
-                    if "[DB-IMPORTED]" in entry_text or "[AVATAR-OK]" in entry_text:
+                    if "[DB-IMPORTED]" in entry_text or "[AVATAR-OK]" in entry_text or "[TOKEN-CHECK-OK]" in entry_text:
                         entry_tag = "log_added"
-                    elif "[DB-SKIP]" in entry_text:
+                    elif "[DB-SKIP]" in entry_text or "[TOKEN-CHECK-SKIP]" in entry_text:
                         entry_tag = "log_skip"
                     elif "[VK-NOT-FOUND]" in entry_text or "[NO-AVATAR]" in entry_text or "[VK-DEACTIVATED]" in entry_text:
                         entry_tag = "log_missing"
-                    elif "[ERROR]" in entry_text or "[AVATAR-ERROR]" in entry_text or "[DOWNLOAD-ERROR]" in entry_text or "[DB-ERROR]" in entry_text or "[VK-API-ERROR]" in entry_text or "[CLEANUP-ERROR]" in entry_text:
+                    elif "[ERROR]" in entry_text or "[AVATAR-ERROR]" in entry_text or "[DOWNLOAD-ERROR]" in entry_text or "[DB-ERROR]" in entry_text or "[VK-API-ERROR]" in entry_text or "[CLEANUP-ERROR]" in entry_text or "[TOKEN-CHECK-ERROR]" in entry_text:
                         entry_tag = "log_error"
-                    elif "[CLEANUP]" in entry_text or "[SAVED-NO-IMPORT]" in entry_text:
+                    elif "[CLEANUP]" in entry_text or "[SAVED-NO-IMPORT]" in entry_text or "[TOKEN-CHECK]" in entry_text:
                         entry_tag = "log_info"
                     if entry_tag:
                         log_text.insert("end", entry_text, entry_tag)
@@ -2280,6 +2363,19 @@ def main():
                     start_id_var.set(str(event[1]))
                 elif kind == "status":
                     status_var.set(event[1])
+                elif kind == "token_check_progress":
+                    auth_status_var.set(event[3])
+                elif kind == "token_check_finished":
+                    success_count, failed_count, skipped_count, total = event[1:]
+                    token_check_running["value"] = False
+                    try:
+                        token_check_button.configure(state="normal", text="Проверить токены")
+                    except tk.TclError:
+                        pass
+                    auth_status_var.set(
+                        f"Проверка завершена: успешно {success_count}, ошибок {failed_count}, "
+                        f"пропущено {skipped_count} из {total}. Подробности — в журнале."
+                    )
                 elif kind == "token_saved":
                     success, user_name, added, count, error = event[1:]
                     token_count_var.set(f"Рабочих токенов v1 в {VK_TOKEN_FILE.name}: {count}")
