@@ -42,7 +42,9 @@ CROP/
 CROPS/
 *.faiss
 *.index
-loaders/ok/OK_Browser_Profile
+loaders/ok/Browser_Profile/
+loaders/instagram/Browser_Profile/
+query_cache/
 
 # Временные и системные файлы Windows
 *.tmp
