@@ -3440,10 +3440,10 @@ def main():
 
     search_online_var = tk.BooleanVar(value=False)
     search_photo_var = tk.BooleanVar(value=False)
-    ttk.Checkbutton(search_frame, text="Только онлайн", variable=search_online_var, command=save_gui_settings).grid(
+    ttk.Checkbutton(search_frame, text="Только онлайн", variable=search_online_var, command=lambda: save_gui_settings()).grid(
         row=3, column=0, columnspan=2, sticky="w", pady=2
     )
-    ttk.Checkbutton(search_frame, text="Только с фотографией", variable=search_photo_var, command=save_gui_settings).grid(
+    ttk.Checkbutton(search_frame, text="Только с фотографией", variable=search_photo_var, command=lambda: save_gui_settings()).grid(
         row=3, column=2, columnspan=3, sticky="w", pady=2
     )
 
