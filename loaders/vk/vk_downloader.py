@@ -678,13 +678,7 @@ def _response_items(response_data):
     return [], 0
 
 
-def _vk_get_page(
-    method: str,
-    params: dict,
-    session: requests.Session,
-    timeout: int = 20,
-    base_url: str | None = None,
-):
+def _vk_get_page(method: str, params: dict, session: requests.Session, timeout: int = 20):
     """Вызов VK API с повторами для временных ограничений и ротацией токена."""
     last_error = None
     for attempt in range(3):
@@ -695,8 +689,7 @@ def _vk_get_page(
             time.sleep(0.75 * attempt)
         else:
             time.sleep(0.35)
-        api_base = (base_url or BASE_URL).rstrip("/")
-        response = session.get(f"{api_base}/{method}", params=request_params, timeout=timeout)
+        response = session.get(f"{BASE_URL}/{method}", params=request_params, timeout=timeout)
         response.raise_for_status()
         payload = response.json()
         error = payload.get("error") if isinstance(payload, dict) else None
@@ -717,6 +710,246 @@ def _vk_get_page(
 # users.search ограничивает доступную выдачу первыми 1000 результатами.
 SEARCH_MAX_RESULTS = 1000
 NO_COUNTRY_LABEL = "— Не выбрано —"
+# Снимок справочника VK country_id; встроен, чтобы не вызывать недоступный database.getCountries.
+# Источник исходного списка: https://github.com/iriscot/beconnect-may-2017/blob/c796a8b42300d0b548bd05cc6727375a4ce35115/www/assets/js/beconnect.js
+VK_COUNTRIES = (
+    (19, "Австралия"),
+    (20, "Австрия"),
+    (5, "Азербайджан"),
+    (21, "Албания"),
+    (22, "Алжир"),
+    (23, "Американское Самоа"),
+    (24, "Ангилья"),
+    (25, "Ангола"),
+    (26, "Андорра"),
+    (27, "Антигуа и Барбуда"),
+    (28, "Аргентина"),
+    (6, "Армения"),
+    (29, "Аруба"),
+    (30, "Афганистан"),
+    (31, "Багамы"),
+    (32, "Бангладеш"),
+    (33, "Барбадос"),
+    (34, "Бахрейн"),
+    (3, "Беларусь"),
+    (35, "Белиз"),
+    (36, "Бельгия"),
+    (37, "Бенин"),
+    (38, "Бермуды"),
+    (39, "Болгария"),
+    (40, "Боливия"),
+    (235, "Бонайре, Синт-Эстатиус и Саба"),
+    (41, "Босния и Герцеговина"),
+    (42, "Ботсвана"),
+    (43, "Бразилия"),
+    (44, "Бруней-Даруссалам"),
+    (45, "Буркина-Фасо"),
+    (46, "Бурунди"),
+    (47, "Бутан"),
+    (48, "Вануату"),
+    (233, "Ватикан"),
+    (49, "Великобритания"),
+    (50, "Венгрия"),
+    (51, "Венесуэла"),
+    (52, "Виргинские острова, Британские"),
+    (53, "Виргинские острова, США"),
+    (54, "Восточный Тимор"),
+    (55, "Вьетнам"),
+    (56, "Габон"),
+    (57, "Гаити"),
+    (58, "Гайана"),
+    (59, "Гамбия"),
+    (60, "Гана"),
+    (61, "Гваделупа"),
+    (62, "Гватемала"),
+    (63, "Гвинея"),
+    (64, "Гвинея-Бисау"),
+    (65, "Германия"),
+    (236, "Гернси"),
+    (66, "Гибралтар"),
+    (67, "Гондурас"),
+    (68, "Гонконг"),
+    (69, "Гренада"),
+    (70, "Гренландия"),
+    (71, "Греция"),
+    (7, "Грузия"),
+    (72, "Гуам"),
+    (73, "Дания"),
+    (237, "Джерси"),
+    (231, "Джибути"),
+    (74, "Доминика"),
+    (75, "Доминиканская Республика"),
+    (76, "Египет"),
+    (77, "Замбия"),
+    (78, "Западная Сахара"),
+    (79, "Зимбабве"),
+    (8, "Израиль"),
+    (80, "Индия"),
+    (81, "Индонезия"),
+    (82, "Иордания"),
+    (83, "Ирак"),
+    (84, "Иран"),
+    (85, "Ирландия"),
+    (86, "Исландия"),
+    (87, "Испания"),
+    (88, "Италия"),
+    (89, "Йемен"),
+    (90, "Кабо-Верде"),
+    (4, "Казахстан"),
+    (91, "Камбоджа"),
+    (92, "Камерун"),
+    (10, "Канада"),
+    (93, "Катар"),
+    (94, "Кения"),
+    (95, "Кипр"),
+    (96, "Кирибати"),
+    (97, "Китай"),
+    (98, "Колумбия"),
+    (99, "Коморы"),
+    (100, "Конго"),
+    (101, "Конго, демократическая республика"),
+    (102, "Коста-Рика"),
+    (103, "Кот д`Ивуар"),
+    (104, "Куба"),
+    (105, "Кувейт"),
+    (11, "Кыргызстан"),
+    (138, "Кюрасао"),
+    (106, "Лаос"),
+    (12, "Латвия"),
+    (107, "Лесото"),
+    (108, "Либерия"),
+    (109, "Ливан"),
+    (110, "Ливия"),
+    (13, "Литва"),
+    (111, "Лихтенштейн"),
+    (112, "Люксембург"),
+    (113, "Маврикий"),
+    (114, "Мавритания"),
+    (115, "Мадагаскар"),
+    (116, "Макао"),
+    (117, "Македония"),
+    (118, "Малави"),
+    (119, "Малайзия"),
+    (120, "Мали"),
+    (121, "Мальдивы"),
+    (122, "Мальта"),
+    (123, "Марокко"),
+    (124, "Мартиника"),
+    (125, "Маршалловы Острова"),
+    (126, "Мексика"),
+    (127, "Микронезия, федеративные штаты"),
+    (128, "Мозамбик"),
+    (15, "Молдова"),
+    (129, "Монако"),
+    (130, "Монголия"),
+    (131, "Монтсеррат"),
+    (132, "Мьянма"),
+    (133, "Намибия"),
+    (134, "Науру"),
+    (135, "Непал"),
+    (136, "Нигер"),
+    (137, "Нигерия"),
+    (139, "Нидерланды"),
+    (140, "Никарагуа"),
+    (141, "Ниуэ"),
+    (142, "Новая Зеландия"),
+    (143, "Новая Каледония"),
+    (144, "Норвегия"),
+    (145, "Объединенные Арабские Эмираты"),
+    (146, "Оман"),
+    (147, "Остров Мэн"),
+    (148, "Остров Норфолк"),
+    (149, "Острова Кайман"),
+    (150, "Острова Кука"),
+    (151, "Острова Теркс и Кайкос"),
+    (152, "Пакистан"),
+    (153, "Палау"),
+    (154, "Палестинская автономия"),
+    (155, "Панама"),
+    (156, "Папуа - Новая Гвинея"),
+    (157, "Парагвай"),
+    (158, "Перу"),
+    (159, "Питкерн"),
+    (160, "Польша"),
+    (161, "Португалия"),
+    (162, "Пуэрто-Рико"),
+    (163, "Реюньон"),
+    (1, "Россия"),
+    (164, "Руанда"),
+    (165, "Румыния"),
+    (9, "США"),
+    (166, "Сальвадор"),
+    (167, "Самоа"),
+    (168, "Сан-Марино"),
+    (169, "Сан-Томе и Принсипи"),
+    (170, "Саудовская Аравия"),
+    (171, "Свазиленд"),
+    (172, "Святая Елена"),
+    (173, "Северная Корея"),
+    (174, "Северные Марианские острова"),
+    (175, "Сейшелы"),
+    (176, "Сенегал"),
+    (177, "Сент-Винсент"),
+    (178, "Сент-Китс и Невис"),
+    (179, "Сент-Люсия"),
+    (180, "Сент-Пьер и Микелон"),
+    (181, "Сербия"),
+    (182, "Сингапур"),
+    (234, "Синт-Мартен"),
+    (183, "Сирийская Арабская Республика"),
+    (184, "Словакия"),
+    (185, "Словения"),
+    (186, "Соломоновы Острова"),
+    (187, "Сомали"),
+    (188, "Судан"),
+    (189, "Суринам"),
+    (190, "Сьерра-Леоне"),
+    (16, "Таджикистан"),
+    (191, "Таиланд"),
+    (192, "Тайвань"),
+    (193, "Танзания"),
+    (194, "Того"),
+    (195, "Токелау"),
+    (196, "Тонга"),
+    (197, "Тринидад и Тобаго"),
+    (198, "Тувалу"),
+    (199, "Тунис"),
+    (17, "Туркменистан"),
+    (200, "Турция"),
+    (201, "Уганда"),
+    (18, "Узбекистан"),
+    (2, "Украина"),
+    (202, "Уоллис и Футуна"),
+    (203, "Уругвай"),
+    (204, "Фарерские острова"),
+    (205, "Фиджи"),
+    (206, "Филиппины"),
+    (207, "Финляндия"),
+    (208, "Фолклендские острова"),
+    (209, "Франция"),
+    (210, "Французская Гвиана"),
+    (211, "Французская Полинезия"),
+    (212, "Хорватия"),
+    (213, "Центрально-Африканская Республика"),
+    (214, "Чад"),
+    (230, "Черногория"),
+    (215, "Чехия"),
+    (216, "Чили"),
+    (217, "Швейцария"),
+    (218, "Швеция"),
+    (219, "Шпицберген и Ян Майен"),
+    (220, "Шри-Ланка"),
+    (221, "Эквадор"),
+    (222, "Экваториальная Гвинея"),
+    (223, "Эритрея"),
+    (14, "Эстония"),
+    (224, "Эфиопия"),
+    (226, "Южная Корея"),
+    (227, "Южно-Африканская Республика"),
+    (232, "Южный Судан"),
+    (228, "Ямайка"),
+    (229, "Япония"),
+)
 VK_USER_SEARCH_FIELDS = (
     "photo_max_orig,city,country,home_town,sex,bdate,screen_name,deactivated,is_closed,"
     "status,site,about,activities,interests,education,universities,occupation,"
@@ -739,25 +972,15 @@ def country_id_from_selection(value) -> int | None:
     return country_id if country_id > 0 else None
 
 
-def search_vk_countries(session: requests.Session) -> list[dict]:
-    """Загружает страны из VK API; если метод недоступен на новом домене, пробует legacy endpoint."""
-    params = {"need_all": 1, "count": 1000, "offset": 0}
-    try:
-        response_data = _vk_get_page(
-            "database.getCountries", params, session, timeout=20,
-        )
-    except RuntimeError as exc:
-        # Некоторые токены/версии API отвечают кодом 3 на api.vk.ru, хотя метод
-        # ещё доступен через прежний endpoint. Не меняем BASE_URL всего загрузчика.
-        if "код 3" not in str(exc):
-            raise
-        print("[INFO] database.getCountries: пробую резервный endpoint api.vk.com.")
-        response_data = _vk_get_page(
-            "database.getCountries", params, session, timeout=20,
-            base_url="https://api.vk.com/method",
-        )
-    items, _total = _response_items(response_data)
-    return [item for item in items if isinstance(item, dict) and item.get("id") and item.get("title")]
+def country_label_from_id(value) -> str:
+    """Возвращает отображаемое название страны для сохранённого VK ID."""
+    country_id = country_id_from_selection(value)
+    if not country_id:
+        return NO_COUNTRY_LABEL
+    for known_id, title in VK_COUNTRIES:
+        if known_id == country_id:
+            return f"{title} (ID {known_id})"
+    return f"ID {country_id}"
 
 
 def search_vk_cities(query: str, country_id: int, session: requests.Session) -> list[dict]:
@@ -3464,12 +3687,13 @@ def main():
     ttk.Label(search_frame, text="Страна:").grid(row=1, column=3, sticky="w", padx=(0, 6), pady=2)
     search_country_combo = ttk.Combobox(
         search_frame, textvariable=search_country_var, state="readonly", width=22,
-        values=(NO_COUNTRY_LABEL,),
+        values=(NO_COUNTRY_LABEL,) + tuple(
+            f"{title} (ID {country_id})"
+            for country_id, title in sorted(VK_COUNTRIES, key=lambda item: (item[1].casefold(), item[0]))
+        ),
     )
     search_country_combo.grid(row=1, column=4, sticky="ew", pady=2)
-    country_status_var = tk.StringVar(value="Список стран будет загружен из VK API.")
-    country_refresh_button = ttk.Button(search_frame, text="Обновить", width=10, command=lambda: load_vk_countries_async())
-    country_refresh_button.grid(row=1, column=5, sticky="w", padx=(5, 0), pady=2)
+    country_status_var = tk.StringVar(value=f"Встроенный список стран VK: {len(VK_COUNTRIES)}. Запрос к API не требуется.")
     ttk.Label(search_frame, textvariable=country_status_var, wraplength=600).grid(
         row=5, column=0, columnspan=6, sticky="w", pady=(2, 0)
     )
@@ -3741,8 +3965,7 @@ def main():
         specific_ids_text.insert("1.0", str(defaults.get("specific_ids", "")))
         search_query_var.set(str(defaults.get("search_query", "")))
         search_city_var.set(str(defaults.get("search_city", "")))
-        saved_country_id = country_id_from_selection(defaults.get("search_country", ""))
-        search_country_var.set(f"ID {saved_country_id}" if saved_country_id else NO_COUNTRY_LABEL)
+        search_country_var.set(country_label_from_id(defaults.get("search_country", "")))
         saved_sex = defaults.get("search_sex", 0)
         search_sex_var.set({1: "Женщины (1)", 2: "Мужчины (2)"}.get(
             int(saved_sex) if str(saved_sex).isdigit() else 0, "Любой (0)"
@@ -3849,7 +4072,6 @@ def main():
         for widget in (
             search_query_entry, search_city_entry, search_sex_combo,
             search_age_from_entry, search_age_to_entry, search_offset_entry, city_lookup_button,
-            country_refresh_button,
         ):
             try:
                 widget.configure(state="normal" if search_mode else "disabled")
@@ -3865,67 +4087,6 @@ def main():
                 "VK users.search сообщает общее количество совпадений, но доступно не более первых 1000 результатов. "
                 "Для большей выдачи уточните фильтры; смещение сохраняется при остановке."
             )
-
-    country_loading = {"value": False}
-    restoring_country_selection = {"value": False}
-
-    def load_vk_countries_async():
-        """Загружает список стран без блокировки главного окна Tkinter."""
-        if country_loading["value"]:
-            return
-        if not _read_token_file():
-            country_status_var.set("Добавьте рабочий токен VK API, затем нажмите «Обновить».")
-            return
-        country_loading["value"] = True
-        country_refresh_button.configure(state="disabled")
-        country_status_var.set("Загружается список стран из VK API…")
-
-        def worker():
-            countries = []
-            error_text = None
-            try:
-                with requests.Session() as country_session:
-                    countries = search_vk_countries(country_session)
-            except Exception as exc:
-                error_text = f"{type(exc).__name__}: {exc}"
-
-            def finish():
-                country_loading["value"] = False
-                country_refresh_button.configure(
-                    state="normal" if acquisition_mode_var.get() == "search" else "disabled"
-                )
-                if error_text:
-                    country_status_var.set("Не удалось загрузить страны. Проверьте токен и нажмите «Обновить».")
-                    print(f"[WARN] Не удалось загрузить страны VK: {error_text}")
-                    return
-                country_items = []
-                for country in countries:
-                    try:
-                        country_id = int(country.get("id"))
-                        title = str(country.get("title") or "").strip()
-                    except (TypeError, ValueError):
-                        continue
-                    if country_id > 0 and title:
-                        country_items.append((title, country_id))
-                country_items.sort(key=lambda item: (item[0].casefold(), item[1]))
-                selected_id = country_id_from_selection(search_country_var.get())
-                country_labels = {country_id: f"{title} (ID {country_id})" for title, country_id in country_items}
-                country_values = [NO_COUNTRY_LABEL] + [country_labels[country_id] for _title, country_id in country_items]
-                if selected_id and selected_id not in country_labels:
-                    country_values.append(f"ID {selected_id}")
-                search_country_combo.configure(values=tuple(country_values))
-                restoring_country_selection["value"] = True
-                try:
-                    search_country_var.set(
-                        country_labels.get(selected_id, f"ID {selected_id}" if selected_id else NO_COUNTRY_LABEL)
-                    )
-                finally:
-                    restoring_country_selection["value"] = False
-                country_status_var.set(f"Загружено стран: {len(country_items)}. Выберите страну из списка.")
-
-            root.after(0, finish)
-
-        threading.Thread(target=worker, name="vk-country-list", daemon=True).start()
 
     def open_city_picker():
         country_id = country_id_from_selection(search_country_var.get())
@@ -4096,8 +4257,6 @@ def main():
 
     def reset_search_offset_on_filter_change(*_args):
         """Новый набор фильтров начинает поиск с нуля, если задание сейчас не выполняется."""
-        if restoring_country_selection["value"]:
-            return
         try:
             is_running = bool(running["value"])
         except NameError:
@@ -4117,8 +4276,6 @@ def main():
         search_age_from_var, search_age_to_var, search_online_var, search_photo_var,
     ):
         variable.trace_add("write", reset_search_offset_on_filter_change)
-
-    root.after(300, load_vk_countries_async)
 
     def refresh_token_count():
         count = reload_token_cache()
