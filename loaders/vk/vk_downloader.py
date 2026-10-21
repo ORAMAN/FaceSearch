@@ -52,7 +52,9 @@ _META_DUPLICATE_REASON = "_duplicate_reason"
 API_VERSION = "5.199"
 BASE_URL = "https://api.vk.ru/method"
 FRIENDS_PAGE_SIZE = 5000
-USER_BATCH_SIZE = 1000
+USER_BATCH_SIZE = 100
+# Пакет users.search — отдельный параметр: этот метод имеет собственную пагинацию.
+SEARCH_PAGE_SIZE = 1000
 # Обычные системные альбомы VK. photos.get использует для них строковые
 # album_id: profile, wall и saved; остальные значения остаются числовыми.
 SYSTEM_ALBUM_OPTIONS = (
@@ -652,8 +654,8 @@ def get_user_friends(user_id: int, session: requests.Session):
             all_items.extend(item for item in items if item.get("id") is not None)
         else:
             ids = [str(item) for item in items if str(item).isdigit()]
-            for start in range(0, len(ids), 1000):
-                batch = ids[start:start + 1000]
+            for start in range(0, len(ids), USER_BATCH_SIZE):
+                batch = ids[start:start + USER_BATCH_SIZE]
                 if batch:
                     all_items.extend(get_user_info(",".join(batch), session))
 
@@ -2725,7 +2727,7 @@ def run_download_job(
                     if search_offset >= search_accessible_total:
                         break
                     batch_start = search_offset
-                    requested_count = min(USER_BATCH_SIZE, search_accessible_total - search_offset)
+                    requested_count = min(SEARCH_PAGE_SIZE, search_accessible_total - search_offset)
                     try:
                         search_page = _vk_get_page(
                             "users.search",
