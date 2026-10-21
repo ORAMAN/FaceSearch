@@ -802,10 +802,12 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     const placeholder=box&&box.querySelector(".no-image");
     image.style.display="none";
     if(placeholder){
-      // Текст остаётся неизменным между запросами; анимация показывает,
+      // Текст и DOM не меняются во время опроса: анимация показывает,
       // что проверка продолжается, не создавая визуального подёргивания.
-      placeholder.textContent="Идёт создание миниатюры";
-      placeholder.classList.add("creating");
+      if(!placeholder.classList.contains("creating")){
+        placeholder.textContent="Идёт создание миниатюры";
+        placeholder.classList.add("creating");
+      }
       placeholder.hidden=false;
     }
     try{
@@ -830,10 +832,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
         return;
       }
       if(data.state==="creating"){
-        if(placeholder){
-          placeholder.textContent="Идёт создание миниатюры";
-          placeholder.hidden=false;
-        }
+        if(placeholder)placeholder.hidden=false;
         image._cropStatusTimer=setTimeout(function(){
           pollCropStatus(image,requestId);
         },1500);
