@@ -26,6 +26,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -39,6 +40,12 @@ from facesearch.card_text_filter import (
 )
 
 APP_DIR = Path(__file__).resolve().parent
+
+# REPAIR_HTTP_RETRIES — число повторов после первой попытки в repair_missing_crops.
+# Значение 1 ограничивает суммарное число сетевых попыток двумя.
+if hasattr(face_search, "REPAIR_HTTP_RETRIES"):
+    face_search.REPAIR_HTTP_RETRIES = 1
+
 MAX_BODY_BYTES = 24 * 1024 * 1024
 MAX_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
@@ -693,7 +700,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     image.onerror=function(){
       if(image.dataset.cropEnabled==="true"&&CREATE_CROPS_ON_HTML){
         const retries=Number(image.dataset.cropRetryCount||"0");
-        if(retries<180){
+        if(retries<1){
           image.dataset.cropRetryCount=String(retries+1);
           if(image._cropRetryTimer)clearTimeout(image._cropRetryTimer);
           image._cropRetryTimer=setTimeout(function(){
@@ -702,9 +709,9 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
           },1500);
           return;
         }
-        // Как в HTML-отчёте, после ожидания переключаемся на оригинал.
-        image.dataset.cropEnabled="false";
-        image.src=faceImageUrl(image.dataset.faceId,false,true);
+        // После двух суммарных запросов не продолжаем опрос и не подменяем
+        // отсутствующий CROP оригиналом: показываем единый placeholder.
+        showImageFailure(image);
         return;
       }
       showImageFailure(image);
@@ -1194,7 +1201,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       const score=document.createElement("div");score.className="score";score.textContent=Number(item.similarity||0).toFixed(2)+"%";
       const image=document.createElement("img");image.loading="lazy";image.dataset.faceImage="true";
       image.alt=displayName||("Лицо ID "+faceId);
-      const placeholder=document.createElement("div");placeholder.className="no-image";placeholder.textContent="Изображение недоступно";placeholder.hidden=true;
+      const placeholder=document.createElement("div");placeholder.className="no-image";placeholder.textContent="Нет изображения";placeholder.hidden=true;
       imageBox.append(image,placeholder,rank,score);
       configureCardImage(image,faceId,useCropCheckbox.checked,false);
       const body=document.createElement("div");body.className="card-body";
@@ -1280,7 +1287,13 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
     server_version = "FaceSearchHTTP/1.0"
 
     def log_message(self, fmt, *args):
-        print("[HTTP] " + (fmt % args))
+        # Access log для каждого HTTP-ответа: локальное время и IP TCP-клиента.
+        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        try:
+            client_ip = str(self.client_address[0])
+        except (IndexError, TypeError):
+            client_ip = "unknown"
+        print(f"[HTTP] {timestamp} IP={client_ip} " + (fmt % args), flush=True)
 
     def _send(self, status: int, body: bytes, content_type: str, extra_headers=None):
         self.send_response(status)
