@@ -1136,7 +1136,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       }else if(state==="loading"){
         message=info.reload_message||"Загружается новая версия FAISS. Запросы поиска временно ожидают переключения.";
       }else if(state==="error"){
-        message=(info.reload_message||"Не удалось обновить FAISS-индекс.")+" При доступности старой версии сервер продолжает использовать её.";
+        message=info.reload_message||"Не удалось обновить FAISS-индекс. Сервер продолжает использовать прежнюю версию, если она была загружена.";
         className="error";
         indexNoticeUntil=0;
       }else if(state==="missing"){
