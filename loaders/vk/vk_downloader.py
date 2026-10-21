@@ -2432,6 +2432,7 @@ def run_download_job(
         # потоке, где создано соединение FaceSearch (важно для SQLite).
         # AUTO использует пул с верхним пределом контроллера, а фактическое число
         # одновременно подаваемых заданий меняется без пересоздания ThreadPoolExecutor.
+        with ThreadPoolExecutor(max_workers=pool_worker_limit, thread_name_prefix="VKDownload") as executor:
             while not STOP_REQUESTED.is_set():
                 search_users_batch = {}
                 if specific_mode:
@@ -3976,7 +3977,11 @@ def main():
     update_album_settings_state()
     update_id_source_state()
     update_worker_control_state()
-    for variable in (output_var, facesearch_dir_var, start_id_var, workers_var, album_photo_limit_var, friend_depth_var):
+    for variable in (
+        output_var, facesearch_dir_var, start_id_var, workers_var, album_photo_limit_var, friend_depth_var,
+        search_query_var, search_city_var, search_country_var, search_sex_var,
+        search_age_from_var, search_age_to_var, search_online_var, search_photo_var, search_offset_var,
+    ):
         variable.trace_add("write", lambda *_args: save_gui_settings())
 
     def refresh_token_count():
