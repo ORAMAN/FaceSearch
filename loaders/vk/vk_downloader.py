@@ -3694,9 +3694,13 @@ def main():
     search_city_entry.grid(row=1, column=1, sticky="w", pady=2)
     city_lookup_button = ttk.Button(search_frame, text="Найти город…")
     city_lookup_button.grid(row=1, column=2, sticky="w", padx=(5, 12), pady=2)
+    search_city_name_var = tk.StringVar(value="")
+    ttk.Label(search_frame, text="Название города:").grid(row=1, column=3, sticky="w", padx=(0, 6), pady=2)
+    search_city_name_entry = ttk.Entry(search_frame, textvariable=search_city_name_var, state="readonly")
+    search_city_name_entry.grid(row=1, column=4, columnspan=2, sticky="ew", pady=2)
 
     search_country_var = tk.StringVar(value=NO_COUNTRY_LABEL)
-    ttk.Label(search_frame, text="Страна:").grid(row=1, column=3, sticky="w", padx=(0, 6), pady=2)
+    ttk.Label(search_frame, text="Страна:").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=2)
     search_country_combo = ttk.Combobox(
         search_frame, textvariable=search_country_var, state="readonly", width=22,
         values=(NO_COUNTRY_LABEL,) + tuple(
@@ -3704,43 +3708,43 @@ def main():
             for country_id, title in sorted(VK_COUNTRIES, key=lambda item: (item[1].casefold(), item[0]))
         ),
     )
-    search_country_combo.grid(row=1, column=4, sticky="ew", pady=2)
+    search_country_combo.grid(row=2, column=1, columnspan=2, sticky="ew", pady=2)
     country_status_var = tk.StringVar(value=f"Встроенный список стран VK: {len(VK_COUNTRIES)}. Запрос к API не требуется.")
     ttk.Label(search_frame, textvariable=country_status_var, wraplength=600).grid(
         row=5, column=0, columnspan=6, sticky="w", pady=(2, 0)
     )
 
     search_sex_var = tk.StringVar(value="Любой (0)")
-    ttk.Label(search_frame, text="Пол:").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=2)
+    ttk.Label(search_frame, text="Пол:").grid(row=2, column=3, sticky="w", padx=(8, 6), pady=2)
     search_sex_combo = ttk.Combobox(
         search_frame, textvariable=search_sex_var, state="readonly", width=15,
         values=("Любой (0)", "Женщины (1)", "Мужчины (2)"),
     )
-    search_sex_combo.grid(row=2, column=1, sticky="w", pady=2)
+    search_sex_combo.grid(row=2, column=4, columnspan=2, sticky="w", pady=2)
 
     search_age_from_var = tk.StringVar(value="")
     search_age_to_var = tk.StringVar(value="")
-    ttk.Label(search_frame, text="Возраст от:").grid(row=2, column=2, sticky="e", padx=(8, 4), pady=2)
+    ttk.Label(search_frame, text="Возраст от:").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=2)
     search_age_from_entry = ttk.Entry(search_frame, textvariable=search_age_from_var, width=5)
-    search_age_from_entry.grid(row=2, column=3, sticky="w", pady=2)
-    ttk.Label(search_frame, text="до:").grid(row=2, column=4, sticky="e", padx=(4, 4), pady=2)
+    search_age_from_entry.grid(row=3, column=1, sticky="w", pady=2)
+    ttk.Label(search_frame, text="до:").grid(row=3, column=2, sticky="e", padx=(8, 4), pady=2)
     search_age_to_entry = ttk.Entry(search_frame, textvariable=search_age_to_var, width=5)
-    search_age_to_entry.grid(row=2, column=5, sticky="w", pady=2)
+    search_age_to_entry.grid(row=3, column=3, sticky="w", pady=2)
 
     search_online_var = tk.BooleanVar(value=False)
     search_photo_var = tk.BooleanVar(value=False)
     ttk.Checkbutton(search_frame, text="Только онлайн", variable=search_online_var, command=lambda: save_gui_settings()).grid(
-        row=3, column=0, columnspan=2, sticky="w", pady=2
+        row=3, column=4, sticky="w", pady=2
     )
     ttk.Checkbutton(search_frame, text="Только с фотографией", variable=search_photo_var, command=lambda: save_gui_settings()).grid(
-        row=3, column=2, columnspan=3, sticky="w", pady=2
+        row=3, column=5, sticky="w", pady=2
     )
 
     search_offset_var = tk.StringVar(value="0")
     ttk.Label(search_frame, text="Стартовое смещение:").grid(row=4, column=0, columnspan=2, sticky="w", padx=(0, 6), pady=2)
     search_offset_entry = ttk.Entry(search_frame, textvariable=search_offset_var, width=10)
     search_offset_entry.grid(row=4, column=2, sticky="w", pady=2)
-    ttk.Label(search_frame, text="0 — начало выдачи. Смещение сохраняется при остановке.", wraplength=330).grid(
+    ttk.Label(search_frame, text="0 — начало выдачи. Смещение сохраняется при остановке.", wraplength=450).grid(
         row=4, column=3, columnspan=3, sticky="w", padx=(8, 0), pady=2
     )
 
@@ -3940,6 +3944,7 @@ def main():
             "friend_depth": 0,
             "search_query": "",
             "search_city": "",
+            "search_city_name": "",
             "search_country": "",
             "search_sex": 0,
             "search_age_from": "",
@@ -3977,6 +3982,7 @@ def main():
         specific_ids_text.insert("1.0", str(defaults.get("specific_ids", "")))
         search_query_var.set(str(defaults.get("search_query", "")))
         search_city_var.set(str(defaults.get("search_city", "")))
+        search_city_name_var.set(str(defaults.get("search_city_name", "")))
         search_country_var.set(country_label_from_id(defaults.get("search_country", "")))
         saved_sex = defaults.get("search_sex", 0)
         search_sex_var.set({1: "Женщины (1)", 2: "Мужчины (2)"}.get(
@@ -4030,6 +4036,7 @@ def main():
             "friend_depth": friend_depth_var.get().strip() or "0",
             "search_query": search_query_var.get().strip(),
             "search_city": search_city_var.get().strip(),
+            "search_city_name": search_city_name_var.get().strip(),
             "search_country": country_id_from_selection(search_country_var.get()) or "",
             "search_sex": {"Женщины (1)": 1, "Мужчины (2)": 2}.get(search_sex_var.get(), 0),
             "search_age_from": search_age_from_var.get().strip(),
@@ -4161,6 +4168,7 @@ def main():
                 return
             city_id, _city_title = city_map[selection[0]]
             search_city_var.set(str(city_id))
+            search_city_name_var.set(query.strip())
             save_gui_settings()
             dialog.destroy()
         city_list.bind("<Double-Button-1>", choose_city)
@@ -4272,7 +4280,7 @@ def main():
     update_worker_control_state()
     for variable in (
         output_var, facesearch_dir_var, start_id_var, workers_var, album_photo_limit_var, friend_depth_var,
-        search_query_var, search_city_var, search_country_var, search_sex_var,
+        search_query_var, search_city_var, search_city_name_var, search_country_var, search_sex_var,
         search_age_from_var, search_age_to_var, search_online_var, search_photo_var, search_offset_var,
     ):
         variable.trace_add("write", lambda *_args: save_gui_settings())
