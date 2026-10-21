@@ -709,11 +709,39 @@ def _vk_get_page(method: str, params: dict, session: requests.Session, timeout: 
 
 # users.search ограничивает доступную выдачу первыми 1000 результатами.
 SEARCH_MAX_RESULTS = 1000
+NO_COUNTRY_LABEL = "— Не выбрано —"
 VK_USER_SEARCH_FIELDS = (
     "photo_max_orig,city,country,home_town,sex,bdate,screen_name,deactivated,is_closed,"
     "status,site,about,activities,interests,education,universities,occupation,"
     "followers_count,verified,has_photo,last_seen,online,counters"
 )
+
+
+def country_id_from_selection(value) -> int | None:
+    """Извлекает числовой ID из выбранной страны или старой настройки с одним ID."""
+    raw = str(value or "").strip()
+    if raw.isdigit():
+        country_id = int(raw)
+        return country_id if country_id > 0 else None
+    match = re.search(r"\(\s*ID\s*(\d+)\s*\)\s*$", raw, re.IGNORECASE)
+    if not match:
+        match = re.fullmatch(r"ID\s*(\d+)", raw, re.IGNORECASE)
+    if not match:
+        return None
+    country_id = int(match.group(1))
+    return country_id if country_id > 0 else None
+
+
+def search_vk_countries(session: requests.Session) -> list[dict]:
+    """Загружает страны из VK API, чтобы пользователь выбирал название, а не вводил ID."""
+    response_data = _vk_get_page(
+        "database.getCountries",
+        {"need_all": 1, "count": 1000, "offset": 0},
+        session,
+        timeout=20,
+    )
+    items, _total = _response_items(response_data)
+    return [item for item in items if isinstance(item, dict) and item.get("id") and item.get("title")]
 
 
 def search_vk_cities(query: str, country_id: int, session: requests.Session) -> list[dict]:
@@ -3416,10 +3444,19 @@ def main():
     city_lookup_button = ttk.Button(search_frame, text="Найти город…")
     city_lookup_button.grid(row=1, column=2, sticky="w", padx=(5, 12), pady=2)
 
-    search_country_var = tk.StringVar(value="")
-    ttk.Label(search_frame, text="Страна ID:").grid(row=1, column=3, sticky="w", padx=(0, 6), pady=2)
-    search_country_entry = ttk.Entry(search_frame, textvariable=search_country_var, width=10)
-    search_country_entry.grid(row=1, column=4, sticky="w", pady=2)
+    search_country_var = tk.StringVar(value=NO_COUNTRY_LABEL)
+    ttk.Label(search_frame, text="Страна:").grid(row=1, column=3, sticky="w", padx=(0, 6), pady=2)
+    search_country_combo = ttk.Combobox(
+        search_frame, textvariable=search_country_var, state="readonly", width=22,
+        values=(NO_COUNTRY_LABEL,),
+    )
+    search_country_combo.grid(row=1, column=4, sticky="ew", pady=2)
+    country_status_var = tk.StringVar(value="Список стран будет загружен из VK API.")
+    country_refresh_button = ttk.Button(search_frame, text="Обновить", width=10, command=lambda: load_vk_countries_async())
+    country_refresh_button.grid(row=1, column=5, sticky="w", padx=(5, 0), pady=2)
+    ttk.Label(search_frame, textvariable=country_status_var, wraplength=600).grid(
+        row=5, column=0, columnspan=6, sticky="w", pady=(2, 0)
+    )
 
     search_sex_var = tk.StringVar(value="Любой (0)")
     ttk.Label(search_frame, text="Пол:").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=2)
@@ -3688,7 +3725,8 @@ def main():
         specific_ids_text.insert("1.0", str(defaults.get("specific_ids", "")))
         search_query_var.set(str(defaults.get("search_query", "")))
         search_city_var.set(str(defaults.get("search_city", "")))
-        search_country_var.set(str(defaults.get("search_country", "")))
+        saved_country_id = country_id_from_selection(defaults.get("search_country", ""))
+        search_country_var.set(f"ID {saved_country_id}" if saved_country_id else NO_COUNTRY_LABEL)
         saved_sex = defaults.get("search_sex", 0)
         search_sex_var.set({1: "Женщины (1)", 2: "Мужчины (2)"}.get(
             int(saved_sex) if str(saved_sex).isdigit() else 0, "Любой (0)"
@@ -3741,7 +3779,7 @@ def main():
             "friend_depth": friend_depth_var.get().strip() or "0",
             "search_query": search_query_var.get().strip(),
             "search_city": search_city_var.get().strip(),
-            "search_country": search_country_var.get().strip(),
+            "search_country": country_id_from_selection(search_country_var.get()) or "",
             "search_sex": {"Женщины (1)": 1, "Мужчины (2)": 2}.get(search_sex_var.get(), 0),
             "search_age_from": search_age_from_var.get().strip(),
             "search_age_to": search_age_to_var.get().strip(),
@@ -3793,13 +3831,15 @@ def main():
         specific_ids_text.configure(state="normal" if specific_mode else "disabled")
         friend_depth_spin.configure(state="normal" if specific_mode else "disabled")
         for widget in (
-            search_query_entry, search_city_entry, search_country_entry, search_sex_combo,
+            search_query_entry, search_city_entry, search_sex_combo,
             search_age_from_entry, search_age_to_entry, search_offset_entry, city_lookup_button,
+            country_refresh_button,
         ):
             try:
                 widget.configure(state="normal" if search_mode else "disabled")
             except tk.TclError:
                 pass
+        search_country_combo.configure(state="readonly" if search_mode else "disabled")
         if counter_mode:
             source_help_var.set("В режиме счётчика обход продолжается от стартового ID до нажатия «Остановить».")
         elif specific_mode:
@@ -3810,21 +3850,75 @@ def main():
                 "Для большей выдачи уточните фильтры; смещение сохраняется при остановке."
             )
 
+    country_loading = {"value": False}
+    restoring_country_selection = {"value": False}
+
+    def load_vk_countries_async():
+        """Загружает список стран без блокировки главного окна Tkinter."""
+        if country_loading["value"]:
+            return
+        if not _read_token_file():
+            country_status_var.set("Добавьте рабочий токен VK API, затем нажмите «Обновить».")
+            return
+        country_loading["value"] = True
+        country_refresh_button.configure(state="disabled")
+        country_status_var.set("Загружается список стран из VK API…")
+
+        def worker():
+            countries = []
+            error_text = None
+            try:
+                with requests.Session() as country_session:
+                    countries = search_vk_countries(country_session)
+            except Exception as exc:
+                error_text = f"{type(exc).__name__}: {exc}"
+
+            def finish():
+                country_loading["value"] = False
+                country_refresh_button.configure(
+                    state="normal" if acquisition_mode_var.get() == "search" else "disabled"
+                )
+                if error_text:
+                    country_status_var.set("Не удалось загрузить страны. Проверьте токен и нажмите «Обновить».")
+                    print(f"[WARN] Не удалось загрузить страны VK: {error_text}")
+                    return
+                country_items = []
+                for country in countries:
+                    try:
+                        country_id = int(country.get("id"))
+                        title = str(country.get("title") or "").strip()
+                    except (TypeError, ValueError):
+                        continue
+                    if country_id > 0 and title:
+                        country_items.append((title, country_id))
+                country_items.sort(key=lambda item: (item[0].casefold(), item[1]))
+                selected_id = country_id_from_selection(search_country_var.get())
+                country_labels = {country_id: f"{title} (ID {country_id})" for title, country_id in country_items}
+                country_values = [NO_COUNTRY_LABEL] + [country_labels[country_id] for _title, country_id in country_items]
+                if selected_id and selected_id not in country_labels:
+                    country_values.append(f"ID {selected_id}")
+                search_country_combo.configure(values=tuple(country_values))
+                restoring_country_selection["value"] = True
+                try:
+                    search_country_var.set(
+                        country_labels.get(selected_id, f"ID {selected_id}" if selected_id else NO_COUNTRY_LABEL)
+                    )
+                finally:
+                    restoring_country_selection["value"] = False
+                country_status_var.set(f"Загружено стран: {len(country_items)}. Выберите страну из списка.")
+
+            root.after(0, finish)
+
+        threading.Thread(target=worker, name="vk-country-list", daemon=True).start()
+
     def open_city_picker():
-        country_raw = search_country_var.get().strip()
-        if not country_raw:
+        country_id = country_id_from_selection(search_country_var.get())
+        if not country_id:
             messagebox.showwarning(
                 "Поиск города VK",
-                "Сначала укажите ID страны в поле «Страна ID»: database.getCities требует country_id.",
+                "Сначала выберите страну из выпадающего списка: database.getCities требует country_id.",
                 parent=root,
             )
-            return
-        try:
-            country_id = int(country_raw)
-            if country_id <= 0:
-                raise ValueError
-        except ValueError:
-            messagebox.showwarning("Поиск города VK", "ID страны должен быть положительным числом.", parent=root)
             return
         query = simpledialog.askstring("Поиск города VK", "Введите название города для database.getCities:", parent=root)
         if not query or not query.strip():
@@ -3986,6 +4080,8 @@ def main():
 
     def reset_search_offset_on_filter_change(*_args):
         """Новый набор фильтров начинает поиск с нуля, если задание сейчас не выполняется."""
+        if restoring_country_selection["value"]:
+            return
         try:
             is_running = bool(running["value"])
         except NameError:
@@ -4005,6 +4101,8 @@ def main():
         search_age_from_var, search_age_to_var, search_online_var, search_photo_var,
     ):
         variable.trace_add("write", reset_search_offset_on_filter_change)
+
+    root.after(300, load_vk_countries_async)
 
     def refresh_token_count():
         count = reload_token_cache()
@@ -4284,7 +4382,7 @@ def main():
                 start_id = 1
                 raw_query = search_query_var.get().strip()
                 raw_city = search_city_var.get().strip()
-                raw_country = search_country_var.get().strip()
+                raw_country = country_id_from_selection(search_country_var.get())
                 raw_age_from = search_age_from_var.get().strip()
                 raw_age_to = search_age_to_var.get().strip()
                 raw_offset = search_offset_var.get().strip() or "0"
