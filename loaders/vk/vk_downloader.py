@@ -983,6 +983,18 @@ def country_label_from_id(value) -> str:
     return f"ID {country_id}"
 
 
+def _displayable_vk_location_text(value) -> str:
+    """Убирает из подписи повреждённые текстовые поля API, не удаляя сам результат."""
+    if not isinstance(value, str):
+        return ""
+    text = " ".join(value.split()).strip()
+    if not text or "?" in text or "\ufffd" in text:
+        return ""
+    if any(ord(char) < 32 and char not in "\t\n\r" for char in text):
+        return ""
+    return text
+
+
 def search_vk_cities(query: str, country_id: int, session: requests.Session) -> list[dict]:
     """Ищет варианты городов через database.getCities для выбора ID в форме."""
     response_data = _vk_get_page(
@@ -4125,11 +4137,21 @@ def main():
         city_scroll.grid(row=0, column=2, sticky="ns", pady=8)
         city_list.configure(yscrollcommand=city_scroll.set)
         city_map = []
-        for city in cities:
+        query_key = query.strip().casefold()
+        # Сначала показываем точное совпадение, затем остальные варианты в исходном порядке VK.
+        ordered_cities = sorted(
+            enumerate(cities),
+            key=lambda pair: (
+                0 if _displayable_vk_location_text(pair[1].get("title")).casefold() == query_key else 1,
+                1 if not _displayable_vk_location_text(pair[1].get("title")) else 0,
+                pair[0],
+            ),
+        )
+        for _original_index, city in ordered_cities:
             city_id = city.get("id")
-            title = str(city.get("title") or "").strip()
-            region = str(city.get("region") or "").strip()
-            area = str(city.get("area") or "").strip()
+            title = _displayable_vk_location_text(city.get("title")) or "Название повреждено"
+            region = _displayable_vk_location_text(city.get("region"))
+            area = _displayable_vk_location_text(city.get("area"))
             details = ", ".join(part for part in (region, area) if part)
             city_list.insert("end", f"{title} ({details}) — ID {city_id}" if details else f"{title} — ID {city_id}")
             city_map.append((city_id, title))
