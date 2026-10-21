@@ -2413,7 +2413,7 @@ def run_download_job(
                 )
             post_ui_event(
                 "overall_progress", search_offset, search_accessible_total,
-                f"Общий прогресс поиска: {search_offset:,} из {search_accessible_total:,}.",
+                f"Общий прогресс поиска: {search_offset:,} из {search_accessible_total:,}; совпадений: {search_total:,}.",
             )
             if search_total > SEARCH_MAX_RESULTS:
                 print(
@@ -2488,7 +2488,7 @@ def run_download_job(
                         _persist_search_offset(search_offset)
                         post_ui_event(
                             "overall_progress", search_offset, search_accessible_total,
-                            f"Общий прогресс поиска: {search_offset:,} из {search_accessible_total:,}."
+                            f"Общий прогресс поиска: {search_offset:,} из {search_accessible_total:,}; совпадений: {search_total:,}."
                         )
                         post_ui_event("search_offset_updated", search_offset)
                         break
@@ -2971,7 +2971,7 @@ def run_download_job(
                         post_ui_event("search_offset_updated", search_offset)
                         post_ui_event(
                             "overall_progress", search_offset, search_accessible_total,
-                            f"Общий прогресс поиска: {search_offset:,} из {search_accessible_total:,}."
+                            f"Общий прогресс поиска: {search_offset:,} из {search_accessible_total:,}; совпадений: {search_total:,}."
                         )
                         print(
                             f"[STOP-CURSOR] Поиск продолжится со смещения {search_offset}; "
@@ -3004,7 +3004,7 @@ def run_download_job(
                     post_ui_event("search_offset_updated", search_offset)
                     post_ui_event(
                         "overall_progress", search_offset, search_accessible_total,
-                        f"Общий прогресс поиска: {search_offset:,} из {search_accessible_total:,}."
+                        f"Общий прогресс поиска: {search_offset:,} из {search_accessible_total:,}; совпадений: {search_total:,}."
                     )
                 else:
                     current_id = batch_end
@@ -3347,7 +3347,7 @@ def main():
     theme_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(14, 0), pady=2)
     ttk.Label(
         header_frame,
-        text="Изображения профилей и фотографии из альбомов · последовательный счётчик или список профилей · импорт в FaceSearch",
+        text="Изображения профилей и фотографии из альбомов · счётчик ID, список профилей или поиск VK · импорт в FaceSearch",
         style="Muted.TLabel", wraplength=1500,
     ).grid(row=1, column=0, sticky="w")
 
