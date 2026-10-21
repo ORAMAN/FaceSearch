@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COM
 
 import requests
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 # === ПАРАМЕТРЫ === #
 APP_DIR = Path(__file__).resolve().parent
@@ -705,6 +705,46 @@ def _vk_get_page(method: str, params: dict, session: requests.Session, timeout: 
     if last_error:
         raise last_error
     raise RuntimeError(f"{method}: VK API не вернул ответ.")
+
+
+# users.search ограничивает доступную выдачу первыми 1000 результатами.
+SEARCH_MAX_RESULTS = 1000
+VK_USER_SEARCH_FIELDS = (
+    "photo_max_orig,city,country,home_town,sex,bdate,screen_name,deactivated,is_closed,"
+    "status,site,about,activities,interests,education,universities,occupation,"
+    "followers_count,verified,has_photo,last_seen,online,counters"
+)
+
+
+def search_vk_cities(query: str, country_id: int, session: requests.Session) -> list[dict]:
+    """Ищет варианты городов через database.getCities для выбора ID в форме."""
+    response_data = _vk_get_page(
+        "database.getCities",
+        {"country_id": int(country_id), "q": str(query or "").strip(), "count": 1000, "offset": 0},
+        session,
+        timeout=20,
+    )
+    items, _total = _response_items(response_data)
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _persist_search_offset(offset: int) -> None:
+    """Сохраняет смещение поиска атомарно, в том числе при закрытии окна во время работы."""
+    try:
+        settings = {}
+        if APP_SETTINGS_PATH.is_file():
+            try:
+                loaded = json.loads(APP_SETTINGS_PATH.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    settings = loaded
+            except (OSError, ValueError, TypeError):
+                settings = {}
+        settings["search_offset"] = max(0, int(offset))
+        temp_path = APP_SETTINGS_PATH.with_suffix(".offset.tmp")
+        temp_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_path.replace(APP_SETTINGS_PATH)
+    except Exception as exc:
+        print(f"[WARN] Не удалось сохранить смещение поиска VK: {exc}")
 
 
 def get_albums(owner_id: int, session: requests.Session):
@@ -2158,18 +2198,29 @@ def run_download_job(
     selected_system_albums: list[int] | tuple[int, ...] | set[int] | None = None,
     download_tagged_photos: bool = False,
     source_mode: str = "counter", specific_ids: str = "", friend_depth: int = 0,
-    auto_workers: bool = False,
+    auto_workers: bool = False, search_filters: dict | None = None, search_offset: int = 0,
 ):
-    """Обрабатывает либо последовательные ID, либо конкретные ID и их друзей."""
+    """Обрабатывает счётчик ID, список ID или выдачу users.search."""
     global EXISTING_PROFILE_IDS
     source_mode = str(source_mode or "counter").strip().lower()
     specific_mode = source_mode == "specific"
+    search_mode = source_mode == "search"
+    search_filters = dict(search_filters or {}) if search_mode else {}
     try:
         start_id = int(start_id)
     except (TypeError, ValueError):
         start_id = 1
-    if not specific_mode and start_id < 1:
-        raise ValueError("Стартовый ID должен быть положительным числом.")
+    if not specific_mode and not search_mode and start_id < 1:
+        raise ValueError("Стартовый ID пользователя должен быть положительным числом.")
+    if search_mode:
+        try:
+            search_offset = int(search_offset or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Смещение результатов поиска должно быть целым неотрицательным числом.")
+        if search_offset < 0:
+            raise ValueError("Смещение результатов поиска не может быть отрицательным.")
+    else:
+        search_offset = 0
 
     EXISTING_PROFILE_IDS = load_existing_vk_profile_ids(importer)
     if importer is not None:
@@ -2269,6 +2320,8 @@ def run_download_job(
     current_id = start_id
     specific_user_ids = []
     specific_cursor = 0
+    search_total = 0
+    search_accessible_total = 0
     if specific_mode:
         specific_user_ids = collect_specific_user_ids(specific_ids, friend_depth=friend_depth)
         if not specific_user_ids and not STOP_REQUESTED.is_set():
@@ -2306,6 +2359,11 @@ def run_download_job(
     print(f"🖼️ VK Downloader — каталог: {output_root}")
     if specific_mode:
         print(f"▶ Источник ID: конкретный список; глубина друзей: {max(0, int(friend_depth or 0))}; потоков: {worker_count}.")
+    elif search_mode:
+        print(
+            f"▶ Источник ID: поиск VK users.search; смещение: {search_offset}; "
+            f"потоков загрузки: {worker_count}; параметры: {search_filters}."
+        )
     else:
         print(f"▶ Начальный ID: {start_id}; потоков загрузки: {worker_count}; пачка users.get: до {USER_BATCH_SIZE} ID.")
     try:
@@ -2330,15 +2388,52 @@ def run_download_job(
             "изображения и JSON, независимо от настройки создания CROP; пустые папки удаляются. "
             "CROP и ссылки источников хранятся/восстанавливаются на стороне FaceSearch."
         )
-    print("ℹ️ Режим последовательного обхода работает до нажатия «Остановить»." if not specific_mode else "ℹ️ Режим конкретных ID завершится после обработки списка или нажатия «Остановить».")
+    if specific_mode:
+        print("ℹ️ Режим конкретных ID завершится после обработки списка или нажатия «Остановить».")
+    elif search_mode:
+        print("ℹ️ Режим поиска обрабатывает выдачу users.search; при Stop сохраняется смещение для продолжения.")
+    else:
+        print("ℹ️ Режим последовательного обхода работает до нажатия «Остановить».")
 
     with requests.Session() as session:
+        if search_mode:
+            count_response = _vk_get_page(
+                "users.search",
+                {**search_filters, "count": 1, "offset": 0},
+                session,
+                timeout=30,
+            )
+            _count_items, search_total = _response_items(count_response)
+            search_accessible_total = min(max(0, int(search_total or 0)), SEARCH_MAX_RESULTS)
+            if search_offset > search_accessible_total:
+                raise ValueError(
+                    f"Стартовое смещение {search_offset} выходит за доступную выдачу "
+                    f"({search_accessible_total} результатов из users.search). "
+                    "Уменьшите смещение или измените параметры поиска."
+                )
+            post_ui_event(
+                "overall_progress", search_offset, search_accessible_total,
+                f"Общий прогресс поиска: {search_offset:,} из {search_accessible_total:,}.",
+            )
+            if search_total > SEARCH_MAX_RESULTS:
+                print(
+                    f"[SEARCH-LIMIT] VK сообщил {search_total:,} совпадений, но users.search "
+                    f"позволяет получить не более первых {SEARCH_MAX_RESULTS:,} результатов. "
+                    "Для поиска остальных пользователей измените фильтры."
+                )
+            print(
+                f"[SEARCH-COUNT] Совпадений по фильтрам: {search_total:,}; "
+                f"доступно для обработки через users.search: {search_accessible_total:,}; "
+                f"стартовое смещение: {search_offset}."
+            )
+            _persist_search_offset(search_offset)
+
         # Сетевые загрузки выполняются параллельно, а импорт в БД остаётся в
         # потоке, где создано соединение FaceSearch (важно для SQLite).
         # AUTO использует пул с верхним пределом контроллера, а фактическое число
         # одновременно подаваемых заданий меняется без пересоздания ThreadPoolExecutor.
-        with ThreadPoolExecutor(max_workers=pool_worker_limit, thread_name_prefix="VKDownload") as executor:
             while not STOP_REQUESTED.is_set():
+                search_users_batch = {}
                 if specific_mode:
                     if specific_cursor >= len(specific_user_ids):
                         break
@@ -2346,6 +2441,60 @@ def run_download_job(
                     batch_start = specific_cursor + 1
                     batch_end = batch_start + len(batch_ids)
                     batch_label = f"конкретные ID {batch_start}–{batch_end - 1} из {len(specific_user_ids)}"
+                elif search_mode:
+                    if search_offset >= search_accessible_total:
+                        break
+                    batch_start = search_offset
+                    requested_count = min(USER_BATCH_SIZE, search_accessible_total - search_offset)
+                    try:
+                        search_page = _vk_get_page(
+                            "users.search",
+                            {**search_filters, "offset": search_offset, "count": requested_count, "fields": VK_USER_SEARCH_FIELDS},
+                            session,
+                            timeout=30,
+                        )
+                    except Exception as exc:
+                        api_errors_total += 1
+                        print(
+                            f"[VK-API-ERROR] users.search при смещении {search_offset}: "
+                            f"{type(exc).__name__}: {exc}. Смещение сохранено для повтора."
+                        )
+                        post_ui_event(
+                            "status",
+                            f"Ошибка users.search на смещении {search_offset}; повторите задание с сохранённой позиции."
+                        )
+                        _persist_search_offset(search_offset)
+                        post_ui_event("search_offset_updated", search_offset)
+                        break
+                    search_page_items, _page_count = _response_items(search_page)
+                    for search_user in search_page_items:
+                        if not isinstance(search_user, dict):
+                            continue
+                        try:
+                            search_user_id = int(search_user.get("id"))
+                        except (TypeError, ValueError):
+                            continue
+                        if search_user_id > 0:
+                            search_users_batch[search_user_id] = search_user
+                    batch_ids = list(search_users_batch)
+                    batch_end = batch_start + len(search_page_items)
+                    if not search_page_items or not batch_ids:
+                        print(
+                            f"[SEARCH-EMPTY] users.search вернул пустую страницу при смещении "
+                            f"{search_offset}; доступных результатов больше нет."
+                        )
+                        search_accessible_total = search_offset
+                        _persist_search_offset(search_offset)
+                        post_ui_event(
+                            "overall_progress", search_offset, search_accessible_total,
+                            f"Общий прогресс поиска: {search_offset:,} из {search_accessible_total:,}."
+                        )
+                        post_ui_event("search_offset_updated", search_offset)
+                        break
+                    batch_label = (
+                        f"поиск users.search: результаты {batch_start + 1}–{batch_end} "
+                        f"из {search_accessible_total}"
+                    )
                 else:
                     batch_start = current_id
                     batch_end = batch_start + USER_BATCH_SIZE
@@ -2386,15 +2535,27 @@ def run_download_job(
                 returned_users = []
                 if request_ids:
                     try:
-                        # POST передаёт полный пакет ID без чрезмерно длинного URL.
-                        request_preview = ", ".join(map(str, request_ids[:20]))
-                        if len(request_ids) > 20:
-                            request_preview += f", … (+{len(request_ids) - 20} ID)"
-                        print(
-                            f"[VK-REQUEST] users.get: {len(request_ids)} отдельных ID; "
-                            f"диапазоны не используются. Список: {request_preview}"
-                        )
-                        returned_users = get_user_info(request_ids, session)
+                        if search_mode:
+                            # users.search уже вернул расширенные поля; повторный users.get не нужен.
+                            returned_users = [
+                                search_users_batch[uid]
+                                for uid in request_ids
+                                if uid in search_users_batch
+                            ]
+                            print(
+                                f"[VK-REQUEST] users.search: получено {len(returned_users)} "
+                                f"профилей на странице с offset={batch_start}."
+                            )
+                        else:
+                            # POST передаёт полный пакет ID без чрезмерно длинного URL.
+                            request_preview = ", ".join(map(str, request_ids[:20]))
+                            if len(request_ids) > 20:
+                                request_preview += f", … (+{len(request_ids) - 20} ID)"
+                            print(
+                                f"[VK-REQUEST] users.get: {len(request_ids)} отдельных ID; "
+                                f"диапазоны не используются. Список: {request_preview}"
+                            )
+                            returned_users = get_user_info(request_ids, session)
                     except Exception as exc:
                         api_errors_total += 1
                         print(
@@ -2406,7 +2567,9 @@ def run_download_job(
                             "status",
                             f"Ошибка VK API для {batch_label}; задание остановлено, повторите его."
                         )
-                        if not specific_mode:
+                        if search_mode:
+                            _persist_search_offset(search_offset)
+                        elif not specific_mode:
                             current_id = batch_start
                         break
 
@@ -2791,10 +2954,29 @@ def run_download_job(
                     )
 
                 if STOP_REQUESTED.is_set():
-                    # Все уже отправленные задачи завершены. Возобновляемся с самого
-                    # раннего ID, который завершился ошибкой или ещё не был отправлен.
-                    # Не откатываемся на начало всей пачки только из-за одной ошибки.
-                    if not specific_mode:
+                    # Все отправленные задачи завершены; на следующем запуске повторяем
+                    # с самой ранней поисковой позиции, не обработанной успешно.
+                    if search_mode:
+                        resume_candidates = set(batch_retry_ids)
+                        if next_task_index < len(tasks):
+                            try:
+                                resume_candidates.add(int(tasks[next_task_index][0]))
+                            except (TypeError, ValueError, IndexError):
+                                pass
+                        positions = {int(uid): index for index, uid in enumerate(batch_ids)}
+                        resume_positions = [positions[uid] for uid in resume_candidates if uid in positions]
+                        search_offset = batch_start + min(resume_positions) if resume_positions else batch_end
+                        _persist_search_offset(search_offset)
+                        post_ui_event("search_offset_updated", search_offset)
+                        post_ui_event(
+                            "overall_progress", search_offset, search_accessible_total,
+                            f"Общий прогресс поиска: {search_offset:,} из {search_accessible_total:,}."
+                        )
+                        print(
+                            f"[STOP-CURSOR] Поиск продолжится со смещения {search_offset}; "
+                            f"повторяемых/не запущенных профилей: {len(resume_positions)}."
+                        )
+                    elif not specific_mode:
                         resume_candidates = set(batch_retry_ids)
                         if next_task_index < len(tasks):
                             try:
@@ -2815,6 +2997,14 @@ def run_download_job(
                 )
                 if specific_mode:
                     specific_cursor += len(batch_ids)
+                elif search_mode:
+                    search_offset = batch_end
+                    _persist_search_offset(search_offset)
+                    post_ui_event("search_offset_updated", search_offset)
+                    post_ui_event(
+                        "overall_progress", search_offset, search_accessible_total,
+                        f"Общий прогресс поиска: {search_offset:,} из {search_accessible_total:,}."
+                    )
                 else:
                     current_id = batch_end
 
@@ -2851,6 +3041,12 @@ def run_download_job(
             f"🏁 Обработка списка конкретных ID {'остановлена' if STOP_REQUESTED.is_set() else 'завершена'}. "
             f"Обработано/проверено профилей: {checked_total:,}; всего ошибок: {total_errors:,}."
         )
+    elif search_mode:
+        print(
+            f"🏁 Поиск users.search {'остановлен' if STOP_REQUESTED.is_set() else 'завершён'}. "
+            f"Смещение для продолжения: {search_offset}; доступная выдача: {search_accessible_total:,}; "
+            f"всего ошибок: {total_errors:,}."
+        )
     else:
         print(
             f"🏁 Сканирование остановлено. Следующий стартовый ID: {current_id}. "
@@ -2859,10 +3055,12 @@ def run_download_job(
     if api_errors_total:
         if specific_mode:
             print("[ПОДСКАЗКА] Возникла ошибка VK API. Повторите обработку конкретного списка ID.")
+        elif search_mode:
+            print("[ПОДСКАЗКА] Возникла ошибка VK API. Повторите поиск с сохранённого смещения.")
         else:
             print("[ПОДСКАЗКА] Последний пакет не обработан из-за ошибки VK API; повторите запуск с указанного стартового ID.")
     print("=" * 68)
-    return current_id
+    return search_offset if search_mode else current_id
 
 
 class QueueStream:
@@ -3155,45 +3353,111 @@ def main():
     source_frame = ttk.LabelFrame(outer, text="Источник профилей", padding=8)
     source_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 10))
     source_frame.columnconfigure(1, weight=1)
+    source_frame.columnconfigure(2, weight=1)
 
     acquisition_mode_var = tk.StringVar(value="counter")
     ttk.Radiobutton(
-        source_frame, text="Последовательный счётчик ID", value="counter",
+        source_frame, text="Счётчик ID", value="counter",
         variable=acquisition_mode_var,
         command=lambda: (update_id_source_state(), save_gui_settings()),
-    ).grid(row=0, column=0, sticky="w", padx=(0, 16), pady=2)
+    ).grid(row=0, column=0, sticky="w", padx=(0, 10), pady=2)
     ttk.Radiobutton(
-        source_frame, text="Конкретные ID / ссылки VK", value="specific",
+        source_frame, text="Конкретные ID / ссылки", value="specific",
         variable=acquisition_mode_var,
         command=lambda: (update_id_source_state(), save_gui_settings()),
-    ).grid(row=0, column=1, sticky="w", pady=2)
+    ).grid(row=0, column=1, sticky="w", padx=(0, 10), pady=2)
+    ttk.Radiobutton(
+        source_frame, text="Поиск users.search", value="search",
+        variable=acquisition_mode_var,
+        command=lambda: (update_id_source_state(), save_gui_settings()),
+    ).grid(row=0, column=2, sticky="w", pady=2)
 
-    ttk.Label(source_frame, text="Стартовый ID пользователя:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+    counter_frame = ttk.Frame(source_frame)
+    counter_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+    ttk.Label(counter_frame, text="Стартовый ID пользователя:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
     start_id_var = tk.StringVar(value="")
-    start_id_entry = ttk.Entry(source_frame, textvariable=start_id_var, width=20)
-    start_id_entry.grid(row=1, column=1, sticky="w", pady=3)
+    start_id_entry = ttk.Entry(counter_frame, textvariable=start_id_var, width=20)
+    start_id_entry.grid(row=0, column=1, sticky="w", pady=3)
 
-    ttk.Label(
-        source_frame, text="ID / ссылки / короткие имена пользователей (через запятую, пробел или новую строку):"
-    ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(5, 2))
+    specific_frame = ttk.Frame(source_frame)
+    specific_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+    specific_frame.columnconfigure(0, weight=1)
+    ttk.Label(specific_frame, text="ID / ссылки / короткие имена пользователей (через запятую, пробел или новую строку):").grid(
+        row=0, column=0, columnspan=3, sticky="w", pady=(0, 2)
+    )
     specific_ids_text = tk.Text(
-        source_frame, height=3, wrap="word", undo=True,
+        specific_frame, height=3, wrap="word", undo=True,
         bg=palette["white"], fg=palette["text"], insertbackground=palette["text"],
         selectbackground=palette["selection"], relief="flat", borderwidth=1,
         highlightthickness=1, highlightbackground=palette["border"], highlightcolor=palette["accent"],
         padx=7, pady=6, font=("Segoe UI", 10),
     )
-    specific_ids_text.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 4))
-
-    ttk.Label(source_frame, text="Глубина обхода друзей:").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+    specific_ids_text.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+    ttk.Label(specific_frame, text="Глубина обхода друзей:").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
     friend_depth_var = tk.StringVar(value="0")
-    friend_depth_spin = ttk.Spinbox(source_frame, from_=0, to=10, increment=1, textvariable=friend_depth_var, width=8)
-    friend_depth_spin.grid(row=4, column=1, sticky="w", pady=3)
-    ttk.Label(
-        source_frame,
-        text="Для конкретных ID: 0 — только введённые профили; 1 — их друзья; 2 — друзья друзей и т. д. До 10 уровней. В режиме счётчика используется стартовый ID и обработка продолжается до остановки.",
-        wraplength=620,
-    ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+    friend_depth_spin = ttk.Spinbox(specific_frame, from_=0, to=10, increment=1, textvariable=friend_depth_var, width=8)
+    friend_depth_spin.grid(row=2, column=1, sticky="w", pady=3)
+
+    search_frame = ttk.LabelFrame(source_frame, text="Критерии поиска VK", padding=6)
+    search_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+    for column in (1, 3, 5):
+        search_frame.columnconfigure(column, weight=1)
+
+    search_query_var = tk.StringVar(value="")
+    ttk.Label(search_frame, text="Запрос q:").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=2)
+    search_query_entry = ttk.Entry(search_frame, textvariable=search_query_var)
+    search_query_entry.grid(row=0, column=1, columnspan=5, sticky="ew", pady=2)
+
+    search_city_var = tk.StringVar(value="")
+    ttk.Label(search_frame, text="Город ID:").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=2)
+    search_city_entry = ttk.Entry(search_frame, textvariable=search_city_var, width=10)
+    search_city_entry.grid(row=1, column=1, sticky="w", pady=2)
+    city_lookup_button = ttk.Button(search_frame, text="Найти город…")
+    city_lookup_button.grid(row=1, column=2, sticky="w", padx=(5, 12), pady=2)
+
+    search_country_var = tk.StringVar(value="")
+    ttk.Label(search_frame, text="Страна ID:").grid(row=1, column=3, sticky="w", padx=(0, 6), pady=2)
+    search_country_entry = ttk.Entry(search_frame, textvariable=search_country_var, width=10)
+    search_country_entry.grid(row=1, column=4, sticky="w", pady=2)
+
+    search_sex_var = tk.StringVar(value="Любой (0)")
+    ttk.Label(search_frame, text="Пол:").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=2)
+    search_sex_combo = ttk.Combobox(
+        search_frame, textvariable=search_sex_var, state="readonly", width=15,
+        values=("Любой (0)", "Женщины (1)", "Мужчины (2)"),
+    )
+    search_sex_combo.grid(row=2, column=1, sticky="w", pady=2)
+
+    search_age_from_var = tk.StringVar(value="")
+    search_age_to_var = tk.StringVar(value="")
+    ttk.Label(search_frame, text="Возраст от:").grid(row=2, column=2, sticky="e", padx=(8, 4), pady=2)
+    search_age_from_entry = ttk.Entry(search_frame, textvariable=search_age_from_var, width=5)
+    search_age_from_entry.grid(row=2, column=3, sticky="w", pady=2)
+    ttk.Label(search_frame, text="до:").grid(row=2, column=4, sticky="e", padx=(4, 4), pady=2)
+    search_age_to_entry = ttk.Entry(search_frame, textvariable=search_age_to_var, width=5)
+    search_age_to_entry.grid(row=2, column=5, sticky="w", pady=2)
+
+    search_online_var = tk.BooleanVar(value=False)
+    search_photo_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(search_frame, text="Только онлайн", variable=search_online_var, command=save_gui_settings).grid(
+        row=3, column=0, columnspan=2, sticky="w", pady=2
+    )
+    ttk.Checkbutton(search_frame, text="Только с фотографией", variable=search_photo_var, command=save_gui_settings).grid(
+        row=3, column=2, columnspan=3, sticky="w", pady=2
+    )
+
+    search_offset_var = tk.StringVar(value="0")
+    ttk.Label(search_frame, text="Стартовое смещение:").grid(row=4, column=0, columnspan=2, sticky="w", padx=(0, 6), pady=2)
+    search_offset_entry = ttk.Entry(search_frame, textvariable=search_offset_var, width=10)
+    search_offset_entry.grid(row=4, column=2, sticky="w", pady=2)
+    ttk.Label(search_frame, text="0 — начало выдачи. Смещение сохраняется при остановке.", wraplength=330).grid(
+        row=4, column=3, columnspan=3, sticky="w", padx=(8, 0), pady=2
+    )
+
+    source_help_var = tk.StringVar(value="В режиме счётчика обход продолжается от стартового ID до нажатия «Остановить».")
+    ttk.Label(source_frame, textvariable=source_help_var, wraplength=620, justify="left").grid(
+        row=4, column=0, columnspan=3, sticky="w", pady=(5, 0)
+    )
 
     settings_frame = ttk.LabelFrame(outer, text="Параметры загрузки", padding=8)
     settings_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
@@ -3384,6 +3648,15 @@ def main():
             "source_mode": "counter",
             "specific_ids": "",
             "friend_depth": 0,
+            "search_query": "",
+            "search_city": "",
+            "search_country": "",
+            "search_sex": 0,
+            "search_age_from": "",
+            "search_age_to": "",
+            "search_online": False,
+            "search_has_photo": False,
+            "search_offset": 0,
             "workers": 8,
             "auto_workers": AUTO_WORKERS_DEFAULT,
             "download_albums": False,
@@ -3412,6 +3685,21 @@ def main():
         acquisition_mode_var.set(str(defaults.get("source_mode", "counter")))
         specific_ids_text.delete("1.0", "end")
         specific_ids_text.insert("1.0", str(defaults.get("specific_ids", "")))
+        search_query_var.set(str(defaults.get("search_query", "")))
+        search_city_var.set(str(defaults.get("search_city", "")))
+        search_country_var.set(str(defaults.get("search_country", "")))
+        saved_sex = defaults.get("search_sex", 0)
+        search_sex_var.set({1: "Женщины (1)", 2: "Мужчины (2)"}.get(
+            int(saved_sex) if str(saved_sex).isdigit() else 0, "Любой (0)"
+        ))
+        search_age_from_var.set(str(defaults.get("search_age_from", "")))
+        search_age_to_var.set(str(defaults.get("search_age_to", "")))
+        search_online_var.set(bool(defaults.get("search_online", False)))
+        search_photo_var.set(bool(defaults.get("search_has_photo", False)))
+        try:
+            search_offset_var.set(str(max(0, int(defaults.get("search_offset", 0) or 0))))
+        except (TypeError, ValueError):
+            search_offset_var.set("0")
         try:
             friend_depth_var.set(str(max(0, min(10, int(defaults.get("friend_depth", 0) or 0)))))
         except (TypeError, ValueError):
@@ -3450,6 +3738,15 @@ def main():
             "source_mode": acquisition_mode_var.get(),
             "specific_ids": specific_ids_text.get("1.0", "end-1c").strip(),
             "friend_depth": friend_depth_var.get().strip() or "0",
+            "search_query": search_query_var.get().strip(),
+            "search_city": search_city_var.get().strip(),
+            "search_country": search_country_var.get().strip(),
+            "search_sex": {"Женщины (1)": 1, "Мужчины (2)": 2}.get(search_sex_var.get(), 0),
+            "search_age_from": search_age_from_var.get().strip(),
+            "search_age_to": search_age_to_var.get().strip(),
+            "search_online": bool(search_online_var.get()),
+            "search_has_photo": bool(search_photo_var.get()),
+            "search_offset": search_offset_var.get().strip() or "0",
             "workers": workers_var.get().strip(),
             "auto_workers": bool(auto_workers_var.get()),
             "download_albums": bool(download_albums_var.get()),
@@ -3482,10 +3779,104 @@ def main():
         download_tagged_check.configure(state="normal" if enabled and not all_albums_var.get() else "disabled")
 
     def update_id_source_state():
-        counter_mode = acquisition_mode_var.get() == "counter"
+        mode = acquisition_mode_var.get()
+        counter_mode = mode == "counter"
+        specific_mode = mode == "specific"
+        search_mode = mode == "search"
+        for frame, visible in ((counter_frame, counter_mode), (specific_frame, specific_mode), (search_frame, search_mode)):
+            if visible:
+                frame.grid()
+            else:
+                frame.grid_remove()
         start_id_entry.configure(state="normal" if counter_mode else "disabled")
-        specific_ids_text.configure(state="disabled" if counter_mode else "normal")
-        friend_depth_spin.configure(state="disabled" if counter_mode else "normal")
+        specific_ids_text.configure(state="normal" if specific_mode else "disabled")
+        friend_depth_spin.configure(state="normal" if specific_mode else "disabled")
+        for widget in (
+            search_query_entry, search_city_entry, search_country_entry, search_sex_combo,
+            search_age_from_entry, search_age_to_entry, search_offset_entry, city_lookup_button,
+        ):
+            try:
+                widget.configure(state="normal" if search_mode else "disabled")
+            except tk.TclError:
+                pass
+        if counter_mode:
+            source_help_var.set("В режиме счётчика обход продолжается от стартового ID до нажатия «Остановить».")
+        elif specific_mode:
+            source_help_var.set("Для конкретных ID: глубина 0 — только введённые профили; 1 — их друзья; 2 — друзья друзей. До 10 уровней.")
+        else:
+            source_help_var.set(
+                "VK users.search сообщает общее количество совпадений, но доступно не более первых 1000 результатов. "
+                "Для большей выдачи уточните фильтры; смещение сохраняется при остановке."
+            )
+
+    def open_city_picker():
+        country_raw = search_country_var.get().strip()
+        if not country_raw:
+            messagebox.showwarning(
+                "Поиск города VK",
+                "Сначала укажите ID страны в поле «Страна ID»: database.getCities требует country_id.",
+                parent=root,
+            )
+            return
+        try:
+            country_id = int(country_raw)
+            if country_id <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Поиск города VK", "ID страны должен быть положительным числом.", parent=root)
+            return
+        query = simpledialog.askstring("Поиск города VK", "Введите название города для database.getCities:", parent=root)
+        if not query or not query.strip():
+            return
+        try:
+            with requests.Session() as city_session:
+                cities = search_vk_cities(query.strip(), country_id, city_session)
+        except Exception as exc:
+            messagebox.showerror(
+                "Поиск города VK",
+                f"Не удалось получить список городов: {type(exc).__name__}: {exc}",
+                parent=root,
+            )
+            return
+        if not cities:
+            messagebox.showinfo("Поиск города VK", "VK не вернул городов для этого запроса.", parent=root)
+            return
+        dialog = tk.Toplevel(root)
+        dialog.title("Выберите город VK")
+        dialog.transient(root)
+        dialog.geometry("520x360")
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(0, weight=1)
+        city_list = tk.Listbox(dialog, selectmode="browse", width=70, height=14)
+        city_list.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=8, pady=8)
+        city_scroll = ttk.Scrollbar(dialog, orient="vertical", command=city_list.yview)
+        city_scroll.grid(row=0, column=2, sticky="ns", pady=8)
+        city_list.configure(yscrollcommand=city_scroll.set)
+        city_map = []
+        for city in cities:
+            city_id = city.get("id")
+            title = str(city.get("title") or "").strip()
+            region = str(city.get("region") or "").strip()
+            area = str(city.get("area") or "").strip()
+            details = ", ".join(part for part in (region, area) if part)
+            city_list.insert("end", f"{title} ({details}) — ID {city_id}" if details else f"{title} — ID {city_id}")
+            city_map.append((city_id, title))
+        def choose_city(event=None):
+            selection = city_list.curselection()
+            if not selection:
+                return
+            city_id, _city_title = city_map[selection[0]]
+            search_city_var.set(str(city_id))
+            save_gui_settings()
+            dialog.destroy()
+        city_list.bind("<Double-Button-1>", choose_city)
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=1, column=0, columnspan=3, sticky="e", padx=8, pady=(0, 8))
+        ttk.Button(buttons, text="Выбрать", command=choose_city).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(buttons, text="Закрыть", command=dialog.destroy).grid(row=0, column=1)
+        city_list.focus_set()
+
+    city_lookup_button.configure(command=open_city_picker)
 
     def update_worker_control_state():
         """Как в основной форме: ручное поле недоступно при включённой автоподстройке."""
@@ -3797,10 +4188,14 @@ def main():
     progress_frame.columnconfigure(0, weight=1)
     status_var = tk.StringVar(value="Готово к запуску.")
     ttk.Label(progress_frame, textvariable=status_var, wraplength=980).grid(row=0, column=0, sticky="ew", pady=(0, 4))
-    progress_text_var = tk.StringVar(value="Ожидание")
-    ttk.Label(progress_frame, textvariable=progress_text_var).grid(row=1, column=0, sticky="w", pady=(0, 3))
+    overall_progress_text_var = tk.StringVar(value="Общий прогресс поиска: применяется только в режиме поиска.")
+    ttk.Label(progress_frame, textvariable=overall_progress_text_var).grid(row=1, column=0, sticky="w", pady=(0, 3))
+    overall_progress_bar = ttk.Progressbar(progress_frame, mode="determinate", maximum=100, value=0)
+    overall_progress_bar.grid(row=2, column=0, sticky="ew", pady=(0, 5))
+    progress_text_var = tk.StringVar(value="Текущий пакет: ожидание")
+    ttk.Label(progress_frame, textvariable=progress_text_var).grid(row=3, column=0, sticky="w", pady=(0, 3))
     progress_bar = ttk.Progressbar(progress_frame, mode="determinate", maximum=100, value=0)
-    progress_bar.grid(row=2, column=0, sticky="ew")
+    progress_bar.grid(row=4, column=0, sticky="ew")
 
     log_frame = ttk.LabelFrame(footer, text="Журнал", padding=8)
     log_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 6))
@@ -3845,6 +4240,8 @@ def main():
         try:
             source_mode = acquisition_mode_var.get()
             raw_specific_ids = specific_ids_text.get("1.0", "end-1c").strip()
+            search_filters = {}
+            search_offset = 0
             if source_mode == "counter":
                 raw_start_id = start_id_var.get().strip()
                 if not raw_start_id:
@@ -3852,10 +4249,55 @@ def main():
                 start_id = int(raw_start_id)
                 if start_id < 1:
                     raise ValueError("Стартовый ID должен быть положительным числом.")
-            else:
+            elif source_mode == "specific":
                 if not parse_specific_identifiers(raw_specific_ids):
                     raise ValueError("Введите список конкретных ID/ссылок на профили VK.")
-                start_id = 1  # Не используется в режиме конкретных ID.
+                start_id = 1
+            else:
+                start_id = 1
+                raw_query = search_query_var.get().strip()
+                raw_city = search_city_var.get().strip()
+                raw_country = search_country_var.get().strip()
+                raw_age_from = search_age_from_var.get().strip()
+                raw_age_to = search_age_to_var.get().strip()
+                raw_offset = search_offset_var.get().strip() or "0"
+                if raw_query:
+                    search_filters["q"] = raw_query
+                for field_name, raw_value in (("city", raw_city), ("country", raw_country)):
+                    if raw_value:
+                        try:
+                            numeric_value = int(raw_value)
+                        except ValueError:
+                            raise ValueError(f"Поле {field_name} должно содержать целый ID.")
+                        if numeric_value <= 0:
+                            raise ValueError(f"ID поля {field_name} должен быть положительным числом.")
+                        search_filters[field_name] = numeric_value
+                sex_value = {"Женщины (1)": 1, "Мужчины (2)": 2}.get(search_sex_var.get(), 0)
+                if sex_value:
+                    search_filters["sex"] = sex_value
+                for field_name, raw_value in (("age_from", raw_age_from), ("age_to", raw_age_to)):
+                    if raw_value:
+                        try:
+                            age_value = int(raw_value)
+                        except ValueError:
+                            raise ValueError(f"Поле {field_name} должно содержать целый возраст.")
+                        if age_value < 1 or age_value > 120:
+                            raise ValueError(f"Возраст {field_name} должен быть от 1 до 120.")
+                        search_filters[field_name] = age_value
+                if "age_from" in search_filters and "age_to" in search_filters and search_filters["age_from"] > search_filters["age_to"]:
+                    raise ValueError("Возраст «от» не может быть больше возраста «до».")
+                if search_online_var.get():
+                    search_filters["online"] = 1
+                if search_photo_var.get():
+                    search_filters["has_photo"] = 1
+                try:
+                    search_offset = int(raw_offset)
+                except ValueError:
+                    raise ValueError("Стартовое смещение должно быть целым неотрицательным числом.")
+                if search_offset < 0:
+                    raise ValueError("Стартовое смещение не может быть отрицательным.")
+                if not search_filters:
+                    raise ValueError("Заполните хотя бы один критерий поиска: запрос, город, страну, пол, возраст или флажок.")
             workers = int(workers_var.get().strip())
             album_photo_limit = int(album_photo_limit_var.get().strip() or "0")
             friend_depth = int(friend_depth_var.get().strip() or "0")
@@ -3882,6 +4324,7 @@ def main():
             return
 
         reload_token_cache()
+        save_gui_settings()
         auto_workers = bool(auto_workers_var.get())
         auto_import = bool(auto_import_var.get())
         create_crop_files = bool(create_crop_var.get())
@@ -3897,7 +4340,15 @@ def main():
         set_running(True)
         progress_bar.configure(mode="indeterminate")
         progress_bar.start(10)
-        progress_text_var.set("Подготовка задания…")
+        progress_text_var.set("Текущий пакет: подготовка задания…")
+        if source_mode == "search":
+            overall_progress_bar.configure(mode="determinate", maximum=1)
+            overall_progress_bar["value"] = 0
+            overall_progress_text_var.set("Общий прогресс поиска: получение количества совпадений…")
+        else:
+            overall_progress_bar.configure(mode="determinate", maximum=100)
+            overall_progress_bar["value"] = 0
+            overall_progress_text_var.set("Общий прогресс поиска: применяется только в режиме поиска.")
         workers_status_var.set(
             "Подготовка автоматической подстройки потоков…"
             if auto_workers else f"Ручной режим: фиксировано {workers} поток(ов)"
@@ -3952,9 +4403,13 @@ def main():
                     specific_ids=raw_specific_ids,
                     friend_depth=friend_depth,
                     auto_workers=auto_workers,
+                    search_filters=search_filters,
+                    search_offset=search_offset,
                 )
                 if source_mode == "counter":
                     events.put(("start_id_updated", next_start_id))
+                elif source_mode == "search":
+                    events.put(("search_offset_updated", next_start_id))
                 # Stop прекращает запуск новых профилей, но не отменяет явно
                 # выбранный финальный этап. run_download_job к этому моменту уже
                 # дождался всех отправленных загрузок, импортов и очистки; поэтому
@@ -4048,6 +4503,15 @@ def main():
                         if str(progress_bar.cget("mode")) != "indeterminate":
                             progress_bar.configure(mode="indeterminate")
                             progress_bar.start(10)
+                elif kind == "overall_progress":
+                    current, total, message = event[1], event[2], event[3]
+                    overall_progress_text_var.set(message)
+                    safe_total = max(1, int(total or 0))
+                    overall_progress_bar.configure(maximum=safe_total)
+                    overall_progress_bar["value"] = min(max(0, int(current or 0)), safe_total)
+                elif kind == "search_offset_updated":
+                    search_offset_var.set(str(max(0, int(event[1] or 0))))
+                    _persist_search_offset(int(search_offset_var.get()))
                 elif kind == "start_id_updated":
                     start_id_var.set(str(event[1]))
                 elif kind == "status":
@@ -4143,6 +4607,9 @@ def main():
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
+    update_id_source_state()
+    update_worker_control_state()
+    update_album_settings_state()
     refresh_token_count()
     drain_events()
     root.mainloop()
