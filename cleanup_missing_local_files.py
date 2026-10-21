@@ -9,7 +9,7 @@
 
 Проверяется оригинал по images.source_url только для локальных записей без url_image.
 В локальных записях source_url может иметь вид file:///...; images.path хранит путь CROP.
-При удалении удаляются записи faces/images и связанный CROP-файл, если он существует.
+При удалении удаляются записи faces/images, профили без ссылок из images и связанный CROP-файл, если он существует.
 """
 from __future__ import annotations
 
@@ -241,15 +241,30 @@ def fetch_missing(conn) -> list[tuple[int, str, str, str]]:
     return missing
 
 
+def fetch_orphan_profile_ids(conn) -> list[int]:
+    """Возвращает ID профилей, на которые не ссылается ни одна запись images."""
+    rows = execute(
+        conn,
+        """
+        SELECT p.id
+        FROM profiles p
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM images
+            WHERE images.profile_id = p.id
+        )
+        ORDER BY p.id
+        """,
+    ).fetchall()
+    return [int(row[0]) for row in rows]
+
+
 def delete_missing(
     conn,
     missing: list[tuple[int, str, str, str]],
     crop_base: Path,
-) -> tuple[int, int, list[str]]:
-    """Удаляет faces/images и после commit удаляет соответствующие CROP-файлы."""
-    if not missing:
-        return 0, 0, []
-
+) -> tuple[int, int, list[str], int]:
+    """Удаляет faces/images, очищает профили без ссылок и удаляет CROP-файлы."""
     ids = [item[0] for item in missing]
     crop_paths = []
     for _image_id, crop_text, _filename, _source_text in missing:
@@ -262,6 +277,21 @@ def delete_missing(
             marks = ",".join("?" for _ in batch)
             execute(conn, f"DELETE FROM faces WHERE image_id IN ({marks})", batch)
             execute(conn, f"DELETE FROM images WHERE id IN ({marks})", batch)
+
+        # После удаления изображений удаляем все profiles, на которые больше
+        # не ссылается ни одна строка images. Условие переносимо между СУБД.
+        profiles_result = execute(
+            conn,
+            """
+            DELETE FROM profiles
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM images
+                WHERE images.profile_id = profiles.id
+            )
+            """,
+        )
+        profiles_deleted = max(0, int(profiles_result.rowcount or 0))
         conn.commit()
     except Exception:
         try:
@@ -286,7 +316,7 @@ def delete_missing(
         except OSError as exc:
             crop_errors.append(f"{crop_path}: {exc}")
 
-    return len(ids), crop_deleted, crop_errors
+    return len(ids), crop_deleted, crop_errors, profiles_deleted
 
 
 class CleanupWindow(tk.Tk):
@@ -302,6 +332,7 @@ class CleanupWindow(tk.Tk):
         )
         self.status_var = tk.StringVar(value="Выберите профиль и нажмите «Проверить».")
         self.missing: list[tuple[int, str, str, str]] = []
+        self.orphan_profiles: list[int] = []
         self._busy = False
         self._build_ui()
 
@@ -328,7 +359,8 @@ class CleanupWindow(tk.Tk):
             text=(
                 "Проверяются только локальные строки images, где url_image пустой или NULL. "
                 "Оригинал определяется по source_url (в том числе file:///...), а images.path "
-                "считается путём CROP. При удалении удаляются записи БД и CROP-файл, если он есть."
+                "считается путём CROP. При очистке также удаляются профили, на которые не "
+                "ссылается ни одна запись images."
             ),
             wraplength=920,
         ).pack(fill="x", pady=(0, 8))
@@ -367,7 +399,8 @@ class CleanupWindow(tk.Tk):
             profile = self.profile_by_name[self.profile_var.get()]
             conn, _backend = open_database(profile)
             missing = fetch_missing(conn)
-            self.after(0, lambda: self._show_results(missing))
+            orphan_profiles = fetch_orphan_profile_ids(conn)
+            self.after(0, lambda: self._show_results(missing, orphan_profiles))
         except Exception as exc:
             self.after(0, lambda err=str(exc): self._show_error(err))
         finally:
@@ -378,25 +411,35 @@ class CleanupWindow(tk.Tk):
                     pass
             self.after(0, self._finish_busy)
 
-    def _show_results(self, missing):
+    def _show_results(self, missing, orphan_profiles):
         self.missing = missing
+        self.orphan_profiles = orphan_profiles
         for image_id, crop_path, filename, source_path in missing:
             self.tree.insert("", "end", values=(image_id, filename, source_path, crop_path))
-        self.delete_button.configure(state="normal" if missing else "disabled")
-        self.status_var.set(
-            f"Проверка завершена. Отсутствующих локальных файлов: {len(missing)}."
-            if missing else "Проверка завершена: отсутствующих локальных файлов не найдено."
-        )
+        has_cleanup = bool(missing or orphan_profiles)
+        self.delete_button.configure(state="normal" if has_cleanup else "disabled")
+        if has_cleanup:
+            self.status_var.set(
+                f"Проверка завершена. Отсутствующих локальных файлов: {len(missing)}; "
+                f"профилей без ссылок из images: {len(orphan_profiles)}."
+            )
+        else:
+            self.status_var.set(
+                "Проверка завершена: отсутствующих локальных файлов и профилей без ссылок не найдено."
+            )
 
     def confirm_delete(self):
-        if not self.missing:
+        if not self.missing and not self.orphan_profiles:
             return
         count = len(self.missing)
+        orphan_count = len(self.orphan_profiles)
         if not messagebox.askyesno(
             "Подтверждение очистки",
-            f"Удалить из выбранной базы {count} записей images и связанные записи faces?\n\n"
-            "Также будут удалены соответствующие CROP-файлы с диска, если они существуют. "
-            "Оригиналы не удаляются. Импортированные интернет-записи не затрагиваются.",
+            f"Отсутствующих локальных изображений найдено: {count}.\n"
+            f"Профилей без ссылок из images на момент проверки: {orphan_count}.\n\n"
+            "Будут удалены отсутствующие изображения, связанные записи faces и CROP-файлы. "
+            "Также будут удалены все профили, на которые после очистки не останется ссылок "
+            "из таблицы images. Оригиналы не удаляются.",
             icon="warning",
             parent=self,
         ):
@@ -418,11 +461,14 @@ class CleanupWindow(tk.Tk):
             still_missing = fetch_missing(conn)
             missing_by_id = {row[0]: row for row in still_missing}
             confirmed = [missing_by_id[item[0]] for item in snapshot if item[0] in missing_by_id]
-            removed, crops_deleted, crop_errors = delete_missing(conn, confirmed, crop_base)
+            removed, crops_deleted, crop_errors, profiles_deleted = delete_missing(
+                conn, confirmed, crop_base
+            )
             self.after(
                 0,
                 lambda: self._delete_done(
-                    removed, len(snapshot) - len(confirmed), crops_deleted, crop_errors
+                    removed, len(snapshot) - len(confirmed), crops_deleted,
+                    crop_errors, profiles_deleted
                 ),
             )
         except Exception as exc:
@@ -440,16 +486,19 @@ class CleanupWindow(tk.Tk):
                     pass
             self.after(0, self._finish_busy)
 
-    def _delete_done(self, removed, skipped, crops_deleted, crop_errors):
+    def _delete_done(self, removed, skipped, crops_deleted, crop_errors, profiles_deleted):
         self.missing = []
+        self.orphan_profiles = []
         self.tree.delete(*self.tree.get_children())
         self.delete_button.configure(state="disabled")
         self.status_var.set(
-            f"Готово. Удалено записей: {removed}; CROP-файлов: {crops_deleted}; "
-            f"пропущено: {skipped}; ошибок удаления CROP: {len(crop_errors)}."
+            f"Готово. Удалено images: {removed}; профилей: {profiles_deleted}; "
+            f"CROP-файлов: {crops_deleted}; пропущено: {skipped}; "
+            f"ошибок удаления CROP: {len(crop_errors)}."
         )
         details = (
             f"Удалено записей images: {removed}\n"
+            f"Удалено профилей без ссылок: {profiles_deleted}\n"
             f"Удалено CROP-файлов: {crops_deleted}\n"
             f"Пропущено после повторной проверки: {skipped}\n"
         )
