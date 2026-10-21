@@ -69,6 +69,9 @@ CROP_REPAIR_WORKERS = 4
 CROP_REPAIR_AUTO_WORKERS = False
 _CROP_REPAIR_LOCK = threading.RLock()
 _CROP_REPAIR_ACTIVE_IDS: set[int] = set()
+_CROP_REPAIR_LAST_START: dict[int, float] = {}
+_CROP_REPAIR_RETRY_INTERVAL = 10.0
+_CROP_REPAIR_LAST_START_MAX = 5000
 _FACE_IMAGE_CACHE_LOCK = threading.RLock()
 _FACE_IMAGE_CACHE: dict[int, tuple] = {}
 _FACE_IMAGE_CACHE_MAX = 5000
@@ -419,11 +422,24 @@ def _start_crop_repair(face_ids) -> None:
         return
     if not requested:
         return
+    now = time.monotonic()
     with _CROP_REPAIR_LOCK:
-        pending = requested - _CROP_REPAIR_ACTIVE_IDS
+        pending = {
+            face_id for face_id in requested
+            if face_id not in _CROP_REPAIR_ACTIVE_IDS
+            and (
+                face_id not in _CROP_REPAIR_LAST_START
+                or now - _CROP_REPAIR_LAST_START[face_id] >= _CROP_REPAIR_RETRY_INTERVAL
+            )
+        }
         if not pending:
             return
         _CROP_REPAIR_ACTIVE_IDS.update(pending)
+        for face_id in pending:
+            _CROP_REPAIR_LAST_START[face_id] = now
+        while len(_CROP_REPAIR_LAST_START) > _CROP_REPAIR_LAST_START_MAX:
+            oldest_id = min(_CROP_REPAIR_LAST_START, key=_CROP_REPAIR_LAST_START.get)
+            _CROP_REPAIR_LAST_START.pop(oldest_id, None)
 
     def worker():
         conn = None
@@ -1750,13 +1766,17 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         crop_path = face_search._resolve_db_crop_path(
             stored_path, image_id=int(image_id)
         )
-        if crop_path.is_file():
-            self._json(200, {"state": "ready"})
-            return
+        try:
+            if crop_path.is_file() and crop_path.stat().st_size > 0:
+                self._json(200, {"state": "ready"})
+                return
+        except OSError:
+            pass
 
         if CREATE_CROPS_ON_HTML and _original_image_available(source_url, url_image):
-            # При поиске восстановление уже запускается в фоне. Пока оригинал доступен,
-            # оставляем заглушку создания и ждём, когда CROP появится на диске.
+            # Если первая попытка завершилась ошибкой, пробуем восстановить CROP повторно,
+            # но не чаще интервала cooldown для каждого лица.
+            _start_crop_repair([face_id])
             self._json(200, {"state": "creating"})
             return
 
