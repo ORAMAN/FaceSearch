@@ -3984,6 +3984,28 @@ def main():
     ):
         variable.trace_add("write", lambda *_args: save_gui_settings())
 
+    def reset_search_offset_on_filter_change(*_args):
+        """Новый набор фильтров начинает поиск с нуля, если задание сейчас не выполняется."""
+        try:
+            is_running = bool(running["value"])
+        except NameError:
+            is_running = False
+        if (
+            acquisition_mode_var.get() == "search"
+            and not is_running
+            and search_offset_var.get().strip() not in ("", "0")
+        ):
+            search_offset_var.set("0")
+
+    # Смещение относится к конкретному набору фильтров. При изменении запроса,
+    # города, возраста, пола или флажков сбрасываем старый курсор; вручную
+    # заданное смещение после этого можно отредактировать в поле.
+    for variable in (
+        search_query_var, search_city_var, search_country_var, search_sex_var,
+        search_age_from_var, search_age_to_var, search_online_var, search_photo_var,
+    ):
+        variable.trace_add("write", reset_search_offset_on_filter_change)
+
     def refresh_token_count():
         count = reload_token_cache()
         token_count_var.set(f"Рабочих токенов v1 в {VK_TOKEN_FILE.name}: {count}")
