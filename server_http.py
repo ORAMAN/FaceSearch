@@ -18,6 +18,7 @@ import binascii
 import ipaddress
 import json
 import mimetypes
+import os
 import secrets
 import socket
 import threading
@@ -455,10 +456,14 @@ def _watch_index_loop():
         try:
             stat = file_path.stat()
             size_mb = stat.st_size / (1024 ** 2)
-            changed_at = datetime.fromtimestamp(stat.st_mtime).strftime("%d.%m.%Y %H:%M:%S")
+            created_timestamp = _index_created_timestamp(stat)
+            created_at = (
+                datetime.fromtimestamp(created_timestamp).astimezone().strftime("%d.%m.%Y %H:%M:%S")
+                if created_timestamp is not None else "н/д"
+            )
             print(
-                f"[HTTP][FAISS] Изменение подтверждено: {file_path.name}, "
-                f"{size_mb:.1f} MiB, изменён {changed_at}.",
+                f"[HTTP][FAISS] Новая версия подтверждена: {file_path.name}, "
+                f"{size_mb:.1f} MiB, создан {created_at}.",
                 flush=True,
             )
         except OSError:
@@ -484,6 +489,15 @@ def _index_watcher_runner():
                 return
 
 
+def _index_created_timestamp(stat):
+    """Возвращает время создания файла, если ОС его предоставляет."""
+    created_timestamp = getattr(stat, "st_birthtime", None)
+    # На Windows st_ctime означает время создания; на POSIX это время изменения метаданных.
+    if created_timestamp is None and os.name == "nt":
+        created_timestamp = getattr(stat, "st_ctime", None)
+    return created_timestamp
+
+
 def _index_status_payload():
     with _INDEX_STATE_LOCK:
         state = _INDEX_RELOAD_STATE
@@ -497,27 +511,30 @@ def _index_status_payload():
         stat = path.stat()
         index_exists = path.is_file()
         size_bytes = int(stat.st_size)
-        created_timestamp = getattr(stat, "st_birthtime", None)
-        if created_timestamp is None:
-            # Для Windows st_ctime — время создания файла; st_birthtime используется,
-            # когда его предоставляет версия Python/файловая система.
-            created_timestamp = getattr(stat, "st_ctime", None)
-        modified_timestamp = getattr(stat, "st_mtime", None)
+        created_timestamp = _index_created_timestamp(stat)
         created_at = (
             datetime.fromtimestamp(created_timestamp).astimezone().isoformat(timespec="seconds")
             if created_timestamp is not None else None
-        )
-        modified_at = (
-            datetime.fromtimestamp(modified_timestamp).astimezone().isoformat(timespec="seconds")
-            if modified_timestamp is not None else None
         )
     except (OSError, ValueError):
         index_exists = False
         size_bytes = 0
         created_at = None
-        modified_at = None
 
     status = _INDEX_USE_LOCK.get_status()
+    current_signature = _index_signature()
+    # Защита от застрявшего статуса после завершённой замены индекса.
+    # Во время фактической загрузки writer_active=True, поэтому статус не сбрасывается.
+    if (
+        state in ("pending", "waiting", "loading")
+        and not status["writer_active"]
+        and active_signature is not None
+        and current_signature == active_signature
+    ):
+        state = "ready"
+        message = "FAISS-индекс актуален."
+        _set_index_state(state, message)
+
     return {
         "reload_state": state,
         "reload_message": message,
@@ -527,8 +544,7 @@ def _index_status_payload():
         "index_name": path.name,
         "index_size_bytes": size_bytes,
         "index_created_at": created_at,
-        "index_modified_at": modified_at,
-        "index_changed_on_disk": _index_signature() != active_signature,
+        "index_changed_on_disk": current_signature != active_signature,
         **status,
     }
 
@@ -1244,7 +1260,11 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   const indexMetaBox=document.getElementById("index-meta");
   let knownIndexGeneration=null;
   let indexNoticeUntil=0;
+  let indexStatusPollInFlight=false;
   async function pollIndexStatus(){
+    // Не допускаем параллельные опросы: старый ответ не должен затирать новый статус.
+    if(indexStatusPollInFlight)return;
+    indexStatusPollInFlight=true;
     try{
       const response=await fetch("/api/status?refresh="+Date.now(),{cache:"no-store"});
       if(!response.ok)return;
@@ -1267,7 +1287,6 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       indexMetaBox.textContent=info.index_exists
         ? "FAISS: "+formatIndexSize(info.index_size_bytes)
           +" · создан: "+formatIndexDate(info.index_created_at)
-          +" · изменён: "+formatIndexDate(info.index_modified_at)
         : "FAISS: файл индекса не найден";
       const waitingSearches=Number(info.active_searches||0);
       let message="";
@@ -1307,7 +1326,9 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       }else{
         indexStatusBox.hidden=true;
       }
-    }catch(e){}
+    }catch(e){}finally{
+      indexStatusPollInFlight=false;
+    }
   }
   pollIndexStatus();
   setInterval(pollIndexStatus,4000);
@@ -1997,7 +2018,24 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
     server_version = "FaceSearchHTTP/1.0"
 
     def log_message(self, fmt, *args):
-        # Access log для каждого HTTP-ответа: локальное время и IP TCP-клиента.
+        # Успешные фоновые запросы браузера создают много шума, но не несут диагностической ценности.
+        try:
+            status_code = int(args[1]) if len(args) > 1 else None
+            request_path = urlparse(getattr(self, "path", "")).path
+            routine_get = (
+                self.command == "GET"
+                and (
+                    request_path == "/api/status"
+                    or (request_path.startswith("/api/face/")
+                        and request_path.endswith(("/image", "/image-status")))
+                )
+            )
+            if routine_get and status_code is not None and 200 <= status_code < 400:
+                return
+        except (TypeError, ValueError, IndexError):
+            pass
+
+        # Остальные запросы по-прежнему пишутся с локальным временем и IP TCP-клиента.
         timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
         try:
             client_ip = str(self.client_address[0])
