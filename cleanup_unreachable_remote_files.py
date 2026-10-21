@@ -3,9 +3,9 @@
 FaceSearch: проверка доступности сетевых URL оригиналов.
 
 Запуск из корня проекта:
-    uv run python cleanup_missing_local_files.py
+    uv run python cleanup_unreachable_remote_files.py
 или
-    python cleanup_missing_local_files.py
+    python cleanup_unreachable_remote_files.py
 
 Проверяются URL оригиналов из images.url_image для записей с source_type != 'local'.
 images.source_url обычно хранит URL страницы профиля; images.path хранит путь CROP.
@@ -270,7 +270,7 @@ def check_remote_url(url: str) -> dict[str, Any]:
                     code = int(response.getcode() or 0)
                     content_type = str(response.headers.get("Content-Type") or "").lower()
                     # Читаем только небольшой фрагмент, не скачиваем оригинал целиком.
-                    response.read(1024)
+                    sample = response.read(1024)
             except HTTPError as exc:
                 code = int(exc.code or 0)
                 content_type = str(exc.headers.get("Content-Type") or "").lower() if exc.headers else ""
@@ -281,6 +281,13 @@ def check_remote_url(url: str) -> dict[str, Any]:
 
             last_code = code
             if 200 <= code < 300:
+                if not sample:
+                    return {
+                        "label": f"Проверить вручную: HTTP {code}, пустой ответ",
+                        "dead": False,
+                        "kind": "warning",
+                        "detail": content_type or "Пустое тело ответа",
+                    }
                 if "text/html" in content_type or "application/json" in content_type:
                     return {
                         "label": f"Проверить вручную: HTTP {code}, ответ не изображение",
@@ -614,6 +621,8 @@ class CleanupWindow(tk.Tk):
         self.tree.delete(*self.tree.get_children())
 
         counts = {"ok": 0, "dead": 0, "warning": 0, "skip": 0}
+        max_rows = 5000
+        shown_issues = 0
         for item in candidates:
             image_id, crop_path, filename, source_type, url, _source_url = item
             result = status_map.get(url) or {
@@ -623,26 +632,40 @@ class CleanupWindow(tk.Tk):
                 "detail": "",
             }
             self.results_by_id[image_id] = {"candidate": item, "result": result}
-            counts[result.get("kind", "warning")] = counts.get(result.get("kind", "warning"), 0) + 1
-            self.tree.insert(
-                "",
-                "end",
-                iid=str(image_id),
-                values=(image_id, filename, source_type, result["label"], url, crop_path),
-                tags=(result.get("kind", "warning"),),
-            )
+            kind = result.get("kind", "warning")
+            counts[kind] = counts.get(kind, 0) + 1
+
+            # Успешные URL не загромождают окно. Показываем проблемные строки,
+            # но ограничиваем количество элементов Treeview на больших базах.
+            if kind != "ok" and shown_issues < max_rows:
+                self.tree.insert(
+                    "",
+                    "end",
+                    iid=str(image_id),
+                    values=(image_id, filename, source_type, result["label"], url, crop_path),
+                    tags=(kind,),
+                )
+                shown_issues += 1
 
         dead_count = counts["dead"]
+        issues_count = dead_count + counts["warning"] + counts["skip"]
         self.delete_button.configure(
             state="normal" if dead_count or orphan_profiles else "disabled"
         )
         self.status_var.set(
-            f"Проверка завершена. URL: {len(candidates)}; доступно: {counts['ok']}; "
+            f"Проверено записей: {len(candidates)}; доступно: {counts['ok']}; "
             f"подтверждённо отсутствуют (404/410): {dead_count}; "
             f"ошибки/ограничения: {counts['warning']}; пропущено: {counts['skip']}; "
             f"профилей без ссылок: {len(orphan_profiles)}."
         )
-        self.progress_var.set("")
+        if issues_count:
+            hidden = max(0, issues_count - shown_issues)
+            self.progress_var.set(
+                f"В таблице показано проблемных строк: {shown_issues} из {issues_count}."
+                + (f" Скрыто из окна: {hidden}; проверка и удаление охватывают все результаты." if hidden else "")
+            )
+        else:
+            self.progress_var.set("Проблемных URL не найдено: все проверенные адреса ответили успешно.")
 
     def confirm_delete(self):
         if self._busy:
@@ -713,7 +736,7 @@ class CleanupWindow(tk.Tk):
                 ).fetchone()
                 if not current:
                     continue
-                current_source_type = str(current[3] or "").strip().lower()
+                current_source_type = str(current[3] or "local").strip().lower()
                 current_url = str(current[4] or "").strip()
                 if current_source_type == "local" or current_url != old_url:
                     continue
