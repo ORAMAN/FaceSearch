@@ -72,6 +72,10 @@ _CROP_REPAIR_ACTIVE_IDS: set[int] = set()
 _FACE_IMAGE_CACHE_LOCK = threading.RLock()
 _FACE_IMAGE_CACHE: dict[int, tuple] = {}
 _FACE_IMAGE_CACHE_MAX = 5000
+_REMOTE_IMAGE_CHECK_LOCK = threading.RLock()
+_REMOTE_IMAGE_CHECK_CACHE: dict[str, tuple[float, bool]] = {}
+_REMOTE_IMAGE_CHECK_CACHE_TTL = 20.0
+_REMOTE_IMAGE_CHECK_CACHE_MAX = 2000
 
 
 def _select_profile() -> tuple[dict, dict]:
@@ -322,6 +326,87 @@ def _remember_face_image_rows(rows) -> None:
 def _get_face_image_row(face_id: int):
     with _FACE_IMAGE_CACHE_LOCK:
         return _FACE_IMAGE_CACHE.get(int(face_id))
+
+
+def _looks_like_image_content_type(value: str) -> bool:
+    content_type = str(value or "").split(";", 1)[0].strip().lower()
+    return (
+        not content_type
+        or content_type.startswith("image/")
+        or content_type in ("application/octet-stream", "binary/octet-stream")
+    )
+
+
+def _remote_image_url_available(value: str) -> bool:
+    """Проверяет доступность удалённого оригинала; результат ненадолго кэшируется."""
+    image_url = str(value or "").strip()
+    if not image_url.lower().startswith(("http://", "https://")):
+        return False
+
+    now = time.monotonic()
+    with _REMOTE_IMAGE_CHECK_LOCK:
+        cached = _REMOTE_IMAGE_CHECK_CACHE.get(image_url)
+        if cached and now - cached[0] < _REMOTE_IMAGE_CHECK_CACHE_TTL:
+            return cached[1]
+
+    available = False
+    retry_with_get = False
+    try:
+        image_url = _validate_remote_image_url(image_url)
+        opener = urllib.request.build_opener(_SafeImageRedirectHandler())
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; FaceSearch/1.0)",
+            "Accept": "image/avif,image/webp,image/*,*/*;q=0.5",
+        }
+        request = urllib.request.Request(image_url, headers=headers, method="HEAD")
+        try:
+            with opener.open(request, timeout=4) as response:
+                available = (
+                    200 <= int(getattr(response, "status", 200)) < 400
+                    and _looks_like_image_content_type(response.headers.get("Content-Type", ""))
+                )
+        except urllib.error.HTTPError as exc:
+            retry_with_get = exc.code in (403, 405, 501)
+            try:
+                exc.close()
+            except Exception:
+                pass
+
+        # Некоторые хостинги запрещают HEAD, хотя обычная загрузка изображения работает.
+        if not available and retry_with_get:
+            request = urllib.request.Request(
+                image_url,
+                headers={**headers, "Range": "bytes=0-0"},
+                method="GET",
+            )
+            with opener.open(request, timeout=4) as response:
+                first_byte = response.read(1)
+                available = (
+                    bool(first_byte)
+                    and 200 <= int(getattr(response, "status", 200)) < 400
+                    and _looks_like_image_content_type(response.headers.get("Content-Type", ""))
+                )
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        available = False
+    except Exception:
+        available = False
+
+    with _REMOTE_IMAGE_CHECK_LOCK:
+        _REMOTE_IMAGE_CHECK_CACHE[image_url] = (now, available)
+        while len(_REMOTE_IMAGE_CHECK_CACHE) > _REMOTE_IMAGE_CHECK_CACHE_MAX:
+            _REMOTE_IMAGE_CHECK_CACHE.pop(next(iter(_REMOTE_IMAGE_CHECK_CACHE)))
+    return available
+
+
+def _original_image_available(source_url: str, url_image: str) -> bool:
+    """True только если можно найти локальный оригинал или доступное изображение по URL."""
+    try:
+        local_source = face_search._source_url_to_local_path(source_url)
+        if local_source is not None and local_source.is_file():
+            return True
+    except (OSError, TypeError, ValueError):
+        pass
+    return _remote_image_url_available(url_image)
 
 
 def _start_crop_repair(face_ids) -> None:
@@ -677,44 +762,89 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   function faceImageUrl(faceId,useCrop,refresh){
     return "/api/face/"+encodeURIComponent(faceId)+"/image?crop="+(useCrop?"1":"0")+(refresh?"&refresh="+Date.now():"");
   }
-  function showImageFailure(image){
+  function showImageFailure(image,message){
     const box=image.parentElement;
     const placeholder=box&&box.querySelector(".no-image");
     image.style.display="none";
-    if(placeholder)placeholder.hidden=false;
+    if(placeholder){
+      placeholder.textContent=message||"Нет изображения";
+      placeholder.hidden=false;
+    }
+  }
+  function clearImageRetryTimers(image){
+    if(image._cropRetryTimer){clearTimeout(image._cropRetryTimer);image._cropRetryTimer=null;}
+    if(image._cropStatusTimer){clearTimeout(image._cropStatusTimer);image._cropStatusTimer=null;}
+  }
+  async function pollCropStatus(image,requestId){
+    if(image.dataset.imageRequestId!==requestId||image.dataset.cropEnabled!=="true")return;
+    const box=image.parentElement;
+    const placeholder=box&&box.querySelector(".no-image");
+    image.style.display="none";
+    if(placeholder){
+      placeholder.textContent="Проверка доступности изображения…";
+      placeholder.hidden=false;
+    }
+    try{
+      const response=await fetch(
+        "/api/face/"+encodeURIComponent(image.dataset.faceId)+"/image-status?refresh="+Date.now(),
+        {cache:"no-store"}
+      );
+      let data={};
+      try{data=await response.json();}catch(e){}
+      if(image.dataset.imageRequestId!==requestId||image.dataset.cropEnabled!=="true")return;
+      if(!response.ok||data.state==="missing"){
+        showImageFailure(image,"Нет изображения");
+        return;
+      }
+      if(data.state==="ready"){
+        if(placeholder)placeholder.hidden=true;
+        image.style.display="block";
+        image.src=faceImageUrl(image.dataset.faceId,true,true);
+        return;
+      }
+      if(data.state==="creating"){
+        if(placeholder){
+          placeholder.textContent="Идёт создание миниатюры";
+          placeholder.hidden=false;
+        }
+        image._cropStatusTimer=setTimeout(function(){
+          pollCropStatus(image,requestId);
+        },1500);
+        return;
+      }
+      showImageFailure(image,"Нет изображения");
+    }catch(error){
+      if(image.dataset.imageRequestId===requestId){
+        showImageFailure(image,"Нет изображения");
+      }
+    }
   }
   function configureCardImage(image,faceId,useCrop,refresh){
     image.dataset.faceId=String(faceId);
     image.dataset.cropEnabled=String(Boolean(useCrop));
-    image.dataset.cropRetryCount="0";
+    image.dataset.imageRequestId=String(Number(image.dataset.imageRequestId||"0")+1);
+    const requestId=image.dataset.imageRequestId;
     image.style.display="block";
     const box=image.parentElement;
     const placeholder=box&&box.querySelector(".no-image");
-    if(placeholder)placeholder.hidden=true;
-    if(image._cropRetryTimer){clearTimeout(image._cropRetryTimer);image._cropRetryTimer=null;}
+    if(placeholder){
+      placeholder.textContent="Нет изображения";
+      placeholder.hidden=true;
+    }
+    clearImageRetryTimers(image);
     image.onload=function(){
+      if(image.dataset.imageRequestId!==requestId)return;
       image.style.display="block";
       if(placeholder)placeholder.hidden=true;
-      if(image._cropRetryTimer){clearTimeout(image._cropRetryTimer);image._cropRetryTimer=null;}
+      clearImageRetryTimers(image);
     };
     image.onerror=function(){
+      if(image.dataset.imageRequestId!==requestId)return;
       if(image.dataset.cropEnabled==="true"&&CREATE_CROPS_ON_HTML){
-        const retries=Number(image.dataset.cropRetryCount||"0");
-        if(retries<1){
-          image.dataset.cropRetryCount=String(retries+1);
-          if(image._cropRetryTimer)clearTimeout(image._cropRetryTimer);
-          image._cropRetryTimer=setTimeout(function(){
-            if(image.dataset.cropEnabled!=="true")return;
-            image.src=faceImageUrl(image.dataset.faceId,true,true)+"&crop_retry="+Date.now();
-          },1500);
-          return;
-        }
-        // После двух суммарных запросов не продолжаем опрос и не подменяем
-        // отсутствующий CROP оригиналом: показываем единый placeholder.
-        showImageFailure(image);
+        pollCropStatus(image,requestId);
         return;
       }
-      showImageFailure(image);
+      showImageFailure(image,"Нет изображения");
     };
     image.onclick=function(){openLightboxForImage(image);};
     image.src=faceImageUrl(faceId,useCrop,refresh);
@@ -1355,6 +1485,9 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         if path == "/favicon.ico":
             self._send(204, b"", "image/x-icon")
             return
+        if path.startswith("/api/face/") and path.endswith("/image-status"):
+            self._serve_face_image_status(path)
+            return
         if path.startswith("/api/face/") and path.endswith("/image"):
             query = parse_qs(urlparse(self.path).query)
             use_crop = query.get("crop", ["1"])[0] != "0"
@@ -1577,6 +1710,57 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         if CREATE_CROPS_ON_HTML and cards:
             _start_crop_repair(card["face_id"] for card in cards)
         self._json(200, {"results": cards, "count": len(cards)})
+
+    def _serve_face_image_status(self, route: str):
+        """Сообщает браузеру, ждать ли CROP или показать заглушку «Нет изображения»."""
+        parts = route.strip("/").split("/")
+        try:
+            face_id = int(parts[2])
+        except (IndexError, ValueError):
+            self._json(400, {"error": "Некорректный ID лица."})
+            return
+        if face_id <= 0:
+            self._json(400, {"error": "Некорректный ID лица."})
+            return
+
+        row = _get_face_image_row(face_id)
+        if row is None:
+            conn = _open_connection()
+            try:
+                db_row = conn.execute(
+                    """
+                    SELECT f.id, i.id, i.path, i.filename, i.source_url, i.url_image
+                    FROM faces f
+                    JOIN images i ON i.id = f.image_id
+                    WHERE f.id = ?
+                    """,
+                    (face_id,),
+                ).fetchone()
+                if db_row:
+                    _remember_face_image_rows([db_row])
+                    row = _get_face_image_row(face_id)
+            finally:
+                conn.close()
+
+        if not row:
+            self._json(404, {"state": "missing", "error": "Изображение не найдено."})
+            return
+
+        image_id, stored_path, _filename, source_url, url_image = row
+        crop_path = face_search._resolve_db_crop_path(
+            stored_path, image_id=int(image_id)
+        )
+        if crop_path.is_file():
+            self._json(200, {"state": "ready"})
+            return
+
+        if CREATE_CROPS_ON_HTML and _original_image_available(source_url, url_image):
+            # При поиске восстановление уже запускается в фоне. Пока оригинал доступен,
+            # оставляем заглушку создания и ждём, когда CROP появится на диске.
+            self._json(200, {"state": "creating"})
+            return
+
+        self._json(200, {"state": "missing"})
 
     def _serve_face_image(self, route: str, *, use_crop: bool = True):
         parts = route.strip("/").split("/")
