@@ -53,8 +53,9 @@ API_VERSION = "5.199"
 BASE_URL = "https://api.vk.ru/method"
 FRIENDS_PAGE_SIZE = 5000
 USER_BATCH_SIZE = 100
-# Пакет users.search — отдельный параметр: этот метод имеет собственную пагинацию.
-SEARCH_PAGE_SIZE = 1000
+# Фактически VK users.search возвращает до 100 объектов на страницу,
+# даже если запросить count=1000. Следующие страницы читаются через offset.
+SEARCH_PAGE_SIZE = 100
 # Обычные системные альбомы VK. photos.get использует для них строковые
 # album_id: profile, wall и saved; остальные значения остаются числовыми.
 SYSTEM_ALBUM_OPTIONS = (
@@ -1001,7 +1002,7 @@ def search_vk_cities(query: str, country_id: int, session: requests.Session) -> 
     """Ищет варианты городов через database.getCities для выбора ID в форме."""
     response_data = _vk_get_page(
         "database.getCities",
-        {"country_id": int(country_id), "q": str(query or "").strip(), "count": 1000, "offset": 0},
+        {"country_id": int(country_id), "q": str(query or "").strip(), "count": 100, "offset": 0},
         session,
         timeout=20,
     )
