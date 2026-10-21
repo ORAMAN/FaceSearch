@@ -678,7 +678,13 @@ def _response_items(response_data):
     return [], 0
 
 
-def _vk_get_page(method: str, params: dict, session: requests.Session, timeout: int = 20):
+def _vk_get_page(
+    method: str,
+    params: dict,
+    session: requests.Session,
+    timeout: int = 20,
+    base_url: str | None = None,
+):
     """Вызов VK API с повторами для временных ограничений и ротацией токена."""
     last_error = None
     for attempt in range(3):
@@ -689,7 +695,8 @@ def _vk_get_page(method: str, params: dict, session: requests.Session, timeout: 
             time.sleep(0.75 * attempt)
         else:
             time.sleep(0.35)
-        response = session.get(f"{BASE_URL}/{method}", params=request_params, timeout=timeout)
+        api_base = (base_url or BASE_URL).rstrip("/")
+        response = session.get(f"{api_base}/{method}", params=request_params, timeout=timeout)
         response.raise_for_status()
         payload = response.json()
         error = payload.get("error") if isinstance(payload, dict) else None
@@ -733,13 +740,22 @@ def country_id_from_selection(value) -> int | None:
 
 
 def search_vk_countries(session: requests.Session) -> list[dict]:
-    """Загружает страны из VK API, чтобы пользователь выбирал название, а не вводил ID."""
-    response_data = _vk_get_page(
-        "database.getCountries",
-        {"need_all": 1, "count": 1000, "offset": 0},
-        session,
-        timeout=20,
-    )
+    """Загружает страны из VK API; если метод недоступен на новом домене, пробует legacy endpoint."""
+    params = {"need_all": 1, "count": 1000, "offset": 0}
+    try:
+        response_data = _vk_get_page(
+            "database.getCountries", params, session, timeout=20,
+        )
+    except RuntimeError as exc:
+        # Некоторые токены/версии API отвечают кодом 3 на api.vk.ru, хотя метод
+        # ещё доступен через прежний endpoint. Не меняем BASE_URL всего загрузчика.
+        if "код 3" not in str(exc):
+            raise
+        print("[INFO] database.getCountries: пробую резервный endpoint api.vk.com.")
+        response_data = _vk_get_page(
+            "database.getCountries", params, session, timeout=20,
+            base_url="https://api.vk.com/method",
+        )
     items, _total = _response_items(response_data)
     return [item for item in items if isinstance(item, dict) and item.get("id") and item.get("title")]
 
