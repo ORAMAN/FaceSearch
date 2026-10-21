@@ -28,6 +28,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime
 from pathlib import Path
+from contextlib import contextmanager
 from urllib.parse import parse_qs, urlparse
 
 import face_search_gui as face_search
@@ -81,6 +82,330 @@ _REMOTE_IMAGE_CHECK_CACHE_TTL = 20.0
 _REMOTE_IMAGE_CHECK_CACHE_MAX = 2000
 
 
+# Автоматическое обнаружение обновления FAISS.
+# Перезагрузка начинается только после нескольких одинаковых проверок stat(),
+# чтобы не читать индекс во время его записи.
+_INDEX_CHECK_INTERVAL = 5.0
+_INDEX_STABLE_POLLS = 3
+_INDEX_RETRY_INTERVAL = 60.0
+_INDEX_WATCH_STOP = threading.Event()
+_INDEX_STATE_LOCK = threading.RLock()
+_INDEX_ACTIVE_SIGNATURE = None
+_INDEX_RELOAD_STATE = "starting"  # starting | ready | pending | loading | error | missing | fallback
+_INDEX_RELOAD_MESSAGE = "Инициализация индекса..."
+_INDEX_GENERATION = 0
+_INDEX_LAST_UPDATED_AT = None
+_INDEX_LAST_ATTEMPT_SIGNATURE = object()
+_INDEX_LAST_ATTEMPT_AT = 0.0
+
+
+class _IndexReadWriteLock:
+    """Разрешает параллельные поиски, но исключает поиск во время смены индекса."""
+
+    def __init__(self):
+        self._condition = threading.Condition(threading.RLock())
+        self._readers = 0
+        self._waiting_writers = 0
+        self._writer_active = False
+
+    @contextmanager
+    def read_lock(self):
+        with self._condition:
+            while self._writer_active or self._waiting_writers:
+                self._condition.wait()
+            self._readers += 1
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._readers -= 1
+                if self._readers == 0:
+                    self._condition.notify_all()
+
+    @contextmanager
+    def write_lock(self):
+        with self._condition:
+            self._waiting_writers += 1
+            try:
+                while self._writer_active or self._readers:
+                    self._condition.wait()
+                self._writer_active = True
+            finally:
+                self._waiting_writers -= 1
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._writer_active = False
+                self._condition.notify_all()
+
+
+_INDEX_USE_LOCK = _IndexReadWriteLock()
+_GPU_STATE_FIELDS = (
+    "_GPU_EMBEDDINGS", "_GPU_FACE_IDS", "_GPU_INDEX_DIM", "_GPU_INDEX_COUNT",
+    "_GPU_INDEX_DTYPE", "_GPU_INDEX_ERROR", "_GPU_INDEX_WARNING", "_GPU_INDEX_MODE",
+    "_GPU_STREAM_CPU_INDEX", "_GPU_STREAM_FACE_IDS", "_GPU_STREAM_DIM", "_GPU_STREAM_COUNT",
+)
+_CPU_CACHE_FIELDS = (
+    "_CPU_FAISS_CACHE_INDEX", "_CPU_FAISS_CACHE_PATH",
+    "_CPU_FAISS_CACHE_MTIME_NS", "_CPU_FAISS_CACHE_SIZE",
+)
+
+
+def _index_signature(index_path_value=None):
+    """Снимок файла индекса: путь, mtime, размер, ctime и inode."""
+    try:
+        path = Path(index_path_value or face_search.INDEX_FILE).expanduser().resolve()
+        stat = path.stat()
+        if not path.is_file():
+            return None
+        return (
+            str(path),
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+            int(stat.st_ctime_ns),
+            int(getattr(stat, "st_ino", 0)),
+        )
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _set_index_state(state, message):
+    global _INDEX_RELOAD_STATE, _INDEX_RELOAD_MESSAGE
+    with _INDEX_STATE_LOCK:
+        _INDEX_RELOAD_STATE = str(state)
+        _INDEX_RELOAD_MESSAGE = str(message)
+
+
+def _snapshot_gpu_index():
+    lock = getattr(face_search, "_GPU_INDEX_LOCK", None)
+    if lock is None:
+        return {}
+    with lock:
+        return {name: getattr(face_search, name, None) for name in _GPU_STATE_FIELDS}
+
+
+def _restore_gpu_index(snapshot):
+    if not snapshot:
+        return
+    lock = getattr(face_search, "_GPU_INDEX_LOCK", None)
+    if lock is None:
+        return
+    with lock:
+        for name, value in snapshot.items():
+            setattr(face_search, name, value)
+
+
+def _snapshot_cpu_index_cache():
+    lock = getattr(face_search, "_CPU_FAISS_CACHE_LOCK", None)
+    if lock is None:
+        return {}
+    with lock:
+        return {name: getattr(face_search, name, None) for name in _CPU_CACHE_FIELDS}
+
+
+def _restore_cpu_index_cache(snapshot, signature_hint=None):
+    """Восстанавливает старый объект после неудачной загрузки новой версии."""
+    if not snapshot:
+        return
+    lock = getattr(face_search, "_CPU_FAISS_CACHE_LOCK", None)
+    if lock is None:
+        return
+    with lock:
+        for name, value in snapshot.items():
+            setattr(face_search, name, value)
+        cached_index = snapshot.get("_CPU_FAISS_CACHE_INDEX")
+        cached_path = snapshot.get("_CPU_FAISS_CACHE_PATH")
+        if cached_index is not None and signature_hint is not None:
+            try:
+                current_path = str(Path(face_search.INDEX_FILE).expanduser().resolve())
+                if cached_path == current_path and signature_hint[0] == current_path:
+                    # Не даём CPU fallback автоматически заменить рабочий старый индекс
+                    # потенциально неполным файлом. Следующая попытка обновления
+                    # предварительно очистит кэш и перечитает файл заново.
+                    face_search._CPU_FAISS_CACHE_MTIME_NS = int(signature_hint[1])
+                    face_search._CPU_FAISS_CACHE_SIZE = int(signature_hint[2])
+            except (OSError, TypeError, ValueError, IndexError):
+                pass
+
+
+def _validate_cpu_faiss_index(index):
+    """Проверяет структуру загруженного индекса до переключения на него."""
+    base_index = index.index if hasattr(index, "index") else index
+    count = int(getattr(base_index, "ntotal", 0) or 0)
+    dimension = int(getattr(base_index, "d", 0) or 0)
+    if count <= 0 or dimension <= 0:
+        raise RuntimeError("Индекс пуст или имеет некорректную размерность.")
+    if not hasattr(index, "id_map"):
+        raise RuntimeError("Индекс не содержит карту face.id; требуется пересоздание FAISS.")
+    face_ids = face_search.np.asarray(
+        face_search.faiss.vector_to_array(index.id_map), dtype=face_search.np.int64
+    )
+    if int(face_ids.shape[0]) != count:
+        raise RuntimeError(
+            "Число face.id не совпадает с числом embeddings "
+            + "(" + str(face_ids.shape[0]) + " != " + str(count) + ")."
+        )
+    return count, dimension
+
+
+def _reload_index(target_signature):
+    """Перечитывает FAISS под эксклюзивной блокировкой, сохраняя старый при ошибке."""
+    global _INDEX_ACTIVE_SIGNATURE, _INDEX_GENERATION, _INDEX_LAST_UPDATED_AT
+
+    with _INDEX_USE_LOCK.write_lock():
+        # За время ожидания завершения текущих поисков файл мог измениться ещё раз.
+        if _index_signature() != target_signature:
+            _set_index_state("pending", "Файл FAISS снова меняется; ожидается стабильная версия.")
+            return False
+
+        old_gpu = _snapshot_gpu_index()
+        old_cpu = _snapshot_cpu_index_cache()
+        index_path = Path(face_search.INDEX_FILE).expanduser().resolve()
+        try:
+            # Принудительно перечитываем именно файл на диске, даже если путь тот же.
+            # При ошибке снимки выше позволяют вернуть прежний индекс.
+            face_search._clear_cpu_faiss_cache()
+
+            if BACKEND == face_search.BACKEND_GPU:
+                loaded = face_search._load_gpu_search_index_from_faiss(
+                    index_path,
+                    progress_callback=lambda message: print("[HTTP][FAISS] " + str(message)),
+                )
+                if not loaded:
+                    gpu_status = face_search.get_gpu_search_status()
+                    reason = gpu_status.get("error") or "GPU-индекс не активирован"
+                    raise RuntimeError(str(reason))
+            else:
+                cpu_index = face_search._get_cpu_faiss_index(index_path)
+                count, dimension = _validate_cpu_faiss_index(cpu_index)
+                print(
+                    "[HTTP][FAISS] CPU-индекс проверен: "
+                    + format(count, ",").replace(",", " ")
+                    + " лиц, dim=" + str(dimension)
+                )
+
+            if _index_signature() != target_signature:
+                raise RuntimeError("Файл FAISS изменился непосредственно во время загрузки.")
+
+            with _INDEX_STATE_LOCK:
+                _INDEX_ACTIVE_SIGNATURE = target_signature
+                _INDEX_GENERATION += 1
+                _INDEX_LAST_UPDATED_AT = datetime.now().isoformat(timespec="seconds")
+                _INDEX_RELOAD_STATE = "ready"
+                _INDEX_RELOAD_MESSAGE = (
+                    "FAISS-индекс обновлён. Новые поисковые запросы используют актуальную версию."
+                )
+            print(
+                "[HTTP][FAISS] Индекс обновлён без перезапуска HTTP-сервера: "
+                + index_path.name
+            )
+            return True
+
+        except Exception as exc:
+            # Некоторые ветки GPU-загрузчика очищают глобальный индекс при OOM.
+            # Возвращаем старые ссылки до снятия блокировки поисков.
+            _restore_gpu_index(old_gpu)
+            _restore_cpu_index_cache(old_cpu, signature_hint=target_signature)
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
+            message = (
+                "Не удалось загрузить новую версию FAISS: " + str(exc)
+                + ". Сервер продолжает работу с предыдущей версией, если она была загружена."
+            )
+            print("[HTTP][FAISS][ERROR] " + message)
+            _set_index_state("error", message)
+            return False
+
+
+def _watch_index_loop():
+    """Периодически обнаруживает стабильное обновление файла FAISS и применяет его."""
+    global _INDEX_LAST_ATTEMPT_SIGNATURE, _INDEX_LAST_ATTEMPT_AT
+
+    observed_signature = object()
+    stable_polls = 0
+
+    while not _INDEX_WATCH_STOP.wait(_INDEX_CHECK_INTERVAL):
+        signature = _index_signature()
+        now = time.monotonic()
+
+        with _INDEX_STATE_LOCK:
+            active_signature = _INDEX_ACTIVE_SIGNATURE
+            current_state = _INDEX_RELOAD_STATE
+
+        if signature == active_signature:
+            observed_signature = object()
+            stable_polls = 0
+            # Не затираем fallback/error/missing: это полезная диагностическая информация.
+            if current_state not in ("fallback", "error", "missing", "loading"):
+                _set_index_state("ready", "FAISS-индекс актуален.")
+            continue
+
+        if signature != observed_signature:
+            observed_signature = signature
+            stable_polls = 1
+        else:
+            stable_polls += 1
+
+        if signature is None:
+            _set_index_state(
+                "missing",
+                "Файл FAISS временно отсутствует. Если старая версия загружена, она остаётся в памяти.",
+            )
+        else:
+            _set_index_state(
+                "pending",
+                "Обнаружены изменения FAISS. Ожидание завершения записи файла перед переключением индекса...",
+            )
+
+        if stable_polls < _INDEX_STABLE_POLLS:
+            continue
+
+        if _INDEX_LAST_ATTEMPT_SIGNATURE == signature:
+            # Для отсутствующего файла повторная попытка не нужна; ошибку загрузки
+            # повторяем не чаще раза в минуту, не засоряя консоль одинаковыми сообщениями.
+            if signature is None or now - _INDEX_LAST_ATTEMPT_AT < _INDEX_RETRY_INTERVAL:
+                continue
+
+        _INDEX_LAST_ATTEMPT_SIGNATURE = signature
+        _INDEX_LAST_ATTEMPT_AT = now
+
+        if signature is None:
+            _set_index_state(
+                "missing",
+                "Файл FAISS не найден. Сервер не остановлен; доступность поиска зависит от загруженной версии индекса.",
+            )
+            print("[HTTP][FAISS][WARNING] Файл индекса отсутствует; сервер продолжает работать.")
+            continue
+
+        _set_index_state("loading", "Загрузка новой версии FAISS. Поисковые запросы временно ожидают завершения переключения...")
+        _reload_index(signature)
+
+
+def _index_status_payload():
+    with _INDEX_STATE_LOCK:
+        state = _INDEX_RELOAD_STATE
+        message = _INDEX_RELOAD_MESSAGE
+        generation = _INDEX_GENERATION
+        updated_at = _INDEX_LAST_UPDATED_AT
+        active_signature = _INDEX_ACTIVE_SIGNATURE
+    current_signature = _index_signature()
+    return {
+        "reload_state": state,
+        "reload_message": message,
+        "generation": generation,
+        "updated_at": updated_at,
+        "index_exists": current_signature is not None,
+        "index_name": Path(face_search.INDEX_FILE).name,
+        "index_changed_on_disk": current_signature != active_signature,
+    }
+
+
+
+
 def _select_profile() -> tuple[dict, dict]:
     """Выбирает профиль так же, как GUI: сохранённый выбор имеет приоритет."""
     gui_settings = _load_gui_settings()
@@ -114,6 +439,7 @@ def _initialize_runtime() -> None:
     global DEFAULT_TOP_K, DEFAULT_MIN_SIMILARITY
     global DEFAULT_USE_LOCAL_CROPS, DEFAULT_THEME, CREATE_CROPS_ON_HTML
     global CROP_REPAIR_WORKERS, CROP_REPAIR_AUTO_WORKERS
+    global _INDEX_ACTIVE_SIGNATURE, _INDEX_RELOAD_STATE, _INDEX_RELOAD_MESSAGE
 
     PROFILE, gui_settings = _select_profile()
     PROFILE_NAME = str(PROFILE.get("name") or "БД FaceSearch")
@@ -166,20 +492,33 @@ def _initialize_runtime() -> None:
     FACE_APP = face_search.create_face_app(BACKEND)
 
     index_path = Path(face_search.INDEX_FILE)
-    if not index_path.is_file():
-        print("[HTTP] ПРЕДУПРЕЖДЕНИЕ: FAISS-индекс не найден; поиск будет сообщать об ошибке.")
+    initial_signature = _index_signature(index_path)
+    with _INDEX_STATE_LOCK:
+        _INDEX_ACTIVE_SIGNATURE = initial_signature
+        if initial_signature is None:
+            _INDEX_RELOAD_STATE = "missing"
+            _INDEX_RELOAD_MESSAGE = "FAISS-индекс не найден. Поиск станет доступен после появления файла индекса."
+        else:
+            _INDEX_RELOAD_STATE = "ready"
+            _INDEX_RELOAD_MESSAGE = "FAISS-индекс актуален."
+    if initial_signature is None:
+        print("[HTTP] ПРЕДУПРЕЖДЕНИЕ: FAISS-индекс не найден; фоновая проверка продолжится.")
     elif BACKEND == face_search.BACKEND_GPU:
-        # Пытаемся заранее разместить индекс в VRAM. Если CUDA недоступна или
-        # памяти недостаточно, штатный search_embedding использует CPU FAISS.
+        # Первичная загрузка выполняется до старта HTTP; последующие обновления
+        # контролирует фоновый поток, не останавливая сервер.
         try:
             loaded = face_search._load_gpu_search_index_from_faiss(
                 index_path,
                 progress_callback=lambda message: print("[HTTP][FAISS] " + str(message)),
             )
             if not loaded:
-                print("[HTTP] GPU-индекс не активирован; будет использован CPU FAISS.")
+                message = "GPU-индекс не активирован; поиск будет использовать CPU FAISS."
+                print("[HTTP] " + message)
+                _set_index_state("fallback", message)
         except Exception as exc:
-            print(f"[HTTP] Не удалось загрузить FAISS в GPU; fallback на CPU: {exc}")
+            message = "Не удалось загрузить FAISS в GPU; будет использован CPU fallback: " + str(exc)
+            print("[HTTP] " + message)
+            _set_index_state("fallback", message)
 
 
 def _validate_remote_image_url(value: str) -> str:
@@ -528,6 +867,11 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 #preview-canvas{display:none;max-width:100%;max-height:440px;width:auto;height:auto;object-fit:contain;cursor:crosshair}
 .status{min-height:28px;color:var(--muted);padding:10px 2px;overflow-wrap:anywhere}
 .status.error{color:#c83e3e}
+.index-status{margin:12px 0;padding:11px 14px;border:1px solid var(--line);border-radius:9px;font-size:14px;line-height:1.45;overflow-wrap:anywhere}
+.index-status[hidden]{display:none}
+.index-status.warning{border-color:#d49a32;background:rgba(212,154,50,.12);color:var(--text)}
+.index-status.error{border-color:#c83e3e;background:rgba(200,62,62,.10);color:var(--text)}
+.index-status.success{border-color:#359b67;background:rgba(53,155,103,.10);color:var(--text)}
 #search-button{margin:6px 0 18px}
 .section-title{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin:23px 0 14px}
 .section-title h2{font-size:20px;margin:0}
@@ -633,6 +977,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 <main>
   <h1>FaceSearch</h1>
   <p class="subtitle">Загрузите изображение — определение лиц и поиск по первому найденному лицу запустятся автоматически. На групповом фото можно выбрать другое лицо и повторить поиск.</p>
+  <div id="index-status" class="index-status" role="status" aria-live="polite" hidden></div>
   <section class="toolbar" aria-label="Параметры поиска">
     <div class="field url-field">
       <label for="image-url">Адрес изображения (HTTP/HTTPS)</label>
@@ -765,6 +1110,54 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   let lightboxIndex=-1;
   let cameraStream=null;
   let cameraOpening=false;
+
+  const indexStatusBox=document.getElementById("index-status");
+  let knownIndexGeneration=null;
+  let indexNoticeUntil=0;
+  async function pollIndexStatus(){
+    try{
+      const response=await fetch("/api/status?refresh="+Date.now(),{cache:"no-store"});
+      if(!response.ok)return;
+      const info=await response.json();
+      const state=String(info.reload_state||"");
+      let message="";
+      let className="warning";
+      if(state==="pending"){
+        message=info.reload_message||"Обнаружено изменение FAISS-индекса. Ожидание завершения записи.";
+      }else if(state==="loading"){
+        message=info.reload_message||"Загружается новая версия FAISS. Запросы поиска временно ожидают переключения.";
+      }else if(state==="error"){
+        message=(info.reload_message||"Не удалось обновить FAISS-индекс.")+" При доступности старой версии сервер продолжает использовать её.";
+        className="error";
+        indexNoticeUntil=0;
+      }else if(state==="missing"){
+        message=info.reload_message||"Файл FAISS-индекса не найден.";
+        className="error";
+        indexNoticeUntil=0;
+      }else if(state==="fallback"){
+        message=info.reload_message||"GPU-индекс недоступен; поиск выполняется с CPU.";
+        className="warning";
+        indexNoticeUntil=0;
+      }else if(knownIndexGeneration!==null&&Number(info.generation)!==knownIndexGeneration){
+        message="FAISS-индекс обновлён. Новые поисковые запросы используют актуальную версию.";
+        className="success";
+        indexNoticeUntil=Date.now()+8000;
+      }
+      knownIndexGeneration=Number(info.generation||0);
+      if(message){
+        indexStatusBox.className="index-status "+className;
+        indexStatusBox.textContent=message;
+        indexStatusBox.hidden=false;
+      }else if(Date.now()<indexNoticeUntil){
+        indexStatusBox.className="index-status success";
+        indexStatusBox.hidden=false;
+      }else{
+        indexStatusBox.hidden=true;
+      }
+    }catch(e){}
+  }
+  pollIndexStatus();
+  setInterval(pollIndexStatus,4000);
 
   function applyTheme(theme){
     const value=theme==="light"?"light":"dark";
@@ -1528,12 +1921,15 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             self._serve_face_image(path, use_crop=use_crop)
             return
         if path == "/api/status":
-            self._json(200, {
-                "ok": True, "profile": PROFILE_NAME, "backend": BACKEND,
-                "index_exists": Path(face_search.INDEX_FILE).is_file(),
+            payload = _index_status_payload()
+            payload.update({
+                "ok": True,
+                "profile": PROFILE_NAME,
+                "backend": BACKEND,
                 "create_crops_on_html": CREATE_CROPS_ON_HTML,
                 "crop_repair_active": bool(_CROP_REPAIR_ACTIVE_IDS),
             })
+            self._json(200, payload)
             return
         self._json(404, {"error": "Страница не найдена."})
 
@@ -1637,13 +2033,32 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         conn = _open_connection()
         try:
             candidate_top_k = candidate_count_for_text_filter(top_k, text_filter)
-            results = face_search.search_embedding(
-                conn,
-                embedding,
-                top_k=candidate_top_k,
-                min_similarity=minimum_percent / 100.0,
-                backend=BACKEND,
-            )
+            with _INDEX_USE_LOCK.read_lock():
+                current_signature = _index_signature()
+                with _INDEX_STATE_LOCK:
+                    active_signature = _INDEX_ACTIVE_SIGNATURE
+                    reload_state = _INDEX_RELOAD_STATE
+                # При CPU backend движок умеет лениво перечитывать файл. Не даём ему
+                # читать индекс, который ещё меняется; дождёмся стабильной версии и
+                # проверим её в фоновом потоке. При ошибке используем сохранённый кэш.
+                if (
+                    current_signature != active_signature
+                    and reload_state not in ("error", "missing", "fallback")
+                    and (BACKEND == face_search.BACKEND_CPU
+                         or face_search.get_gpu_search_status().get("mode") == "none")
+                ):
+                    self._json(
+                        503,
+                        {"error": "Файл FAISS обновляется. Повторите поиск после завершения обновления индекса."},
+                    )
+                    return
+                results = face_search.search_embedding(
+                    conn,
+                    embedding,
+                    top_k=candidate_top_k,
+                    min_similarity=minimum_percent / 100.0,
+                    backend=BACKEND,
+                )
             if text_filter:
                 results = filter_results_by_card_text(
                     results, text_filter, limit=top_k
@@ -1886,6 +2301,13 @@ def main() -> None:
         parser.error("Порт должен быть в диапазоне 1–65535.")
 
     _initialize_runtime()
+    _INDEX_WATCH_STOP.clear()
+    index_watcher = threading.Thread(
+        target=_watch_index_loop,
+        name="FaceSearch-FAISS-Watcher",
+        daemon=True,
+    )
+    index_watcher.start()
     server = FaceSearchHTTPServer((args.host, args.port), FaceSearchRequestHandler)
     display_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
     url = f"http://{display_host}:{args.port}/"
@@ -1909,6 +2331,7 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nОстановка HTTP-сервера...")
     finally:
+        _INDEX_WATCH_STOP.set()
         server.server_close()
         with QUERY_SESSIONS_LOCK:
             QUERY_SESSIONS.clear()
