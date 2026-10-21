@@ -538,6 +538,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .card-image{height:270px;padding:4px;position:relative;background:var(--image-bg);display:flex;align-items:center;justify-content:center;overflow:hidden}
 .card-image img{display:block;width:100%;height:100%;object-fit:contain;border-radius:3px}
 .no-image[hidden]{display:none}.no-image{display:flex;align-items:center;justify-content:center;text-align:center;padding:18px;color:var(--muted);font-size:13px}
+.no-image.unavailable{gap:7px}
+.no-image.unavailable::before{content:"▧";display:inline-block;font-size:19px;line-height:1;color:var(--muted)}
 .no-image.creating{gap:9px}
 .no-image.creating::after{content:"";display:inline-block;width:12px;height:12px;flex:0 0 12px;border:2px solid currentColor;border-top-color:var(--accent);border-radius:50%;animation:thumbnail-spin .8s linear infinite}
 @keyframes thumbnail-spin{to{transform:rotate(360deg)}}
@@ -788,6 +790,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     image.style.display="none";
     if(placeholder){
       placeholder.classList.remove("creating");
+      placeholder.classList.add("unavailable");
       placeholder.textContent=message||"Нет изображения";
       placeholder.hidden=false;
     }
@@ -805,6 +808,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       // Текст и DOM не меняются во время опроса: анимация показывает,
       // что проверка продолжается, не создавая визуального подёргивания.
       if(!placeholder.classList.contains("creating")){
+        placeholder.classList.remove("unavailable");
         placeholder.textContent="Идёт создание миниатюры";
         placeholder.classList.add("creating");
       }
@@ -854,7 +858,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     const box=image.parentElement;
     const placeholder=box&&box.querySelector(".no-image");
     if(placeholder){
-      placeholder.classList.remove("creating");
+      placeholder.classList.remove("creating","unavailable");
       placeholder.textContent="Нет изображения";
       placeholder.hidden=true;
     }
