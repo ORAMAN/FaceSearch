@@ -382,6 +382,10 @@ def _watch_index_loop():
     """Периодически обнаруживает стабильное обновление файла FAISS и применяет его."""
     global _INDEX_LAST_ATTEMPT_SIGNATURE, _INDEX_LAST_ATTEMPT_AT
 
+    print(
+        f"[HTTP][FAISS] Фоновая проверка индекса запущена; интервал {_INDEX_CHECK_INTERVAL:.0f} с.",
+        flush=True,
+    )
     observed_signature = object()
     stable_polls = 0
 
@@ -466,6 +470,20 @@ def _watch_index_loop():
         _reload_index(signature)
 
 
+def _index_watcher_runner():
+    """Перезапускает проверяющий поток, если непредвиденная ошибка завершила цикл."""
+    while not _INDEX_WATCH_STOP.is_set():
+        try:
+            _watch_index_loop()
+            return
+        except Exception as exc:
+            message = "Фоновая проверка FAISS аварийно завершилась: " + str(exc)
+            print("[HTTP][FAISS][ERROR] " + message, flush=True)
+            _set_index_state("error", message)
+            if _INDEX_WATCH_STOP.wait(_INDEX_CHECK_INTERVAL):
+                return
+
+
 def _index_status_payload():
     with _INDEX_STATE_LOCK:
         state = _INDEX_RELOAD_STATE
@@ -486,11 +504,11 @@ def _index_status_payload():
             created_timestamp = getattr(stat, "st_ctime", None)
         modified_timestamp = getattr(stat, "st_mtime", None)
         created_at = (
-            datetime.fromtimestamp(created_timestamp).isoformat(timespec="seconds")
+            datetime.fromtimestamp(created_timestamp).astimezone().isoformat(timespec="seconds")
             if created_timestamp is not None else None
         )
         modified_at = (
-            datetime.fromtimestamp(modified_timestamp).isoformat(timespec="seconds")
+            datetime.fromtimestamp(modified_timestamp).astimezone().isoformat(timespec="seconds")
             if modified_timestamp is not None else None
         )
     except (OSError, ValueError):
@@ -2438,7 +2456,7 @@ def main() -> None:
     _initialize_runtime()
     _INDEX_WATCH_STOP.clear()
     index_watcher = threading.Thread(
-        target=_watch_index_loop,
+        target=_index_watcher_runner,
         name="FaceSearch-FAISS-Watcher",
         daemon=True,
     )
