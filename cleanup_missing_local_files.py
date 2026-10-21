@@ -446,7 +446,7 @@ class CleanupWindow(tk.Tk):
             return
         self._busy = True
         self.delete_button.configure(state="disabled")
-        self.status_var.set("Удаление записей БД и CROP-файлов…")
+        self.status_var.set("Удаление записей БД, профилей без ссылок и CROP-файлов…")
         snapshot = list(self.missing)
         threading.Thread(target=self._delete_worker, args=(snapshot,), daemon=True).start()
 
