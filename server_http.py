@@ -344,6 +344,15 @@ def _watch_index_loop():
                 _set_index_state("ready", "FAISS-индекс актуален.")
             continue
 
+        # Не маскируем уведомление об ошибке ожиданием стабильности повторно.
+        # Та же версия файла будет повторно проверена через минуту.
+        if (
+            signature == _INDEX_LAST_ATTEMPT_SIGNATURE
+            and current_state == "error"
+            and now - _INDEX_LAST_ATTEMPT_AT < _INDEX_RETRY_INTERVAL
+        ):
+            continue
+
         if signature != observed_signature:
             observed_signature = signature
             stable_polls = 1
