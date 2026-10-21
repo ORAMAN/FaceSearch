@@ -983,20 +983,6 @@ def country_label_from_id(value) -> str:
     return f"ID {country_id}"
 
 
-def clean_vk_location_label(value) -> str:
-    """Возвращает читаемую строку из ответа VK или пустую строку для испорченных данных."""
-    if not isinstance(value, str):
-        return ""
-    text = " ".join(value.split()).strip()
-    if not text or "\ufffd" in text or "?" in text:
-        return ""
-    if any(ord(char) < 32 and char not in "\t\n\r" for char in text):
-        return ""
-    if sum(char.isalpha() for char in text) < 2:
-        return ""
-    return text
-
-
 def search_vk_cities(query: str, country_id: int, session: requests.Session) -> list[dict]:
     """Ищет варианты городов через database.getCities для выбора ID в форме."""
     response_data = _vk_get_page(
@@ -4139,27 +4125,14 @@ def main():
         city_scroll.grid(row=0, column=2, sticky="ns", pady=8)
         city_list.configure(yscrollcommand=city_scroll.set)
         city_map = []
-        skipped_unreadable = 0
         for city in cities:
             city_id = city.get("id")
-            title = clean_vk_location_label(city.get("title"))
-            if not title or city_id is None:
-                skipped_unreadable += 1
-                continue
-            region = clean_vk_location_label(city.get("region"))
-            area = clean_vk_location_label(city.get("area"))
+            title = str(city.get("title") or "").strip()
+            region = str(city.get("region") or "").strip()
+            area = str(city.get("area") or "").strip()
             details = ", ".join(part for part in (region, area) if part)
             city_list.insert("end", f"{title} ({details}) — ID {city_id}" if details else f"{title} — ID {city_id}")
             city_map.append((city_id, title))
-        if not city_map:
-            dialog.destroy()
-            messagebox.showinfo(
-                "Поиск города VK",
-                "VK вернул результаты, но названия городов в ответе повреждены или нечитаемы. "
-                "Попробуйте другой запрос.",
-                parent=root,
-            )
-            return
         def choose_city(event=None):
             selection = city_list.curselection()
             if not selection:
@@ -4169,15 +4142,8 @@ def main():
             save_gui_settings()
             dialog.destroy()
         city_list.bind("<Double-Button-1>", choose_city)
-        status_text = (
-            f"Скрыто записей с нечитаемыми названиями: {skipped_unreadable}."
-            if skipped_unreadable else "Выберите город; ID будет подставлен в поле поиска."
-        )
-        ttk.Label(dialog, text=status_text).grid(
-            row=1, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4)
-        )
         buttons = ttk.Frame(dialog)
-        buttons.grid(row=2, column=0, columnspan=3, sticky="e", padx=8, pady=(0, 8))
+        buttons.grid(row=1, column=0, columnspan=3, sticky="e", padx=8, pady=(0, 8))
         ttk.Button(buttons, text="Выбрать", command=choose_city).grid(row=0, column=0, padx=(0, 6))
         ttk.Button(buttons, text="Закрыть", command=dialog.destroy).grid(row=0, column=1)
         city_list.focus_set()
