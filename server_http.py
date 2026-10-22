@@ -1036,7 +1036,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,265px),1fr));gap:18px}
 .description-filter-field{flex:1 1 260px;width:auto;min-width:260px}
 .description-filter-field input{width:100%;min-width:0}
-.toggle-options-row{flex:0 0 auto;width:auto;display:flex;align-items:center;align-self:stretch;gap:18px;flex-wrap:nowrap;min-width:0}
+.toggle-options-row{flex:0 0 auto;width:auto;display:flex;align-items:center;align-self:stretch;justify-content:flex-end;margin-left:auto;gap:18px;flex-wrap:nowrap;min-width:0}
 .toggle-options-row .toggle-field{display:flex;flex:0 0 auto;flex-direction:row;align-items:center;min-width:0;min-height:42px;gap:6px}
 .toggle-options-row .toggle-label{min-height:36px;white-space:nowrap;font-size:14px;color:var(--text)}
 .card{position:relative;min-width:0;overflow:hidden;border:1px solid var(--line);background:var(--panel);border-radius:12px;padding-bottom:14px;box-shadow:var(--shadow);transition:transform .14s,box-shadow .14s}
@@ -1117,7 +1117,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   .toolbar .mobile-only.action-field{flex:1 1 100%;width:100%;min-width:0}
   .toolbar .mobile-only.action-field button{width:100%;min-height:44px}
   .description-filter-field{flex:1 1 100%;width:100%}
-  .toggle-options-row{flex:1 1 100%;width:100%;align-self:auto;flex-wrap:wrap;gap:8px}
+  .toggle-options-row{flex:1 1 100%;width:100%;align-self:auto;justify-content:flex-end;margin-left:0;flex-wrap:wrap;gap:8px}
   .toggle-options-row .toggle-field{flex:0 1 auto;min-height:36px}
   .toggle-options-row .toggle-label{white-space:normal}
   .mobile-only{display:block;width:100%;margin:8px auto 0}
@@ -1210,7 +1210,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       <span id="preview-zoom-value" class="preview-zoom-value">100%</span>
       <button type="button" id="zoom-in-button" class="secondary" aria-label="Увеличить масштаб">+</button>
       <button type="button" id="zoom-fit-button" class="secondary">Вписать</button>
-      <span class="preview-zoom-hint">Колесо мыши — масштаб · Нажмите на рамку лица для выбора</span>
+      <span class="preview-zoom-hint">Ctrl + колесо мыши — масштаб · Нажмите на рамку лица для выбора</span>
     </div>
     <div id="preview-viewport" class="preview-viewport" hidden>
       <canvas id="preview-canvas" aria-label="Предпросмотр. Нажмите на рамку нужного лица, чтобы выбрать его." tabindex="0"></canvas>
@@ -1852,7 +1852,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   zoomOutButton.addEventListener("click",function(){changePreviewZoom(-1);});
   zoomFitButton.addEventListener("click",function(){applyPreviewZoom(true);});
   previewViewport.addEventListener("wheel",function(event){
-    if(!imageObject||previewViewport.hidden)return;
+    // Масштабируем только при удержании Ctrl; обычное колесо прокручивает область просмотра.
+    if(!event.ctrlKey||!imageObject||previewViewport.hidden)return;
     event.preventDefault();
     changePreviewZoom(event.deltaY<0?1:-1,event.clientX,event.clientY);
   },{passive:false});
