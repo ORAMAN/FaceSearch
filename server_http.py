@@ -894,9 +894,9 @@ def _original_image_available(source_url: str, url_image: str) -> bool:
     return _remote_image_url_available(url_image)
 
 
-def _start_crop_repair(face_ids) -> None:
-    """Восстанавливает отсутствующие CROP для текущей выдачи в фоне, как GUI."""
-    if not CREATE_CROPS_ON_HTML or FACE_APP is None:
+def _start_crop_repair(face_ids, *, force: bool = False) -> None:
+    """Восстанавливает отсутствующие CROP в фоне; force используется веб-запросами."""
+    if (not force and not CREATE_CROPS_ON_HTML) or FACE_APP is None:
         return
     try:
         requested = {int(value) for value in face_ids if int(value) > 0}
@@ -1025,6 +1025,11 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .card:hover{transform:translateY(-2px)}
 .card-image{height:270px;padding:4px;position:relative;background:var(--image-bg);display:flex;align-items:center;justify-content:center;overflow:hidden}
 .card-image img{display:block;width:100%;height:100%;object-fit:contain;border-radius:3px}
+.card-images{height:270px;padding:4px;position:relative;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;overflow:hidden;background:var(--image-bg)}
+.card-image-cell{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;background:var(--panel2);border-radius:3px}
+.card-image-label{flex:0 0 auto;padding:4px 3px;text-align:center;color:var(--muted);font-size:11px;line-height:1.2;border-bottom:1px solid var(--line)}
+.card-image-view{flex:1;min-width:0;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.card-image-view img{display:block;width:100%;height:100%;object-fit:contain;border-radius:2px}
 .no-image[hidden]{display:none}.no-image{display:flex;align-items:center;justify-content:center;text-align:center;padding:18px;color:var(--muted);font-size:13px}
 .no-image.unavailable{gap:7px}
 .no-image.unavailable::before{content:"▧";display:inline-block;font-size:19px;line-height:1;color:var(--muted)}
@@ -1092,6 +1097,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   .mobile-only{display:block;width:100%;margin:8px auto 0}
   .gallery{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
   .card-image{height:clamp(150px,38vw,230px)}
+  .card-images{height:clamp(150px,38vw,230px)}
   .card-body{padding:0 10px}
   .card-info{padding:8px;margin:8px 0 10px}
   .card-buttons{flex-direction:column}
@@ -1113,6 +1119,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   h1{font-size:25px}
   .gallery{grid-template-columns:minmax(0,1fr)}
   .card-image{height:230px}
+  .card-images{height:230px}
   .toolbar{padding:12px}
 }
 </style>
@@ -1147,7 +1154,11 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     </div>
     <div class="toggle-field">
       <label class="toggle-label" for="use-crop"><input id="use-crop" type="checkbox" __CROP_CHECKED__> Использовать CROP</label>
-      <span class="hint">Показывать локальные вырезки лиц, если они доступны.</span>
+      <span class="hint">При отсутствии CROP веб-интерфейс попробует создать его автоматически.</span>
+    </div>
+    <div class="toggle-field">
+      <label class="toggle-label" for="double-images"><input id="double-images" type="checkbox"> Двойные изображения</label>
+      <span class="hint">Показывать CROP и оригинал рядом в одной карточке.</span>
     </div>
     <div class="field action-field" style="min-width:0">
       <label>&nbsp;</label>
@@ -1237,6 +1248,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   const topKInput=document.getElementById("top-k");
   const descriptionFilterInput=document.getElementById("description-filter");
   const useCropCheckbox=document.getElementById("use-crop");
+  const doubleImagesCheckbox=document.getElementById("double-images");
   const themeButton=document.getElementById("theme-button");
   const lightbox=document.getElementById("image-lightbox");
   const lightboxImage=document.getElementById("lightbox-image");
@@ -1255,6 +1267,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   let lightboxIndex=-1;
   let cameraStream=null;
   let cameraOpening=false;
+  let lastResults=[];
 
   const indexStatusBox=document.getElementById("index-status");
   const indexMetaBox=document.getElementById("index-meta");
@@ -1441,7 +1454,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     };
     image.onerror=function(){
       if(image.dataset.imageRequestId!==requestId)return;
-      if(image.dataset.cropEnabled==="true"&&CREATE_CROPS_ON_HTML){
+      if(image.dataset.cropEnabled==="true"){
         pollCropStatus(image,requestId);
         return;
       }
@@ -1452,10 +1465,14 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   }
   function refreshCardImages(){
     gallery.querySelectorAll("img[data-face-image='true']").forEach(function(image){
-      configureCardImage(image,image.dataset.faceId,useCropCheckbox.checked,true);
+      const useCrop=image.dataset.fixedCrop!==undefined
+        ?image.dataset.fixedCrop==="true"
+        :useCropCheckbox.checked;
+      configureCardImage(image,image.dataset.faceId,useCrop,true);
     });
   }
   useCropCheckbox.addEventListener("change",refreshCardImages);
+  doubleImagesCheckbox.addEventListener("change",function(){renderResults(lastResults);});
 
   function openLightboxForImage(image){
     lightboxItems=Array.from(gallery.querySelectorAll("img[data-face-image='true']"));
@@ -1915,7 +1932,21 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     });
     body.appendChild(box);
   }
+  function createDualImageCell(faceId,useCrop,labelText,altText){
+    const cell=document.createElement("div");cell.className="card-image-cell";
+    const label=document.createElement("div");label.className="card-image-label";label.textContent=labelText;
+    const view=document.createElement("div");view.className="card-image-view";
+    const image=document.createElement("img");image.loading="lazy";image.dataset.faceImage="true";
+    image.dataset.fixedCrop=String(Boolean(useCrop));image.alt=altText;
+    const placeholder=document.createElement("div");placeholder.className="no-image";
+    placeholder.textContent=useCrop?"Идёт создание миниатюры":"Нет изображения";placeholder.hidden=true;
+    view.append(image,placeholder);cell.append(label,view);
+    configureCardImage(image,faceId,useCrop,false);
+    return cell;
+  }
   function renderResults(results){
+    lastResults=Array.isArray(results)?results:[];
+    results=lastResults;
     gallery.replaceChildren();
     resultCount.textContent=results.length?"Совпадений: "+results.length:"Совпадений не найдено";
     if(!results.length){
@@ -1927,14 +1958,25 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       const imported=item.source_type==="import";
       const displayName=String(item.display_name||"");
       const card=document.createElement("article");card.className="card";
-      const imageBox=document.createElement("div");imageBox.className="card-image";
+      let imageBox;
       const rank=document.createElement("div");rank.className="rank";rank.textContent="#"+String(item.rank||"");
       const score=document.createElement("div");score.className="score";score.textContent=Number(item.similarity||0).toFixed(2)+"%";
-      const image=document.createElement("img");image.loading="lazy";image.dataset.faceImage="true";
-      image.alt=displayName||("Лицо ID "+faceId);
-      const placeholder=document.createElement("div");placeholder.className="no-image";placeholder.textContent="Нет изображения";placeholder.hidden=true;
-      imageBox.append(image,placeholder,rank,score);
-      configureCardImage(image,faceId,useCropCheckbox.checked,false);
+      if(doubleImagesCheckbox.checked){
+        imageBox=document.createElement("div");imageBox.className="card-images";
+        const alt=displayName||("Лицо ID "+faceId);
+        imageBox.append(
+          createDualImageCell(faceId,true,"CROP",alt+" — CROP"),
+          createDualImageCell(faceId,false,"Оригинал",alt+" — оригинал"),
+          rank,score
+        );
+      }else{
+        imageBox=document.createElement("div");imageBox.className="card-image";
+        const image=document.createElement("img");image.loading="lazy";image.dataset.faceImage="true";
+        image.alt=displayName||("Лицо ID "+faceId);
+        const placeholder=document.createElement("div");placeholder.className="no-image";placeholder.textContent="Нет изображения";placeholder.hidden=true;
+        imageBox.append(image,placeholder,rank,score);
+        configureCardImage(image,faceId,useCropCheckbox.checked,false);
+      }
       const body=document.createElement("div");body.className="card-body";
       const title=document.createElement("div");title.className="card-title";
       title.textContent="#"+faceId.padStart(8,"0");
@@ -2397,10 +2439,10 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
-        if CREATE_CROPS_ON_HTML and _original_image_available(source_url, url_image):
-            # Если первая попытка завершилась ошибкой, пробуем восстановить CROP повторно,
-            # но не чаще интервала cooldown для каждого лица.
-            _start_crop_repair([face_id])
+        if _original_image_available(source_url, url_image):
+            # В веб-интерфейсе CROP создаётся по запросу независимо от настройки GUI.
+            # Cooldown и список активных задач защищают от повторного запуска.
+            _start_crop_repair([face_id], force=True)
             self._json(200, {"state": "creating"})
             return
 
@@ -2443,20 +2485,23 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         crop_path = face_search._resolve_db_crop_path(
             stored_path, image_id=int(image_id)
         )
-        if use_crop and crop_path.is_file():
-            try:
-                body = crop_path.read_bytes()
-                content_type = mimetypes.guess_type(str(crop_path))[0] or "image/jpeg"
-                self._send(200, body, content_type)
+        if use_crop:
+            if crop_path.is_file():
+                try:
+                    body = crop_path.read_bytes()
+                    content_type = mimetypes.guess_type(str(crop_path))[0] or "image/jpeg"
+                    self._send(200, body, content_type)
+                    return
+                except OSError:
+                    pass
+            if _original_image_available(source_url, url_image):
+                # Просим браузер ждать готовности CROP; фоновая задача запускается
+                # даже при выключенной настройке create_crops_on_html в основной форме.
+                _start_crop_repair([face_id], force=True)
+                self._json(404, {"error": "CROP ещё формируется."})
                 return
-            except OSError:
-                pass
-        elif use_crop and CREATE_CROPS_ON_HTML:
-            # Браузерный скрипт будет повторять запрос, пока CROP формируется.
-            self._json(404, {"error": "CROP ещё формируется."})
-            return
 
-        # Если CROP не создавался/утерян, показываем сохранённый оригинал.
+        # Если CROP создать невозможно, показываем сохранённый оригинал.
         local_source = face_search._source_url_to_local_path(source_url)
         if local_source is not None and local_source.is_file():
             try:
