@@ -1213,7 +1213,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       <span id="preview-zoom-value" class="preview-zoom-value">100%</span>
       <button type="button" id="zoom-in-button" class="secondary" aria-label="Увеличить масштаб">+</button>
       <button type="button" id="zoom-fit-button" class="secondary">Вписать</button>
-      <span class="preview-zoom-hint">Ctrl + колесо мыши — масштаб · Нажмите на рамку лица для выбора</span>
+      <span class="preview-zoom-hint">Ctrl — масштаб · Shift — вверх/вниз · Alt — влево/вправо · колесо — страница</span>
     </div>
     <div id="preview-viewport" class="preview-viewport" hidden>
       <canvas id="preview-canvas" aria-label="Предпросмотр. Нажмите на рамку нужного лица, чтобы выбрать его." tabindex="0"></canvas>
@@ -1854,11 +1854,39 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   zoomInButton.addEventListener("click",function(){changePreviewZoom(1);});
   zoomOutButton.addEventListener("click",function(){changePreviewZoom(-1);});
   zoomFitButton.addEventListener("click",function(){applyPreviewZoom(true);});
+  function wheelDeltaPixels(event,axis){
+    let delta=axis==="x"?event.deltaX:event.deltaY;
+    if(event.deltaMode===1)delta*=16;
+    else if(event.deltaMode===2){
+      delta*=Math.max(100,axis==="x"?previewViewport.clientWidth:previewViewport.clientHeight);
+    }
+    return delta;
+  }
   previewViewport.addEventListener("wheel",function(event){
-    // Масштабируем только при удержании Ctrl; обычное колесо прокручивает область просмотра.
-    if(!event.ctrlKey||!imageObject||previewViewport.hidden)return;
+    if(!imageObject||previewViewport.hidden)return;
+    const deltaX=wheelDeltaPixels(event,"x");
+    const deltaY=wheelDeltaPixels(event,"y");
+    if(event.ctrlKey){
+      // Ctrl + колесо меняет масштаб с фокусом на участке под курсором.
+      event.preventDefault();
+      if(deltaY!==0)changePreviewZoom(deltaY<0?1:-1,event.clientX,event.clientY);
+      return;
+    }
+    if(event.shiftKey){
+      // Shift + колесо двигает увеличенное изображение вверх/вниз.
+      event.preventDefault();
+      previewViewport.scrollTop+=deltaY||deltaX;
+      return;
+    }
+    if(event.altKey){
+      // Alt + колесо двигает изображение влево/вправо.
+      event.preventDefault();
+      previewViewport.scrollLeft+=deltaX||deltaY;
+      return;
+    }
+    // Без модификаторов колесо прокручивает страницу, а не внутреннюю область изображения.
     event.preventDefault();
-    changePreviewZoom(event.deltaY<0?1:-1,event.clientX,event.clientY);
+    window.scrollBy({top:deltaY,left:deltaX,behavior:"auto"});
   },{passive:false});
   window.addEventListener("resize",function(){
     if(imageObject&&!previewViewport.hidden)applyPreviewZoom(false);
