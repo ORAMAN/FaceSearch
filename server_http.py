@@ -1021,8 +1021,10 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .section-title h2{font-size:20px;margin:0}
 .section-title span{color:var(--muted);font-size:13px}
 .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,265px),1fr));gap:18px}
-.toggle-options-row{flex:1 1 100%;width:100%;display:flex;align-items:flex-start;gap:24px;flex-wrap:nowrap;min-width:0}
-.toggle-options-row .toggle-field{flex:1 1 0;min-width:0}
+.description-filter-field{flex:1 1 100%;width:100%;min-width:0}
+.toggle-options-row{flex:0 1 auto;width:auto;display:flex;align-items:center;align-self:stretch;gap:18px;flex-wrap:nowrap;min-width:0}
+.toggle-options-row .toggle-field{display:flex;flex:0 0 auto;flex-direction:row;align-items:center;min-width:0;min-height:42px;gap:6px}
+.toggle-options-row .toggle-label{min-height:36px;white-space:nowrap;font-size:14px;color:var(--text)}
 .card{position:relative;min-width:0;overflow:hidden;border:1px solid var(--line);background:var(--panel);border-radius:12px;padding-bottom:14px;box-shadow:var(--shadow);transition:transform .14s,box-shadow .14s}
 .card:hover{transform:translateY(-2px)}
 .card-image{height:270px;padding:4px;position:relative;background:var(--image-bg);display:flex;align-items:center;justify-content:center;overflow:hidden}
@@ -1096,8 +1098,10 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   .format-hint{display:block;position:relative;clear:both;flex:1 1 100%;width:100%;margin-top:7px;line-height:1.45;overflow-wrap:anywhere}
   .toolbar .mobile-only.action-field{flex:1 1 100%;width:100%;min-width:0}
   .toolbar .mobile-only.action-field button{width:100%;min-height:44px}
-  .toggle-options-row{flex-wrap:wrap;gap:10px}
-  .toggle-options-row .toggle-field{flex:1 1 220px}
+  .description-filter-field{flex:1 1 100%;width:100%}
+  .toggle-options-row{flex:1 1 100%;width:100%;align-self:auto;flex-wrap:wrap;gap:8px}
+  .toggle-options-row .toggle-field{flex:0 1 auto;min-height:36px}
+  .toggle-options-row .toggle-label{white-space:normal}
   .mobile-only{display:block;width:100%;margin:8px auto 0}
   .gallery{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
   .card-image{height:clamp(150px,38vw,230px)}
@@ -1151,19 +1155,17 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       <label for="top-k">Количество результатов</label>
       <input id="top-k" class="numeric-input" type="number" min="1" max="500" step="1" value="__DEFAULT_TOP_K__">
     </div>
-    <div class="field" style="grid-column:1/-1">
+    <div class="field description-filter-field">
       <label for="description-filter">Фильтр описания карточки</label>
       <input id="description-filter" type="text" maxlength="500" autocomplete="off" placeholder="Например: Москва или katerina">
       <span class="hint">Частичное совпадение без учёта регистра во всех полях и вложенных метаданных карточки.</span>
     </div>
-    <div class="toggle-options-row">
-      <div class="toggle-field">
+    <div class="toggle-options-row" aria-label="Режим отображения изображений">
+      <div class="toggle-field" title="При отсутствии CROP веб-интерфейс создаст его автоматически.">
         <label class="toggle-label" for="use-crop"><input id="use-crop" type="checkbox" __CROP_CHECKED__> Использовать CROP</label>
-        <span class="hint">При отсутствии CROP веб-интерфейс попробует создать его автоматически.</span>
       </div>
-      <div class="toggle-field">
+      <div class="toggle-field" title="Показывать CROP и оригинал рядом в одной карточке.">
         <label class="toggle-label" for="double-images"><input id="double-images" type="checkbox"> Двойные изображения</label>
-        <span class="hint">Показывать CROP и оригинал рядом в одной карточке.</span>
       </div>
     </div>
     <div class="field action-field" style="min-width:0">
@@ -1493,8 +1495,21 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   syncDoubleImageControls();
 
   function openLightboxForImage(image){
-    lightboxItems=Array.from(gallery.querySelectorAll("img[data-face-image='true']"));
-    lightboxIndex=lightboxItems.indexOf(image);
+    const selectedCard=image.closest(".card");
+    if(!selectedCard)return;
+    // В двойном режиме в карточке два <img>, но это один результат поиска.
+    // Карусель хранит ровно одну позицию на карточку, чтобы оригиналы не дублировались.
+    lightboxItems=Array.from(gallery.querySelectorAll(".card")).map(function(card){
+      const cardImage=card.querySelector("img[data-face-image='true']");
+      if(!cardImage)return null;
+      const title=card.querySelector(".card-title");
+      return {
+        card:card,
+        faceId:cardImage.dataset.faceId,
+        alt:(title&&title.textContent)||cardImage.alt||"Увеличенное изображение"
+      };
+    }).filter(Boolean);
+    lightboxIndex=lightboxItems.findIndex(function(item){return item.card===selectedCard;});
     if(lightboxIndex<0)return;
     displayLightboxImage();
     lightbox.classList.add("open");
@@ -1506,8 +1521,9 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     if(lightboxIndex<0||lightboxIndex>=lightboxItems.length)return;
     const current=lightboxItems[lightboxIndex];
     lightboxImage.alt=current.alt||"Увеличенное изображение";
-    // В HTML-отчёте просмотр открывает оригинал, а не только локальную вырезку.
-    lightboxImage.src=faceImageUrl(current.dataset.faceId,false,true);
+    // Просмотр всегда показывает оригинал; двойные CROP/оригинал одной карточки
+    // не образуют две отдельные позиции в карусели.
+    lightboxImage.src=faceImageUrl(current.faceId,false,true);
     lightboxCounter.textContent=(lightboxIndex+1)+" / "+lightboxItems.length;
     const navigation=lightboxItems.length>1;
     lightboxPrevious.hidden=!navigation;
