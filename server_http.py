@@ -1015,11 +1015,12 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 #preview{display:none;max-width:100%;max-height:440px;object-fit:contain}
 #preview-canvas{display:block;max-width:none;max-height:none;width:auto;height:auto;object-fit:contain;cursor:crosshair;margin:0 auto}
 .dropzone.preview-active{display:block;padding:10px;text-align:left}
-.preview-controls{display:flex;align-items:center;justify-content:flex-start;width:100%;flex-wrap:wrap;gap:8px;margin:0 0 9px}
+.preview-controls{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;width:100%;gap:8px;margin:0 0 9px}
+.preview-control-buttons{grid-column:2;display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px;min-width:0}
 .preview-controls button{min-height:34px;min-width:38px;padding:6px 12px}
 .preview-controls #identify-faces-button{min-width:112px;font-weight:650;margin-right:4px}
 .preview-zoom-value{min-width:54px;text-align:center;font-size:12px;font-variant-numeric:tabular-nums;color:var(--text)}
-.preview-zoom-hint{color:var(--muted);font-size:12px;margin-left:auto;text-align:right}
+.preview-zoom-hint{grid-column:3;justify-self:end;color:var(--muted);font-size:12px;margin-left:0;text-align:right}
 .preview-stage{position:relative;display:block;flex:0 0 auto;margin:0 auto;line-height:0;max-width:none}
 #preview-canvas{margin:0}
 .face-link-overlay{position:absolute;inset:0;z-index:4;pointer-events:none;overflow:hidden}
@@ -1028,7 +1029,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .preview-controls[hidden],.preview-viewport[hidden]{display:none!important}
 .preview-viewport{width:100%;height:min(68vh,640px);min-height:180px;overflow:auto;overscroll-behavior:contain;background:var(--image-bg);border:1px solid var(--line);border-radius:10px}
 .preview-viewport:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.status{min-height:28px;color:var(--muted);padding:10px 2px;overflow-wrap:anywhere}
+.status{min-height:28px;color:var(--muted);padding:10px 2px;overflow-wrap:anywhere;scroll-margin-top:10px}
 .status.error{color:#c83e3e}
 .index-meta{margin:4px 0 9px;color:var(--muted);font-size:12px;line-height:1.35;overflow-wrap:anywhere}
 .index-status{margin:8px 0 12px;padding:11px 14px;border:1px solid var(--line);border-radius:9px;font-size:14px;line-height:1.45;overflow-wrap:anywhere}
@@ -1118,9 +1119,10 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   .page-header{gap:10px}
   .page-header h1{font-size:25px}
   .page-header #theme-button{padding:9px 11px;font-size:12px}
-  .preview-controls{align-items:center;gap:6px}
+  .preview-controls{grid-template-columns:minmax(0,1fr);align-items:center;gap:6px}
+  .preview-control-buttons{grid-column:1;justify-self:center;max-width:100%}
   .preview-controls #identify-faces-button{min-width:100px}
-  .preview-zoom-hint{flex:1 1 100%;text-align:right;margin-left:0}
+  .preview-zoom-hint{grid-column:1;justify-self:end;text-align:right;margin-left:0}
   .toolbar .action-field{flex:1 1 calc(50% - 12px);min-width:0}
   .toolbar .action-field button{width:100%;height:100%;padding:10px 8px;white-space:normal}
   .toggle-field{flex:1 1 100%;align-items:flex-start}
@@ -1218,11 +1220,13 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       <span class="hint">Также можно вставить изображение из буфера обмена.</span>
     </div>
     <div id="preview-controls" class="preview-controls" hidden aria-label="Определение лиц и управление масштабом">
-      <button type="button" id="identify-faces-button" class="secondary" disabled>Определить</button>
-      <button type="button" id="zoom-out-button" class="secondary" aria-label="Уменьшить масштаб">−</button>
-      <span id="preview-zoom-value" class="preview-zoom-value">100%</span>
-      <button type="button" id="zoom-in-button" class="secondary" aria-label="Увеличить масштаб">+</button>
-      <button type="button" id="zoom-fit-button" class="secondary">Вписать</button>
+      <div class="preview-control-buttons">
+        <button type="button" id="identify-faces-button" class="secondary" disabled>Определить</button>
+        <button type="button" id="zoom-out-button" class="secondary" aria-label="Уменьшить масштаб">−</button>
+        <span id="preview-zoom-value" class="preview-zoom-value">100%</span>
+        <button type="button" id="zoom-in-button" class="secondary" aria-label="Увеличить масштаб">+</button>
+        <button type="button" id="zoom-fit-button" class="secondary">Вписать</button>
+      </div>
       <span class="preview-zoom-hint">Ctrl — масштаб · Shift — вверх/вниз · Alt — влево/вправо · колесо — страница</span>
     </div>
     <div id="preview-viewport" class="preview-viewport" hidden>
@@ -2346,12 +2350,25 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       });
       renderResults(data.results||[]);
       setStatus("Поиск завершён. Найдено результатов: "+(data.results||[]).length+".");
+      requestAnimationFrame(function(){
+        statusBox.scrollIntoView({behavior:"smooth",block:"start"});
+      });
     }catch(error){setStatus(error.message||String(error),true);}
     finally{setBusy(false);}
   }
   searchButton.addEventListener("click",searchSimilar);
   descriptionFilterInput.addEventListener("keydown",function(event){
     if(event.key==="Enter"){event.preventDefault();searchSimilar();}
+  });
+  document.addEventListener("keydown",function(event){
+    if(event.key!=="Enter"||event.repeat||event.isComposing)return;
+    const target=event.target;
+    if(target===imageUrlInput||target===descriptionFilterInput)return;
+    if(target&&target.closest&&target.closest("button,a,textarea,select,[contenteditable='true']"))return;
+    if(target&&target.matches&&target.matches('input[type="file"],input[type="checkbox"],input[type="radio"]'))return;
+    if(!queryId||selectedFace<0||busy)return;
+    event.preventDefault();
+    searchSimilar();
   });
 })();
 </script>
