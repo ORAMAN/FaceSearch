@@ -1021,7 +1021,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .section-title h2{font-size:20px;margin:0}
 .section-title span{color:var(--muted);font-size:13px}
 .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,265px),1fr));gap:18px}
-.toggle-options-row{grid-column:1/-1;display:flex;align-items:flex-start;gap:24px;flex-wrap:nowrap;min-width:0}
+.toggle-options-row{flex:1 1 100%;width:100%;display:flex;align-items:flex-start;gap:24px;flex-wrap:nowrap;min-width:0}
 .toggle-options-row .toggle-field{flex:1 1 0;min-width:0}
 .card{position:relative;min-width:0;overflow:hidden;border:1px solid var(--line);background:var(--panel);border-radius:12px;padding-bottom:14px;box-shadow:var(--shadow);transition:transform .14s,box-shadow .14s}
 .card:hover{transform:translateY(-2px)}
