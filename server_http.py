@@ -982,7 +982,9 @@ PAGE_TEMPLATE = r"""<!doctype html>
 html{min-height:100%;background:var(--bg)}
 body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,"Segoe UI",Arial,sans-serif;transition:background-color .18s,color .18s}
 main{max-width:1600px;margin:0 auto;padding:28px 22px 60px}
-h1{font-size:28px;line-height:1.2;margin:0 0 8px}
+.page-header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:8px}
+.page-header h1{font-size:28px;line-height:1.2;margin:0;min-width:0}
+.page-header #theme-button{flex:0 0 auto;margin-left:auto;white-space:nowrap}
 .subtitle{color:var(--muted);margin:0 0 24px}
 .toolbar{display:flex;gap:14px;align-items:end;flex-wrap:wrap;padding:18px;background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-bottom:18px;box-shadow:var(--shadow)}
 .field{display:flex;flex-direction:column;gap:5px;min-width:150px}
@@ -993,6 +995,9 @@ h1{font-size:28px;line-height:1.2;margin:0 0 8px}
 .url-row button{flex:0 0 auto}
 #file-input{display:none!important}
 input[type=number]{width:145px;max-width:100%;background:var(--field);color:var(--text);border:1px solid var(--input-line);border-radius:8px;padding:10px;font:inherit}
+.numeric-action-field{min-width:190px;gap:6px}
+.numeric-action-field input[type=number]{width:100%}
+.numeric-action-button{width:100%;margin-top:2px;white-space:normal}
 input:focus-visible,button:focus-visible,a:focus-visible,canvas:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 button{border:0;border-radius:9px;padding:11px 17px;background:var(--accent);color:#fff;font:600 14px system-ui;cursor:pointer;min-height:42px;transition:filter .12s}
 button:hover:not(:disabled){filter:brightness(1.08)}
@@ -1092,6 +1097,10 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   .toolbar .url-field{flex:1 1 100%;width:100%;min-width:0}
   .toolbar .numeric-field{flex:1 1 100%;width:100%;min-width:0}
   .toolbar .numeric-field input[type=number]{width:100%;min-width:0}
+  .toolbar .numeric-action-button{width:100%}
+  .page-header{gap:10px}
+  .page-header h1{font-size:25px}
+  .page-header #theme-button{padding:9px 11px;font-size:12px}
   .toolbar .action-field{flex:1 1 calc(50% - 12px);min-width:0}
   .toolbar .action-field button{width:100%;height:100%;padding:10px 8px;white-space:normal}
   .toggle-field{flex:1 1 100%;align-items:flex-start}
@@ -1135,7 +1144,10 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 </head>
 <body>
 <main>
-  <h1>FaceSearch</h1>
+  <header class="page-header">
+    <h1>FaceSearch</h1>
+    <button type="button" id="theme-button" class="secondary" aria-pressed="false">☀️ Дневная тема</button>
+  </header>
   <p class="subtitle">Загрузите изображение — определение лиц и поиск по первому найденному лицу запустятся автоматически. На групповом фото можно выбрать другое лицо и повторить поиск.</p>
   <div id="index-meta" class="index-meta" aria-label="Информация о FAISS-индексе">FAISS: получение информации об индексе…</div>
   <div id="index-status" class="index-status" role="status" aria-live="polite" hidden></div>
@@ -1148,13 +1160,16 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       </div>
       <span class="hint">Для локального изображения используйте кнопку «Выбрать файл» ниже.</span>
     </div>
-    <div class="field numeric-field">
+    <div class="field numeric-field numeric-action-field">
       <label for="similarity">Минимальное сходство, %</label>
       <input id="similarity" class="numeric-input" type="number" min="0" max="100" step="1" value="__DEFAULT_MIN_SIMILARITY__">
+      <button type="button" id="detect-button" class="secondary numeric-action-button">Определить лица</button>
     </div>
-    <div class="field numeric-field">
+    <div class="field numeric-field numeric-action-field">
       <label for="top-k">Количество результатов</label>
       <input id="top-k" class="numeric-input" type="number" min="1" max="500" step="1" value="__DEFAULT_TOP_K__">
+      <button type="button" id="file-button" class="secondary numeric-action-button">Выбрать файл</button>
+      <input id="file-input" type="file" accept="image/*" hidden>
     </div>
     <div class="field description-filter-field">
       <label for="description-filter">Фильтр описания карточки</label>
@@ -1168,19 +1183,6 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       <div class="toggle-field" title="Показывать CROP и оригинал рядом в одной карточке.">
         <label class="toggle-label" for="double-images"><input id="double-images" type="checkbox"> Двойные изображения</label>
       </div>
-    </div>
-    <div class="field action-field" style="min-width:0">
-      <label>&nbsp;</label>
-      <button type="button" id="theme-button" class="secondary" aria-pressed="false">☀️ Дневная тема</button>
-    </div>
-    <div class="field action-field" style="min-width:0">
-      <label>&nbsp;</label>
-      <button type="button" id="detect-button" class="secondary">Определить лица</button>
-    </div>
-    <div class="field action-field">
-      <label>&nbsp;</label>
-      <button type="button" id="file-button" class="secondary">Выбрать файл</button>
-      <input id="file-input" type="file" accept="image/*" hidden>
     </div>
     <div class="field action-field mobile-only">
       <label>&nbsp;</label>
