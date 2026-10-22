@@ -1021,13 +1021,15 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .section-title h2{font-size:20px;margin:0}
 .section-title span{color:var(--muted);font-size:13px}
 .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,265px),1fr));gap:18px}
+.toggle-options-row{grid-column:1/-1;display:flex;align-items:flex-start;gap:24px;flex-wrap:nowrap;min-width:0}
+.toggle-options-row .toggle-field{flex:1 1 0;min-width:0}
 .card{position:relative;min-width:0;overflow:hidden;border:1px solid var(--line);background:var(--panel);border-radius:12px;padding-bottom:14px;box-shadow:var(--shadow);transition:transform .14s,box-shadow .14s}
 .card:hover{transform:translateY(-2px)}
 .card-image{height:270px;padding:4px;position:relative;background:var(--image-bg);display:flex;align-items:center;justify-content:center;overflow:hidden}
 .card-image img{display:block;width:100%;height:100%;object-fit:contain;border-radius:3px}
 .card-images{height:270px;padding:4px;position:relative;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;overflow:hidden;background:var(--image-bg)}
-.card-image-cell{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;background:var(--panel2);border-radius:3px}
-.card-image-label{flex:0 0 auto;padding:4px 3px;text-align:center;color:var(--muted);font-size:11px;line-height:1.2;border-bottom:1px solid var(--line)}
+.card-image-cell{display:flex;min-width:0;min-height:0;overflow:hidden;background:var(--panel2);border-radius:3px}
+.card-image-label{position:absolute;left:50%;bottom:7px;z-index:3;transform:translateX(-50%);max-width:calc(100% - 12px);padding:3px 7px;text-align:center;color:#fff;background:rgba(0,0,0,.78);border:1px solid rgba(255,255,255,.18);border-radius:5px;font-size:10px;line-height:1.15;white-space:nowrap;pointer-events:none}
 .card-image-view{flex:1;min-width:0;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden}
 .card-image-view img{display:block;width:100%;height:100%;object-fit:contain;border-radius:2px}
 .no-image[hidden]{display:none}.no-image{display:flex;align-items:center;justify-content:center;text-align:center;padding:18px;color:var(--muted);font-size:13px}
@@ -1094,6 +1096,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   .format-hint{display:block;position:relative;clear:both;flex:1 1 100%;width:100%;margin-top:7px;line-height:1.45;overflow-wrap:anywhere}
   .toolbar .mobile-only.action-field{flex:1 1 100%;width:100%;min-width:0}
   .toolbar .mobile-only.action-field button{width:100%;min-height:44px}
+  .toggle-options-row{flex-wrap:wrap;gap:10px}
+  .toggle-options-row .toggle-field{flex:1 1 220px}
   .mobile-only{display:block;width:100%;margin:8px auto 0}
   .gallery{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
   .card-image{height:clamp(150px,38vw,230px)}
@@ -1152,13 +1156,15 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       <input id="description-filter" type="text" maxlength="500" autocomplete="off" placeholder="Например: Москва или katerina">
       <span class="hint">Частичное совпадение без учёта регистра во всех полях и вложенных метаданных карточки.</span>
     </div>
-    <div class="toggle-field">
-      <label class="toggle-label" for="use-crop"><input id="use-crop" type="checkbox" __CROP_CHECKED__> Использовать CROP</label>
-      <span class="hint">При отсутствии CROP веб-интерфейс попробует создать его автоматически.</span>
-    </div>
-    <div class="toggle-field">
-      <label class="toggle-label" for="double-images"><input id="double-images" type="checkbox"> Двойные изображения</label>
-      <span class="hint">Показывать CROP и оригинал рядом в одной карточке.</span>
+    <div class="toggle-options-row">
+      <div class="toggle-field">
+        <label class="toggle-label" for="use-crop"><input id="use-crop" type="checkbox" __CROP_CHECKED__> Использовать CROP</label>
+        <span class="hint">При отсутствии CROP веб-интерфейс попробует создать его автоматически.</span>
+      </div>
+      <div class="toggle-field">
+        <label class="toggle-label" for="double-images"><input id="double-images" type="checkbox"> Двойные изображения</label>
+        <span class="hint">Показывать CROP и оригинал рядом в одной карточке.</span>
+      </div>
     </div>
     <div class="field action-field" style="min-width:0">
       <label>&nbsp;</label>
@@ -1472,7 +1478,19 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     });
   }
   useCropCheckbox.addEventListener("change",refreshCardImages);
-  doubleImagesCheckbox.addEventListener("change",function(){renderResults(lastResults);});
+  function syncDoubleImageControls(){
+    if(doubleImagesCheckbox.checked){
+      useCropCheckbox.checked=true;
+      useCropCheckbox.disabled=true;
+    }else{
+      useCropCheckbox.disabled=false;
+    }
+  }
+  doubleImagesCheckbox.addEventListener("change",function(){
+    syncDoubleImageControls();
+    renderResults(lastResults);
+  });
+  syncDoubleImageControls();
 
   function openLightboxForImage(image){
     lightboxItems=Array.from(gallery.querySelectorAll("img[data-face-image='true']"));
@@ -1934,13 +1952,13 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   }
   function createDualImageCell(faceId,useCrop,labelText,altText){
     const cell=document.createElement("div");cell.className="card-image-cell";
-    const label=document.createElement("div");label.className="card-image-label";label.textContent=labelText;
     const view=document.createElement("div");view.className="card-image-view";
     const image=document.createElement("img");image.loading="lazy";image.dataset.faceImage="true";
     image.dataset.fixedCrop=String(Boolean(useCrop));image.alt=altText;
     const placeholder=document.createElement("div");placeholder.className="no-image";
     placeholder.textContent=useCrop?"Идёт создание миниатюры":"Нет изображения";placeholder.hidden=true;
-    view.append(image,placeholder);cell.append(label,view);
+    const label=document.createElement("div");label.className="card-image-label";label.textContent=labelText;
+    view.append(image,placeholder,label);cell.append(view);
     configureCardImage(image,faceId,useCrop,false);
     return cell;
   }
