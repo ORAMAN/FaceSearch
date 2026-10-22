@@ -2351,7 +2351,9 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       renderResults(data.results||[]);
       setStatus("Поиск завершён. Найдено результатов: "+(data.results||[]).length+".");
       requestAnimationFrame(function(){
-        statusBox.scrollIntoView({behavior:"smooth",block:"start"});
+        const resultsSection=gallery.closest("section");
+        const resultsHeader=resultsSection&&resultsSection.querySelector(".section-title");
+        if(resultsHeader)resultsHeader.scrollIntoView({behavior:"smooth",block:"start"});
       });
     }catch(error){setStatus(error.message||String(error),true);}
     finally{setBusy(false);}
