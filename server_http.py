@@ -1012,7 +1012,15 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .dropzone-content{max-width:650px;width:100%}
 .dropzone input{display:block;max-width:100%;margin:13px auto}
 #preview{display:none;max-width:100%;max-height:440px;object-fit:contain}
-#preview-canvas{display:none;max-width:100%;max-height:440px;width:auto;height:auto;object-fit:contain;cursor:crosshair}
+#preview-canvas{display:block;max-width:none;max-height:none;width:auto;height:auto;object-fit:contain;cursor:crosshair;margin:0 auto}
+.dropzone.preview-active{display:block;padding:10px;text-align:left}
+.preview-controls{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px;margin:0 0 9px}
+.preview-controls button{min-height:34px;min-width:38px;padding:6px 12px}
+.preview-zoom-value{min-width:54px;text-align:center;font-size:12px;font-variant-numeric:tabular-nums;color:var(--text)}
+.preview-zoom-hint{color:var(--muted);font-size:12px;margin-left:5px}
+.preview-controls[hidden],.preview-viewport[hidden]{display:none!important}
+.preview-viewport{width:100%;height:min(68vh,640px);min-height:180px;overflow:auto;overscroll-behavior:contain;background:var(--image-bg);border:1px solid var(--line);border-radius:10px}
+.preview-viewport:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .status{min-height:28px;color:var(--muted);padding:10px 2px;overflow-wrap:anywhere}
 .status.error{color:#c83e3e}
 .index-meta{margin:4px 0 9px;color:var(--muted);font-size:12px;line-height:1.35;overflow-wrap:anywhere}
@@ -1197,7 +1205,16 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       <strong>Перетащите фотографию сюда</strong><br>
       <span class="hint">Также можно вставить изображение из буфера обмена.</span>
     </div>
-    <canvas id="preview-canvas" aria-label="Предпросмотр. Нажмите на рамку нужного лица, чтобы выбрать его."></canvas>
+    <div id="preview-controls" class="preview-controls" hidden aria-label="Масштаб изображения">
+      <button type="button" id="zoom-out-button" class="secondary" aria-label="Уменьшить масштаб">−</button>
+      <span id="preview-zoom-value" class="preview-zoom-value">100%</span>
+      <button type="button" id="zoom-in-button" class="secondary" aria-label="Увеличить масштаб">+</button>
+      <button type="button" id="zoom-fit-button" class="secondary">Вписать</button>
+      <span class="preview-zoom-hint">Колесо мыши — масштаб · Нажмите на рамку лица для выбора</span>
+    </div>
+    <div id="preview-viewport" class="preview-viewport" hidden>
+      <canvas id="preview-canvas" aria-label="Предпросмотр. Нажмите на рамку нужного лица, чтобы выбрать его." tabindex="0"></canvas>
+    </div>
   </section>
   <div id="camera-modal" class="camera-modal" aria-hidden="true" role="dialog" aria-modal="true" aria-label="Съёмка фотографии">
     <div class="camera-dialog">
@@ -1250,6 +1267,13 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   const dropCopy=document.getElementById("drop-copy");
   const canvas=document.getElementById("preview-canvas");
   const ctx=canvas.getContext("2d");
+  const previewViewport=document.getElementById("preview-viewport");
+  const previewControls=document.getElementById("preview-controls");
+  const previewZoomValue=document.getElementById("preview-zoom-value");
+  const zoomOutButton=document.getElementById("zoom-out-button");
+  const zoomInButton=document.getElementById("zoom-in-button");
+  const zoomFitButton=document.getElementById("zoom-fit-button");
+  let previewZoom=1;
   const statusBox=document.getElementById("status");
   const detectButton=document.getElementById("detect-button");
   const searchButton=document.getElementById("search-button");
@@ -1573,6 +1597,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   }
   function useDataUrl(sourceDataUrl){
     dataUrl=String(sourceDataUrl||"");
+    previewZoom=1;
     imageObject=new Image();
     imageObject.onload=function(){
       queryId="";faces=[];selectedFace=-1;
@@ -1580,7 +1605,12 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       canvas.height=imageObject.naturalHeight;
       ctx.clearRect(0,0,canvas.width,canvas.height);
       ctx.drawImage(imageObject,0,0);
-      canvas.style.display="block";dropCopy.style.display="none";
+      canvas.style.display="block";
+      previewViewport.hidden=false;
+      previewControls.hidden=false;
+      dropzone.classList.add("preview-active");
+      dropCopy.style.display="none";
+      applyPreviewZoom(true);
       searchButton.disabled=true;
       gallery.replaceChildren();
       const empty=document.createElement("div");empty.className="empty";
@@ -1744,21 +1774,91 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     if(!imageObject)return;
     ctx.clearRect(0,0,canvas.width,canvas.height);
     ctx.drawImage(imageObject,0,0);
-    const scale=Math.max(1,canvas.width/450);
-    faces.forEach(function(face,index){
-      const b=face.bbox;
-      ctx.lineWidth=Math.max(2,2.5*scale);
+    // Рамки и метки задаются в экранных пикселях с учётом масштаба canvas:
+    // при большом исходном фото оверлей не раздувается вместе с разрешением.
+    const displayScale=Math.max(0.01,canvas.getBoundingClientRect().width/canvas.width||1);
+    const lineWidth=1.2/displayScale;
+    const selectedLineWidth=2/displayScale;
+    const fontSize=11/displayScale;
+    const padding=4/displayScale;
+    const labelHeight=17/displayScale;
+    const drawOrder=faces.map(function(face,index){return {face:face,index:index};})
+      .sort(function(a,b){return (a.index===selectedFace?1:0)-(b.index===selectedFace?1:0);});
+    drawOrder.forEach(function(entry){
+      const face=entry.face,index=entry.index,b=face.bbox;
+      ctx.lineWidth=index===selectedFace?selectedLineWidth:lineWidth;
       ctx.strokeStyle=index===selectedFace?"#4dffad":"#4d9cf5";
       ctx.strokeRect(b[0],b[1],b[2]-b[0],b[3]-b[1]);
-      const label="Лицо "+(index+1)+" · "+Math.round(face.confidence*100)+"%";
-      ctx.font=(14*scale)+"px sans-serif";
-      const padding=5*scale, labelHeight=22*scale, labelWidth=ctx.measureText(label).width+padding*2;
-      const y=Math.max(0,b[1]-labelHeight);
+    });
+    drawOrder.forEach(function(entry){
+      const face=entry.face,index=entry.index,b=face.bbox;
+      // У невыбранных лиц — только компактный номер. Подробная метка и процент
+      // сходства показаны для выбранного лица, поэтому десятки подписей не закрывают фото.
+      const label=index===selectedFace
+        ?"Лицо "+(index+1)+" · "+Math.round(face.confidence*100)+"%"
+        :"#"+(index+1);
+      ctx.font="600 "+fontSize+"px sans-serif";
+      const labelWidth=ctx.measureText(label).width+padding*2;
+      const labelX=Math.max(0,Math.min(canvas.width-labelWidth,b[0]));
+      let labelY=b[1]-labelHeight-2/displayScale;
+      if(labelY<0)labelY=Math.min(canvas.height-labelHeight,b[3]+2/displayScale);
+      ctx.globalAlpha=index===selectedFace?0.84:0.58;
       ctx.fillStyle=index===selectedFace?"#147a4b":"#1763a5";
-      ctx.fillRect(b[0],y,labelWidth,labelHeight);
-      ctx.fillStyle="#ffffff";ctx.fillText(label,b[0]+padding,y+16*scale);
+      ctx.fillRect(labelX,labelY,labelWidth,labelHeight);
+      ctx.globalAlpha=1;
+      ctx.fillStyle="#ffffff";
+      ctx.fillText(label,labelX+padding,labelY+labelHeight*0.72);
     });
   }
+  function previewFitScale(){
+    if(!imageObject)return 1;
+    const width=Math.max(1,previewViewport.clientWidth-18);
+    const height=Math.max(1,previewViewport.clientHeight-18);
+    return Math.min(width/imageObject.naturalWidth,height/imageObject.naturalHeight,1);
+  }
+  function applyPreviewZoom(reset,anchorX,anchorY){
+    if(!imageObject)return;
+    if(reset)previewZoom=1;
+    const viewportRect=previewViewport.getBoundingClientRect();
+    const oldRect=canvas.getBoundingClientRect();
+    const clientX=Number.isFinite(anchorX)?anchorX:viewportRect.left+previewViewport.clientWidth/2;
+    const clientY=Number.isFinite(anchorY)?anchorY:viewportRect.top+previewViewport.clientHeight/2;
+    const ratioX=oldRect.width>0?Math.max(0,Math.min(1,(clientX-oldRect.left)/oldRect.width)):0.5;
+    const ratioY=oldRect.height>0?Math.max(0,Math.min(1,(clientY-oldRect.top)/oldRect.height)):0.5;
+    const fit=previewFitScale();
+    canvas.style.width=Math.max(1,Math.round(imageObject.naturalWidth*fit*previewZoom))+"px";
+    canvas.style.height=Math.max(1,Math.round(imageObject.naturalHeight*fit*previewZoom))+"px";
+    previewZoomValue.textContent=Math.round(previewZoom*100)+"%";
+    zoomOutButton.disabled=previewZoom<=0.25;
+    zoomInButton.disabled=previewZoom>=8;
+    if(reset){
+      previewViewport.scrollLeft=0;
+      previewViewport.scrollTop=0;
+      drawFaces();
+      return;
+    }
+    requestAnimationFrame(function(){
+      const nextRect=canvas.getBoundingClientRect();
+      previewViewport.scrollLeft+=nextRect.left+ratioX*nextRect.width-clientX;
+      previewViewport.scrollTop+=nextRect.top+ratioY*nextRect.height-clientY;
+      drawFaces();
+    });
+  }
+  function changePreviewZoom(direction,anchorX,anchorY){
+    previewZoom=Math.max(0.25,Math.min(8,previewZoom*(direction>0?1.25:1/1.25)));
+    applyPreviewZoom(false,anchorX,anchorY);
+  }
+  zoomInButton.addEventListener("click",function(){changePreviewZoom(1);});
+  zoomOutButton.addEventListener("click",function(){changePreviewZoom(-1);});
+  zoomFitButton.addEventListener("click",function(){applyPreviewZoom(true);});
+  previewViewport.addEventListener("wheel",function(event){
+    if(!imageObject||previewViewport.hidden)return;
+    event.preventDefault();
+    changePreviewZoom(event.deltaY<0?1:-1,event.clientX,event.clientY);
+  },{passive:false});
+  window.addEventListener("resize",function(){
+    if(imageObject&&!previewViewport.hidden)applyPreviewZoom(false);
+  });
   canvas.addEventListener("click",function(event){
     if(!faces.length)return;
     const rect=canvas.getBoundingClientRect();
