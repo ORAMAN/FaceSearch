@@ -991,6 +991,7 @@ main{max-width:1600px;margin:0 auto;padding:28px 22px 60px}
 .field label,.toggle-label{color:var(--muted);font-size:13px}
 .url-field{flex:1 1 100%;min-width:0}
 .url-row{display:flex;gap:10px;align-items:stretch;min-width:0}
+.url-field .toggle-options-row{flex:0 0 auto;width:auto;align-self:flex-end;justify-content:flex-end;margin:0;gap:18px}
 .url-row input{flex:1 1 auto;min-width:0;width:100%;background:var(--field);color:var(--text);border:1px solid var(--input-line);border-radius:8px;padding:10px;font:inherit}
 .url-row button{flex:0 0 auto}
 #file-input{display:none!important}
@@ -1103,6 +1104,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   .url-row{display:flex;flex-direction:column;gap:8px}
   .url-row button{width:100%}
   .toolbar .url-field{flex:1 1 100%;width:100%;min-width:0}
+  .url-field .toggle-options-row{flex:0 0 auto;width:auto;align-self:flex-end;justify-content:flex-end;margin:0;gap:10px}
+  .url-field .toggle-options-row .toggle-label{white-space:normal}
   .toolbar .numeric-field{flex:1 1 100%;width:100%;min-width:0}
   .toolbar .numeric-field input[type=number]{width:100%;min-width:0}
   .toolbar .numeric-action-button{width:100%}
@@ -1166,6 +1169,14 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
         <input id="image-url" type="url" inputmode="url" autocomplete="url" placeholder="https://example.com/photo.jpg">
         <button type="button" id="load-url-button" class="secondary">Загрузить адрес</button>
       </div>
+      <div class="toggle-options-row" aria-label="Режим отображения изображений">
+        <div class="toggle-field" title="При отсутствии CROP веб-интерфейс создаст его автоматически.">
+          <label class="toggle-label" for="use-crop"><input id="use-crop" type="checkbox" __CROP_CHECKED__> Использовать CROP</label>
+        </div>
+        <div class="toggle-field" title="Показывать CROP и оригинал рядом в одной карточке.">
+          <label class="toggle-label" for="double-images"><input id="double-images" type="checkbox"> Двойные изображения</label>
+        </div>
+      </div>
       <span class="hint">Для локального изображения используйте кнопку «Выбрать файл» ниже.</span>
     </div>
     <div class="field numeric-field numeric-action-field">
@@ -1183,14 +1194,6 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       <label for="description-filter">Фильтр описания карточки</label>
       <input id="description-filter" type="text" maxlength="500" autocomplete="off" placeholder="Например: Москва или katerina">
       <span class="hint">Частичное совпадение без учёта регистра во всех полях и вложенных метаданных карточки.</span>
-    </div>
-    <div class="toggle-options-row" aria-label="Режим отображения изображений">
-      <div class="toggle-field" title="При отсутствии CROP веб-интерфейс создаст его автоматически.">
-        <label class="toggle-label" for="use-crop"><input id="use-crop" type="checkbox" __CROP_CHECKED__> Использовать CROP</label>
-      </div>
-      <div class="toggle-field" title="Показывать CROP и оригинал рядом в одной карточке.">
-        <label class="toggle-label" for="double-images"><input id="double-images" type="checkbox"> Двойные изображения</label>
-      </div>
     </div>
     <div class="field action-field mobile-only">
       <label>&nbsp;</label>
