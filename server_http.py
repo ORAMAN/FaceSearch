@@ -1021,8 +1021,9 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .section-title h2{font-size:20px;margin:0}
 .section-title span{color:var(--muted);font-size:13px}
 .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,265px),1fr));gap:18px}
-.description-filter-field{flex:1 1 100%;width:100%;min-width:0}
-.toggle-options-row{flex:0 1 auto;width:auto;display:flex;align-items:center;align-self:stretch;gap:18px;flex-wrap:nowrap;min-width:0}
+.description-filter-field{flex:1 1 260px;width:auto;min-width:260px}
+.description-filter-field input{width:100%;min-width:0}
+.toggle-options-row{flex:0 0 auto;width:auto;display:flex;align-items:center;align-self:stretch;gap:18px;flex-wrap:nowrap;min-width:0}
 .toggle-options-row .toggle-field{display:flex;flex:0 0 auto;flex-direction:row;align-items:center;min-width:0;min-height:42px;gap:6px}
 .toggle-options-row .toggle-label{min-height:36px;white-space:nowrap;font-size:14px;color:var(--text)}
 .card{position:relative;min-width:0;overflow:hidden;border:1px solid var(--line);background:var(--panel);border-radius:12px;padding-bottom:14px;box-shadow:var(--shadow);transition:transform .14s,box-shadow .14s}
