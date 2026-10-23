@@ -3354,6 +3354,11 @@ def run_download_job(
                             except (TypeError, ValueError, IndexError):
                                 pass
                         current_id = min(resume_candidates) if resume_candidates else batch_end
+                        # Сразу публикуем точку возобновления после завершения уже запущенных
+                        # профилей. Не ждём финальную очистку каталогов и сводный отчёт:
+                        # они могут занять заметное время, а поле «Следующий ID» должно
+                        # отражать рассчитанный курсор сразу после остановки текущей пачки.
+                        post_ui_event("start_id_updated", current_id)
                         print(
                             f"[STOP-CURSOR] Следующий запуск продолжится с ID {current_id}; "
                             f"повторяемых/не запущенных профилей в текущей пачке: {len(resume_candidates)}."
