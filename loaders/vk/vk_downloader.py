@@ -3480,6 +3480,18 @@ class QueueStream:
         for chunk in chunks:
             if chunk:
                 self.events.put((self.kind, chunk))
+                # STOP-CURSOR выводится через stdout, а stdout может быть
+                # перенаправлен из другого экземпляра модуля (например, при
+                # запуске через загрузчик). В таком случае его UI_EVENTS может
+                # не совпадать с очередью главного окна. Поэтому синхронизируем
+                # поле напрямую через ту очередь, в которую попадает журнал.
+                if self.kind == "log" and "[STOP-CURSOR]" in chunk:
+                    match = re.search(
+                        r"\\[STOP-CURSOR\\].*?ID\\s+(\\d+)",
+                        chunk,
+                    )
+                    if match:
+                        self.events.put(("start_id_updated", int(match.group(1))))
         return len(text)
 
     def flush(self):
@@ -4935,7 +4947,12 @@ def main():
                     search_offset=search_offset,
                 )
                 if source_mode == "counter":
-                    events.put(("start_id_updated", next_start_id))
+                    # При Stop курсор публикуется из run_download_job и
+                    # дополнительно извлекается QueueStream из [STOP-CURSOR].
+                    # Не отправляем повторно потенциально устаревшее значение
+                    # по завершении worker: оно могло бы затереть актуальный ID.
+                    if not STOP_REQUESTED.is_set():
+                        events.put(("start_id_updated", next_start_id))
                 elif source_mode == "search":
                     events.put(("search_offset_updated", next_start_id))
                 # Stop прекращает запуск новых профилей, но не отменяет явно
