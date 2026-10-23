@@ -3487,7 +3487,7 @@ class QueueStream:
                 # поле напрямую через ту очередь, в которую попадает журнал.
                 if self.kind == "log" and "[STOP-CURSOR]" in chunk:
                     match = re.search(
-                        r"\\[STOP-CURSOR\\].*?ID\\s+(\\d+)",
+                        r"\[STOP-CURSOR\].*?ID\s+(\d+)",
                         chunk,
                     )
                     if match:
