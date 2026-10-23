@@ -2614,11 +2614,13 @@ def run_download_job(
         )
 
     checked_total = 0
+    profiles_completed_total = 0
     skipped_total = 0
     returned_total = 0
     missing_profiles_total = 0
     deactivated_total = 0
     no_avatar_total = 0
+    no_media_total = 0
     album_errors_total = 0
     download_errors_total = 0
     import_errors_total = 0
@@ -2627,6 +2629,8 @@ def run_download_job(
     # imported_total — число изображений, на которых импортёр завершился без исключения.
     # Это не равно количеству новых/обновлённых строк БД: результат может быть пропуском.
     imported_total = 0
+    db_faces_added_total = 0
+    new_profile_ids = set()
     db_new_records_total = 0
     db_updated_records_total = 0
     db_skipped_existing_total = 0
@@ -2636,7 +2640,42 @@ def run_download_job(
     db_removed_records_total = 0
     db_restored_crops_total = 0
     downloaded_without_import_total = 0
+    deleted_source_files_total = 0
+    empty_dirs_removed_total = 0
     cleanup_errors_total = 0
+
+    def publish_stats():
+        """Передаёт атомарный снимок статистики в постоянно видимую таблицу GUI."""
+        post_ui_event("stats", {
+            "profiles_taken": checked_total,
+            "profiles_completed": profiles_completed_total,
+            "profiles_pending": max(0, checked_total - profiles_completed_total),
+            "already_in_db": skipped_total,
+            "new_profiles": len(new_profile_ids),
+            "profiles_downloaded": downloaded_total,
+            "profiles_missing_or_deactivated": missing_profiles_total + deactivated_total,
+            "no_avatar": no_avatar_total,
+            "no_media": no_media_total,
+            "faces_added": db_faces_added_total,
+            "db_new_records": db_new_records_total,
+            "db_updated_records": db_updated_records_total,
+            "db_skipped_duplicate": db_skipped_duplicate_total,
+            "db_no_faces": db_no_faces_total,
+            "db_unclassified": db_unclassified_total,
+            "files_imported": imported_total,
+            "downloaded_without_import": downloaded_without_import_total,
+            "download_errors": download_errors_total,
+            "import_errors": import_errors_total,
+            "deleted_source_files": deleted_source_files_total,
+            "cleanup_errors": cleanup_errors_total,
+            "api_errors": api_errors_total,
+            "album_errors": album_errors_total,
+            "db_restored_crops": db_restored_crops_total,
+            "db_removed_records": db_removed_records_total,
+            "empty_dirs_removed": empty_dirs_removed_total,
+        })
+
+    publish_stats()
 
     print(f"🖼️ VK Downloader — каталог: {output_root}")
     if specific_mode:
@@ -2738,6 +2777,7 @@ def run_download_job(
                         )
                     except Exception as exc:
                         api_errors_total += 1
+                        publish_stats()
                         print(
                             f"[VK-API-ERROR] users.search при смещении {search_offset}: "
                             f"{type(exc).__name__}: {exc}. Смещение сохранено для повтора."
@@ -2797,6 +2837,8 @@ def run_download_job(
                 skipped = len(skipped_ids)
                 skipped_total += skipped
                 checked_total += len(batch_ids)
+                profiles_completed_total += skipped
+                publish_stats()
 
                 if skipped_ids:
                     print(
@@ -2841,6 +2883,7 @@ def run_download_job(
                             returned_users = get_user_info(request_ids, session)
                     except Exception as exc:
                         api_errors_total += 1
+                        publish_stats()
                         print(
                             f"[VK-API-ERROR] Пакет {batch_label}: "
                             f"users.get завершился ошибкой: {type(exc).__name__}: {exc}. "
@@ -2869,6 +2912,7 @@ def run_download_job(
                 missing_ids = [uid for uid in request_ids if uid not in users_by_id]
                 missing_count = len(missing_ids)
                 missing_profiles_total += missing_count
+                profiles_completed_total += missing_count
                 if missing_ids:
                     print(
                         f"[VK-NOT-FOUND] Профиль не возвращён users.get для {missing_count} ID "
@@ -2895,6 +2939,7 @@ def run_download_job(
                     )
                     if user.get("deactivated"):
                         deactivated_total += 1
+                        profiles_completed_total += 1
                         print(
                             f"[VK-DEACTIVATED] ID {uid} | {display_name}: "
                             f"профиль деактивирован ({user.get('deactivated')}); аватар не загружается."
@@ -2908,6 +2953,7 @@ def run_download_job(
                     tasks.append((uid, user, base_dir))
                     name_by_id[uid] = display_name
 
+                publish_stats()
                 next_task_index = 0
                 pending = {}
                 batch_errors = 0
@@ -2988,6 +3034,7 @@ def run_download_job(
                                 continue
 
                             if outcome_status == "no_media":
+                                no_media_total += 1
                                 if outcome.get("avatar_result_kind") == "no_avatar":
                                     no_avatar_total += 1
                                 print(
@@ -3066,6 +3113,9 @@ def run_download_job(
                                     removed_records = _db_result_count("removed")
                                     restored_crops = _db_result_count("restored")
                                     created_records = _db_result_count("faces")
+                                    db_faces_added_total += created_records
+                                    if new_records > 0:
+                                        new_profile_ids.add(abs(downloaded_uid))
                                     detected_raw = import_result.get("detected_faces")
                                     try:
                                         detected_faces = (
@@ -3173,8 +3223,12 @@ def run_download_job(
                                         try:
                                             # Сначала удаляем JSON: если удаление метаданных не удастся,
                                             # изображение останется для повторного импорта/проверки.
-                                            json_path.unlink(missing_ok=True)
-                                            image_path.unlink(missing_ok=True)
+                                            if json_path.exists():
+                                                json_path.unlink()
+                                                deleted_source_files_total += 1
+                                            if image_path.exists():
+                                                image_path.unlink()
+                                                deleted_source_files_total += 1
                                             _remove_empty_directories_upwards(image_path.parent, output_root)
                                             print(
                                                 f"[CLEANUP] ID {downloaded_uid}: удалены локальные файлы "
@@ -3212,6 +3266,8 @@ def run_download_job(
                                 f"{type(exc).__name__}: {exc}"
                             )
                         finally:
+                            profiles_completed_total += 1
+                            publish_stats()
                             batch_finished += 1
                             if tasks:
                                 post_ui_event(
@@ -3298,11 +3354,14 @@ def run_download_job(
     # (в том числе сохранённые из-за ошибки импорта) остаются нетронутыми.
     if delete_processed_files and import_to_database:
         removed_empty_dirs = _remove_empty_directories_recursively(output_root)
+        empty_dirs_removed_total = removed_empty_dirs
+        publish_stats()
         print(
             f"[CLEANUP-DIRS] Финальная очистка каталога загрузки: "
             f"удалено пустых папок: {removed_empty_dirs}."
         )
 
+    publish_stats()
     total_errors = api_errors_total + album_errors_total + download_errors_total + import_errors_total + cleanup_errors_total
     print("\n" + "=" * 68)
     print(
@@ -3462,6 +3521,26 @@ def main():
                       ("pressed", palette["danger_pressed"]), ("active", palette["danger_active"])])
         style.configure("TProgressbar", troughcolor=palette["progress_track"], background=palette["accent"],
                         bordercolor=palette["progress_track"])
+        style.configure(
+            "Stats.Treeview",
+            background=palette["white"],
+            foreground=palette["text"],
+            fieldbackground=palette["white"],
+            rowheight=22,
+            font=("Segoe UI", 9),
+        )
+        style.configure(
+            "Stats.Treeview.Heading",
+            background=palette["button"],
+            foreground=palette["text"],
+            font=("Segoe UI", 9, "bold"),
+            relief="flat",
+        )
+        style.map(
+            "Stats.Treeview",
+            background=[("selected", palette["selection"])],
+            foreground=[("selected", palette["text"])],
+        )
         style.configure("TScrollbar", background=palette["scrollbar"], troughcolor=palette["app"],
                         bordercolor=palette["app"], arrowsize=12, arrowcolor=palette["text"])
 
@@ -4512,7 +4591,7 @@ def main():
     footer = ttk.Frame(main_frame, style="App.TFrame")
     footer.grid(row=1, column=0, sticky="nsew")
     footer.columnconfigure(0, weight=1)
-    footer.rowconfigure(1, weight=1)
+    footer.rowconfigure(2, weight=1)
 
     progress_frame = ttk.LabelFrame(footer, text="Выполнение", padding=10)
     progress_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
@@ -4528,8 +4607,58 @@ def main():
     progress_bar = ttk.Progressbar(progress_frame, mode="determinate", maximum=100, value=0)
     progress_bar.grid(row=4, column=0, sticky="ew")
 
+    # Постоянная компактная таблица итогов: каждая пара колонок обновляется
+    # по мере завершения профилей, не заменяя собой подробный журнал событий.
+    stats_frame = ttk.LabelFrame(footer, text="Статистика обработки", padding=6)
+    stats_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+    stats_frame.columnconfigure(0, weight=1)
+    stats_specs = [
+        ("profiles_taken", "ID взято к проверке", "profiles_completed", "Получен результат"),
+        ("profiles_pending", "Осталось без результата", "already_in_db", "Уже было в БД"),
+        ("new_profiles", "Новых профилей добавлено", "profiles_downloaded", "Профилей скачано"),
+        ("profiles_missing_or_deactivated", "Не найдено / деактивировано", "no_avatar", "Без доступной аватарки"),
+        ("faces_added", "Новых лиц в таблице faces", "db_new_records", "Новых записей CROP"),
+        ("db_updated_records", "Записей CROP обновлено", "db_skipped_duplicate", "Вероятных дубликатов CROP"),
+        ("db_no_faces", "Файлов без лиц", "files_imported", "Файлов обработано импортёром"),
+        ("download_errors", "Ошибок скачивания", "import_errors", "Ошибок импорта"),
+        ("deleted_source_files", "Исходных файлов удалено", "cleanup_errors", "Ошибок очистки"),
+        ("api_errors", "Ошибок VK API", "album_errors", "Ошибок альбомов / фото"),
+        ("downloaded_without_import", "Сохранено без импорта", "db_unclassified", "Результат не классифицирован"),
+        ("db_restored_crops", "CROP восстановлено", "db_removed_records", "Устаревших записей CROP удалено"),
+        ("no_media", "Без новых файлов / медиа", "empty_dirs_removed", "Пустых папок удалено"),
+    ]
+    stats_tree = ttk.Treeview(
+        stats_frame,
+        columns=("metric_left", "value_left", "metric_right", "value_right"),
+        show="headings",
+        height=len(stats_specs),
+        style="Stats.Treeview",
+        selectmode="browse",
+    )
+    stats_tree.heading("metric_left", text="Показатель")
+    stats_tree.heading("value_left", text="Кол-во", anchor="center")
+    stats_tree.heading("metric_right", text="Показатель")
+    stats_tree.heading("value_right", text="Кол-во", anchor="center")
+    stats_tree.column("metric_left", width=250, minwidth=190, anchor="w", stretch=True)
+    stats_tree.column("value_left", width=78, minwidth=62, anchor="center", stretch=False)
+    stats_tree.column("metric_right", width=250, minwidth=190, anchor="w", stretch=True)
+    stats_tree.column("value_right", width=78, minwidth=62, anchor="center", stretch=False)
+    for row_index, (_key_left, label_left, _key_right, label_right) in enumerate(stats_specs):
+        stats_tree.insert(
+            "", "end", iid=f"stats_{row_index}",
+            values=(label_left, "0", label_right, "0"),
+        )
+    stats_tree.grid(row=0, column=0, sticky="ew")
+
+    def reset_stats_table():
+        for row_index, (_key_left, label_left, _key_right, label_right) in enumerate(stats_specs):
+            stats_tree.item(
+                f"stats_{row_index}",
+                values=(label_left, "0", label_right, "0"),
+            )
+
     log_frame = ttk.LabelFrame(footer, text="Журнал", padding=8)
-    log_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 6))
+    log_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 6))
     log_frame.columnconfigure(0, weight=1)
     log_frame.rowconfigure(0, weight=1)
     log_text = tk.Text(
@@ -4553,7 +4682,7 @@ def main():
 
 
     action_frame = ttk.Frame(footer, style="App.TFrame")
-    action_frame.grid(row=2, column=0, sticky="ew")
+    action_frame.grid(row=3, column=0, sticky="ew")
     action_frame.columnconfigure(0, weight=1)
     running = {"value": False}
     window_closing = threading.Event()
@@ -4668,6 +4797,7 @@ def main():
         facesearch_dir = facesearch_dir_var.get().strip()
         output_dir = output_var.get().strip() or str(DEFAULT_OUTPUT_DIR)
         STOP_REQUESTED.clear()
+        reset_stats_table()
         set_running(True)
         progress_bar.configure(mode="indeterminate")
         progress_bar.start(10)
@@ -4840,6 +4970,17 @@ def main():
                     safe_total = max(1, int(total or 0))
                     overall_progress_bar.configure(maximum=safe_total)
                     overall_progress_bar["value"] = min(max(0, int(current or 0)), safe_total)
+                elif kind == "stats":
+                    stats_data = event[1] if len(event) > 1 and isinstance(event[1], dict) else {}
+                    for row_index, (key_left, label_left, key_right, label_right) in enumerate(stats_specs):
+                        row_values = []
+                        for key, label in ((key_left, label_left), (key_right, label_right)):
+                            try:
+                                value_text = f"{int(stats_data.get(key, 0) or 0):,}"
+                            except (TypeError, ValueError):
+                                value_text = str(stats_data.get(key, 0) or 0)
+                            row_values.extend((label, value_text))
+                        stats_tree.item(f"stats_{row_index}", values=tuple(row_values))
                 elif kind == "search_offset_updated":
                     search_offset_var.set(str(max(0, int(event[1] or 0))))
                     _persist_search_offset(int(search_offset_var.get()))
