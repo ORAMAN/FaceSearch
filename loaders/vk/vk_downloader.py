@@ -4835,15 +4835,9 @@ def main():
         output_dir = output_var.get().strip() or str(DEFAULT_OUTPUT_DIR)
         STOP_REQUESTED.clear()
         reset_stats_table()
-        try:
-            initial_cursor = int(start_id_var.get().strip() or "1")
-            last_processed_id_var.set(
-                f"Последний завершённый подряд ID: {initial_cursor - 1:,}"
-                if initial_cursor > 1
-                else "Последний завершённый подряд ID: —"
-            )
-        except (TypeError, ValueError):
-            last_processed_id_var.set("Последний завершённый подряд ID: —")
+        # До завершения текущего задания не называем предыдущий ID последним
+        # обработанным: стартовая позиция могла быть введена вручную.
+        last_processed_id_var.set("Последний завершённый подряд ID: —")
         set_running(True)
         progress_bar.configure(mode="indeterminate")
         progress_bar.start(10)
