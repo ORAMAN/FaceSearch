@@ -3290,6 +3290,12 @@ def run_download_job(
                             )
                         finally:
                             profiles_completed_total += 1
+                            # Обновляем поле прямо по мере завершения профилей,
+                            # не дожидаясь конца пакета или нажатия «Остановить».
+                            # Поле содержит следующий ID для продолжения, а подпись —
+                            # конкретный последний завершившийся профиль.
+                            if not specific_mode and not search_mode:
+                                post_ui_event("profile_id_completed", int(uid))
                             publish_stats()
                             batch_finished += 1
                             if tasks:
@@ -3354,6 +3360,11 @@ def run_download_job(
                             except (TypeError, ValueError, IndexError):
                                 pass
                         current_id = min(resume_candidates) if resume_candidates else batch_end
+                        # Сразу публикуем точку возобновления после завершения уже запущенных
+                        # профилей. Не ждём финальную очистку каталогов и сводный отчёт:
+                        # они могут занять заметное время, а поле «Следующий ID» должно
+                        # отражать рассчитанный курсор сразу после остановки текущей пачки.
+                        post_ui_event("start_id_updated", current_id)
                         print(
                             f"[STOP-CURSOR] Следующий запуск продолжится с ID {current_id}; "
                             f"повторяемых/не запущенных профилей в текущей пачке: {len(resume_candidates)}."
@@ -3392,10 +3403,17 @@ def run_download_job(
             f"удалено пустых папок: {removed_empty_dirs}."
         )
 
-    # Поле счётчика — это точка возобновления, а не последний ID, который встретился
-    # при сканировании. Если в любой из предыдущих пачек были ошибки, возвращаемся
-    # к самому раннему такому ID, чтобы не потерять его за последующими пачками.
-    if not specific_mode and not search_mode and earliest_retry_id is not None:
+    # При штатном завершении сохраняем прежнее поведение: если были ошибки,
+    # можно повторить обход с самого раннего проблемного ID. После явного Stop
+    # поле должно показывать курсор остановки, рассчитанный по не запущенным/
+    # повторяемым задачам текущей пачки. Иначе ошибка из ранней пачки (например,
+    # HTTP 404 у ID 164) откатывает поле назад и визуально отменяет обновление.
+    if (
+        not STOP_REQUESTED.is_set()
+        and not specific_mode
+        and not search_mode
+        and earliest_retry_id is not None
+    ):
         current_id = min(current_id, earliest_retry_id)
 
     publish_stats()
@@ -3446,6 +3464,16 @@ def run_download_job(
         else:
             print("[ПОДСКАЗКА] Последний пакет не обработан из-за ошибки VK API; повторите запуск с указанного стартового ID.")
     print("=" * 68)
+    # Всегда публикуем окончательный курсор после завершения задания.
+    # При Stop это последняя рассчитанная позиция для продолжения; событие
+    # отправляется после финальной обработки, чтобы его не затёрло более раннее.
+    if STOP_REQUESTED.is_set():
+        if search_mode:
+            _persist_search_offset(search_offset)
+            post_ui_event("search_offset_updated", search_offset)
+        elif not specific_mode:
+            post_ui_event("start_id_updated", current_id)
+            print(f"[STOP-CURSOR-FINAL] Следующий стартовый ID: {current_id}.")
     return search_offset if search_mode else current_id
 
 
@@ -3468,6 +3496,19 @@ class QueueStream:
         for chunk in chunks:
             if chunk:
                 self.events.put((self.kind, chunk))
+                # STOP-CURSOR выводится через stdout, а stdout может быть
+                # перенаправлен из другого экземпляра модуля (например, при
+                # запуске через загрузчик). В таком случае его UI_EVENTS может
+                # не совпадать с очередью главного окна. Поэтому синхронизируем
+                # поле напрямую через ту очередь, в которую попадает журнал.
+                if self.kind == "log" and ("[STOP-CURSOR]" in chunk or "[STOP-CURSOR-FINAL]" in chunk):
+                    match = re.search(
+                        r"(?:\[STOP-CURSOR(?:-FINAL)?\].*?ID\s+|следующий стартовый ID:\s*)(\d+)",
+                        chunk,
+                        re.IGNORECASE,
+                    )
+                    if match:
+                        self.events.put(("start_id_updated", int(match.group(1))))
         return len(text)
 
     def flush(self):
@@ -3780,7 +3821,7 @@ def main():
 
     counter_frame = ttk.Frame(source_frame)
     counter_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
-    ttk.Label(counter_frame, text="Следующий ID для продолжения:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+    ttk.Label(counter_frame, text="ID для продолжения (обновляется во время загрузки):").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
     start_id_var = tk.StringVar(value="")
     start_id_entry = ttk.Entry(counter_frame, textvariable=start_id_var, width=20)
     start_id_entry.grid(row=0, column=1, sticky="w", pady=3)
@@ -4923,7 +4964,12 @@ def main():
                     search_offset=search_offset,
                 )
                 if source_mode == "counter":
-                    events.put(("start_id_updated", next_start_id))
+                    # При Stop курсор публикуется из run_download_job и
+                    # дополнительно извлекается QueueStream из [STOP-CURSOR].
+                    # Не отправляем повторно потенциально устаревшее значение
+                    # по завершении worker: оно могло бы затереть актуальный ID.
+                    if not STOP_REQUESTED.is_set():
+                        events.put(("start_id_updated", next_start_id))
                 elif source_mode == "search":
                     events.put(("search_offset_updated", next_start_id))
                 # Stop прекращает запуск новых профилей, но не отменяет явно
@@ -5039,17 +5085,26 @@ def main():
                 elif kind == "search_offset_updated":
                     search_offset_var.set(str(max(0, int(event[1] or 0))))
                     _persist_search_offset(int(search_offset_var.get()))
+                elif kind == "profile_id_completed":
+                    try:
+                        completed_id = int(event[1])
+                    except (TypeError, ValueError):
+                        continue
+                    # Поле показывает ID последнего завершившегося профиля.
+                    # При остановке безопасный курсор продолжения отдельно заменит
+                    # это значение, чтобы не пропустить незавершённые задачи.
+                    start_id_var.set(str(completed_id))
+                    last_processed_id_var.set(
+                        f"Последний обработанный ID: {completed_id:,}"
+                    )
                 elif kind == "start_id_updated":
                     try:
                         next_id = int(event[1])
                     except (TypeError, ValueError):
                         next_id = 1
                     start_id_var.set(str(next_id))
-                    job_start_id = current_job_start_id.get("value")
                     last_processed_id_var.set(
-                        f"Последний завершённый подряд ID: {next_id - 1:,}"
-                        if isinstance(job_start_id, int) and next_id > job_start_id
-                        else "Последний завершённый подряд ID: —"
+                        f"Следующий запуск начнётся с ID: {next_id:,}"
                     )
                 elif kind == "status":
                     status_var.set(event[1])
