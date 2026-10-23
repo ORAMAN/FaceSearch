@@ -2603,6 +2603,9 @@ def run_download_job(
     except (TypeError, ValueError):
         album_photo_limit = 0
     current_id = start_id
+    # Самый ранний ID, который в этой сессии не был обработан успешно.
+    # Нужен, чтобы ошибки предыдущих пачек не терялись при дальнейшем сканировании.
+    earliest_retry_id: int | None = None
     specific_user_ids = []
     specific_cursor = 0
     search_total = 0
@@ -2889,6 +2892,12 @@ def run_download_job(
                     except Exception as exc:
                         api_errors_total += 1
                         publish_stats()
+                        if not specific_mode and not search_mode:
+                            earliest_retry_id = (
+                                batch_start
+                                if earliest_retry_id is None
+                                else min(earliest_retry_id, batch_start)
+                            )
                         print(
                             f"[VK-API-ERROR] Пакет {batch_label}: "
                             f"users.get завершился ошибкой: {type(exc).__name__}: {exc}. "
@@ -3300,6 +3309,14 @@ def run_download_job(
                         f"ошибок загрузки/импорта: {download_errors_total + import_errors_total:,}."
                     )
 
+                if batch_retry_ids and not specific_mode and not search_mode:
+                    batch_earliest_retry_id = min(int(value) for value in batch_retry_ids)
+                    earliest_retry_id = (
+                        batch_earliest_retry_id
+                        if earliest_retry_id is None
+                        else min(earliest_retry_id, batch_earliest_retry_id)
+                    )
+
                 if STOP_REQUESTED.is_set():
                     # Все отправленные задачи завершены; на следующем запуске повторяем
                     # с самой ранней поисковой позиции, не обработанной успешно.
@@ -3368,6 +3385,12 @@ def run_download_job(
             f"[CLEANUP-DIRS] Финальная очистка каталога загрузки: "
             f"удалено пустых папок: {removed_empty_dirs}."
         )
+
+    # Поле счётчика — это точка возобновления, а не последний ID, который встретился
+    # при сканировании. Если в любой из предыдущих пачек были ошибки, возвращаемся
+    # к самому раннему такому ID, чтобы не потерять его за последующими пачками.
+    if not specific_mode and not search_mode and earliest_retry_id is not None:
+        current_id = min(current_id, earliest_retry_id)
 
     publish_stats()
     total_errors = api_errors_total + album_errors_total + download_errors_total + import_errors_total + cleanup_errors_total
@@ -3744,10 +3767,16 @@ def main():
 
     counter_frame = ttk.Frame(source_frame)
     counter_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
-    ttk.Label(counter_frame, text="Стартовый ID пользователя:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+    ttk.Label(counter_frame, text="Следующий ID для продолжения:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
     start_id_var = tk.StringVar(value="")
     start_id_entry = ttk.Entry(counter_frame, textvariable=start_id_var, width=20)
     start_id_entry.grid(row=0, column=1, sticky="w", pady=3)
+    last_processed_id_var = tk.StringVar(value="Последний завершённый подряд ID: —")
+    ttk.Label(
+        counter_frame,
+        textvariable=last_processed_id_var,
+        style="Muted.TLabel",
+    ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 3))
 
     specific_frame = ttk.Frame(source_frame)
     specific_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 0))
@@ -4806,6 +4835,15 @@ def main():
         output_dir = output_var.get().strip() or str(DEFAULT_OUTPUT_DIR)
         STOP_REQUESTED.clear()
         reset_stats_table()
+        try:
+            initial_cursor = int(start_id_var.get().strip() or "1")
+            last_processed_id_var.set(
+                f"Последний завершённый подряд ID: {initial_cursor - 1:,}"
+                if initial_cursor > 1
+                else "Последний завершённый подряд ID: —"
+            )
+        except (TypeError, ValueError):
+            last_processed_id_var.set("Последний завершённый подряд ID: —")
         set_running(True)
         progress_bar.configure(mode="indeterminate")
         progress_bar.start(10)
@@ -4993,7 +5031,16 @@ def main():
                     search_offset_var.set(str(max(0, int(event[1] or 0))))
                     _persist_search_offset(int(search_offset_var.get()))
                 elif kind == "start_id_updated":
-                    start_id_var.set(str(event[1]))
+                    try:
+                        next_id = int(event[1])
+                    except (TypeError, ValueError):
+                        next_id = 1
+                    start_id_var.set(str(next_id))
+                    last_processed_id_var.set(
+                        f"Последний завершённый подряд ID: {next_id - 1:,}"
+                        if next_id > 1
+                        else "Последний завершённый подряд ID: —"
+                    )
                 elif kind == "status":
                     status_var.set(event[1])
                 elif kind == "workers_status":
