@@ -2618,6 +2618,7 @@ def run_download_job(
 
     checked_total = 0
     profiles_completed_total = 0
+    profiles_already_in_db_total = 0
     skipped_total = 0
     returned_total = 0
     missing_profiles_total = 0
@@ -2653,7 +2654,7 @@ def run_download_job(
             "profiles_taken": checked_total,
             "profiles_completed": profiles_completed_total,
             "profiles_pending": max(0, checked_total - profiles_completed_total),
-            "already_in_db": skipped_total,
+            "already_in_db": profiles_already_in_db_total,
             "new_profiles": len(new_profile_ids),
             "profiles_downloaded": downloaded_total,
             "profiles_missing_or_deactivated": missing_profiles_total + deactivated_total,
@@ -2827,14 +2828,15 @@ def run_download_job(
                     batch_ids = list(range(batch_start, batch_end))
                     batch_label = f"ID {batch_start}–{batch_end - 1}"
 
-                # Уже сохранённые профили логируем по ID, но не отправляем повторно в VK API.
-                with EXISTING_PROFILE_IDS_LOCK:
-                    # При загрузке альбомов профили из БД всё равно проверяются в VK: у них
-                    # могут быть новые/ещё не импортированные фотографии.
-                    skipped_ids = [
-                        uid for uid in batch_ids
-                        if uid in EXISTING_PROFILE_IDS and not download_albums
-                    ]
+                # Считаем отдельно все профили, которые были в БД до запуска,
+                # и те, которые действительно пропускаем. При загрузке альбомов
+                # существующий профиль всё равно проверяется в VK.
+                existing_in_batch_ids = [
+                    uid for uid in batch_ids
+                    if uid in existing_profile_ids_at_start
+                ]
+                profiles_already_in_db_total += len(existing_in_batch_ids)
+                skipped_ids = existing_in_batch_ids if not download_albums else []
                 skipped_set = set(skipped_ids)
                 request_ids = [uid for uid in batch_ids if uid not in skipped_set]
                 skipped = len(skipped_ids)
