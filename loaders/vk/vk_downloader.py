@@ -4723,6 +4723,7 @@ def main():
     action_frame.columnconfigure(0, weight=1)
     running = {"value": False}
     window_closing = threading.Event()
+    current_job_start_id = {"value": None}
 
     def set_running(active: bool):
         running["value"] = active
@@ -4835,6 +4836,7 @@ def main():
         output_dir = output_var.get().strip() or str(DEFAULT_OUTPUT_DIR)
         STOP_REQUESTED.clear()
         reset_stats_table()
+        current_job_start_id["value"] = start_id if source_mode == "counter" else None
         # До завершения текущего задания не называем предыдущий ID последним
         # обработанным: стартовая позиция могла быть введена вручную.
         last_processed_id_var.set("Последний завершённый подряд ID: —")
@@ -5030,9 +5032,10 @@ def main():
                     except (TypeError, ValueError):
                         next_id = 1
                     start_id_var.set(str(next_id))
+                    job_start_id = current_job_start_id.get("value")
                     last_processed_id_var.set(
                         f"Последний завершённый подряд ID: {next_id - 1:,}"
-                        if next_id > 1
+                        if isinstance(job_start_id, int) and next_id > job_start_id
                         else "Последний завершённый подряд ID: —"
                     )
                 elif kind == "status":
