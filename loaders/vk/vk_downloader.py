@@ -2603,6 +2603,9 @@ def run_download_job(
     except (TypeError, ValueError):
         album_photo_limit = 0
     current_id = start_id
+    # Самый высокий ID в последовательной пачке, до которой дошёл обход.
+    # Нужен отдельно от точки возобновления: она может быть отмотана к ошибке.
+    furthest_counter_id = start_id - 1
     # Самый ранний ID, который в этой сессии не был обработан успешно.
     # Нужен, чтобы ошибки предыдущих пачек не терялись при дальнейшем сканировании.
     earliest_retry_id: int | None = None
@@ -2830,6 +2833,9 @@ def run_download_job(
                     batch_end = batch_start + USER_BATCH_SIZE
                     batch_ids = list(range(batch_start, batch_end))
                     batch_label = f"ID {batch_start}–{batch_end - 1}"
+
+                if not specific_mode and not search_mode and batch_ids:
+                    furthest_counter_id = max(furthest_counter_id, int(batch_ids[-1]))
 
                 # Считаем отдельно все профили, которые были в БД до запуска,
                 # и те, которые действительно пропускаем. При загрузке альбомов
@@ -3399,6 +3405,7 @@ def run_download_job(
         f"[ИТОГ] Проверено ID: {checked_total:,}; уже есть в БД: {skipped_total:,}; "
         f"профиль не получен от VK: {missing_profiles_total:,}; "
         f"деактивировано: {deactivated_total:,}; без доступной аватарки: {no_avatar_total:,}; "
+        f"без новых файлов/медиа: {no_media_total:,}; "
         f"профилей с загруженными файлами: {downloaded_total:,}; обработано импортёром файлов: {imported_total:,}; "
         f"новых записей CROP/лиц: {db_new_records_total:,}; обновлено записей CROP/лиц: {db_updated_records_total:,}; "
         f"файлов, уже представленных в БД: {db_skipped_existing_total:,}; "
@@ -3421,8 +3428,14 @@ def run_download_job(
             f"всего ошибок: {total_errors:,}."
         )
     else:
+        cursor_reason = (
+            f"с самой ранней ошибкой на ID {earliest_retry_id}"
+            if earliest_retry_id is not None
+            else "с первой не обработанной позиции"
+        )
         print(
-            f"🏁 Сканирование остановлено. Следующий стартовый ID: {current_id}. "
+            f"🏁 Сканирование остановлено. Обход дошёл до ID {furthest_counter_id}; "
+            f"следующий стартовый ID: {current_id} ({cursor_reason}). "
             f"Всего ошибок: {total_errors:,}."
         )
     if api_errors_total:
