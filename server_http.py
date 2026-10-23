@@ -894,9 +894,9 @@ def _original_image_available(source_url: str, url_image: str) -> bool:
     return _remote_image_url_available(url_image)
 
 
-def _start_crop_repair(face_ids) -> None:
-    """Восстанавливает отсутствующие CROP для текущей выдачи в фоне, как GUI."""
-    if not CREATE_CROPS_ON_HTML or FACE_APP is None:
+def _start_crop_repair(face_ids, *, force: bool = False) -> None:
+    """Восстанавливает отсутствующие CROP в фоне; force используется веб-запросами."""
+    if (not force and not CREATE_CROPS_ON_HTML) or FACE_APP is None:
         return
     try:
         requested = {int(value) for value in face_ids if int(value) > 0}
@@ -982,17 +982,23 @@ PAGE_TEMPLATE = r"""<!doctype html>
 html{min-height:100%;background:var(--bg)}
 body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,"Segoe UI",Arial,sans-serif;transition:background-color .18s,color .18s}
 main{max-width:1600px;margin:0 auto;padding:28px 22px 60px}
-h1{font-size:28px;line-height:1.2;margin:0 0 8px}
+.page-header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:8px}
+.page-header h1{font-size:28px;line-height:1.2;margin:0;min-width:0}
+.page-header #theme-button{flex:0 0 auto;margin-left:auto;white-space:nowrap}
 .subtitle{color:var(--muted);margin:0 0 24px}
 .toolbar{display:flex;gap:14px;align-items:end;flex-wrap:wrap;padding:18px;background:var(--panel);border:1px solid var(--line);border-radius:14px;margin-bottom:18px;box-shadow:var(--shadow)}
 .field{display:flex;flex-direction:column;gap:5px;min-width:150px}
 .field label,.toggle-label{color:var(--muted);font-size:13px}
 .url-field{flex:1 1 100%;min-width:0}
 .url-row{display:flex;gap:10px;align-items:stretch;min-width:0}
+.url-field .toggle-options-row{flex:0 0 auto;width:auto;align-self:flex-end;justify-content:flex-end;margin:0;gap:18px}
 .url-row input{flex:1 1 auto;min-width:0;width:100%;background:var(--field);color:var(--text);border:1px solid var(--input-line);border-radius:8px;padding:10px;font:inherit}
 .url-row button{flex:0 0 auto}
 #file-input{display:none!important}
 input[type=number]{width:145px;max-width:100%;background:var(--field);color:var(--text);border:1px solid var(--input-line);border-radius:8px;padding:10px;font:inherit}
+.numeric-action-field{min-width:190px;gap:6px}
+.numeric-action-field input[type=number]{width:100%}
+.numeric-action-button{width:100%;margin-top:2px;white-space:normal}
 input:focus-visible,button:focus-visible,a:focus-visible,canvas:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 button{border:0;border-radius:9px;padding:11px 17px;background:var(--accent);color:#fff;font:600 14px system-ui;cursor:pointer;min-height:42px;transition:filter .12s}
 button:hover:not(:disabled){filter:brightness(1.08)}
@@ -1007,8 +1013,23 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .dropzone-content{max-width:650px;width:100%}
 .dropzone input{display:block;max-width:100%;margin:13px auto}
 #preview{display:none;max-width:100%;max-height:440px;object-fit:contain}
-#preview-canvas{display:none;max-width:100%;max-height:440px;width:auto;height:auto;object-fit:contain;cursor:crosshair}
-.status{min-height:28px;color:var(--muted);padding:10px 2px;overflow-wrap:anywhere}
+#preview-canvas{display:block;max-width:none;max-height:none;width:auto;height:auto;object-fit:contain;cursor:crosshair;margin:0 auto}
+.dropzone.preview-active{display:block;padding:10px;text-align:left}
+.preview-controls{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;width:100%;gap:8px;margin:0 0 9px}
+.preview-control-buttons{grid-column:2;display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px;min-width:0}
+.preview-controls button{min-height:34px;min-width:38px;padding:6px 12px}
+.preview-controls #identify-faces-button{min-width:112px;font-weight:650;margin-right:4px}
+.preview-zoom-value{min-width:54px;text-align:center;font-size:12px;font-variant-numeric:tabular-nums;color:var(--text)}
+.preview-zoom-hint{grid-column:3;justify-self:end;color:var(--muted);font-size:12px;margin-left:0;text-align:right}
+.preview-stage{position:relative;display:block;flex:0 0 auto;margin:0 auto;line-height:0;max-width:none}
+#preview-canvas{margin:0}
+.face-link-overlay{position:absolute;inset:0;z-index:4;pointer-events:none;overflow:hidden}
+.face-link-overlay a{position:absolute;display:block;pointer-events:auto;overflow:hidden;color:transparent;background:transparent;font-size:0;text-decoration:none;border-radius:2px}
+.face-link-overlay a:focus-visible{outline:2px solid #fff;outline-offset:1px;box-shadow:0 0 0 3px rgba(22,122,198,.8)}
+.preview-controls[hidden],.preview-viewport[hidden]{display:none!important}
+.preview-viewport{width:100%;height:min(68vh,640px);min-height:180px;overflow:auto;overscroll-behavior:contain;background:var(--image-bg);border:1px solid var(--line);border-radius:10px}
+.preview-viewport:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.status{min-height:28px;color:var(--muted);padding:10px 2px;overflow-wrap:anywhere;scroll-margin-top:10px}
 .status.error{color:#c83e3e}
 .index-meta{margin:4px 0 9px;color:var(--muted);font-size:12px;line-height:1.35;overflow-wrap:anywhere}
 .index-status{margin:8px 0 12px;padding:11px 14px;border:1px solid var(--line);border-radius:9px;font-size:14px;line-height:1.45;overflow-wrap:anywhere}
@@ -1021,10 +1042,20 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .section-title h2{font-size:20px;margin:0}
 .section-title span{color:var(--muted);font-size:13px}
 .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,265px),1fr));gap:18px}
+.description-filter-field{flex:1 1 260px;width:auto;min-width:260px}
+.description-filter-field input{width:100%;min-width:0}
+.toggle-options-row{flex:0 0 auto;width:auto;display:flex;align-items:center;align-self:stretch;justify-content:flex-end;margin-left:auto;gap:18px;flex-wrap:nowrap;min-width:0}
+.toggle-options-row .toggle-field{display:flex;flex:0 0 auto;flex-direction:row;align-items:center;min-width:0;min-height:42px;gap:6px}
+.toggle-options-row .toggle-label{min-height:36px;white-space:nowrap;font-size:14px;color:var(--text)}
 .card{position:relative;min-width:0;overflow:hidden;border:1px solid var(--line);background:var(--panel);border-radius:12px;padding-bottom:14px;box-shadow:var(--shadow);transition:transform .14s,box-shadow .14s}
 .card:hover{transform:translateY(-2px)}
 .card-image{height:270px;padding:4px;position:relative;background:var(--image-bg);display:flex;align-items:center;justify-content:center;overflow:hidden}
 .card-image img{display:block;width:100%;height:100%;object-fit:contain;border-radius:3px}
+.card-images{height:270px;padding:4px;position:relative;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;overflow:hidden;background:var(--image-bg)}
+.card-image-cell{display:flex;min-width:0;min-height:0;overflow:hidden;background:var(--panel2);border-radius:3px}
+.card-image-label{position:absolute;left:50%;bottom:7px;z-index:3;transform:translateX(-50%);max-width:calc(100% - 12px);padding:3px 7px;text-align:center;color:#fff;background:rgba(0,0,0,.78);border:1px solid rgba(255,255,255,.18);border-radius:5px;font-size:10px;line-height:1.15;white-space:nowrap;pointer-events:none}
+.card-image-view{flex:1;min-width:0;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.card-image-view img{display:block;width:100%;height:100%;object-fit:contain;border-radius:2px}
 .no-image[hidden]{display:none}.no-image{display:flex;align-items:center;justify-content:center;text-align:center;padding:18px;color:var(--muted);font-size:13px}
 .no-image.unavailable{gap:7px}
 .no-image.unavailable::before{content:"▧";display:inline-block;font-size:19px;line-height:1;color:var(--muted)}
@@ -1080,8 +1111,18 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   .url-row{display:flex;flex-direction:column;gap:8px}
   .url-row button{width:100%}
   .toolbar .url-field{flex:1 1 100%;width:100%;min-width:0}
+  .url-field .toggle-options-row{flex:0 0 auto;width:auto;align-self:flex-end;justify-content:flex-end;margin:0;gap:10px}
+  .url-field .toggle-options-row .toggle-label{white-space:normal}
   .toolbar .numeric-field{flex:1 1 100%;width:100%;min-width:0}
   .toolbar .numeric-field input[type=number]{width:100%;min-width:0}
+  .toolbar .numeric-action-button{width:100%}
+  .page-header{gap:10px}
+  .page-header h1{font-size:25px}
+  .page-header #theme-button{padding:9px 11px;font-size:12px}
+  .preview-controls{grid-template-columns:minmax(0,1fr);align-items:center;gap:6px}
+  .preview-control-buttons{grid-column:1;justify-self:center;max-width:100%}
+  .preview-controls #identify-faces-button{min-width:100px}
+  .preview-zoom-hint{grid-column:1;justify-self:end;text-align:right;margin-left:0}
   .toolbar .action-field{flex:1 1 calc(50% - 12px);min-width:0}
   .toolbar .action-field button{width:100%;height:100%;padding:10px 8px;white-space:normal}
   .toggle-field{flex:1 1 100%;align-items:flex-start}
@@ -1089,9 +1130,14 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   .format-hint{display:block;position:relative;clear:both;flex:1 1 100%;width:100%;margin-top:7px;line-height:1.45;overflow-wrap:anywhere}
   .toolbar .mobile-only.action-field{flex:1 1 100%;width:100%;min-width:0}
   .toolbar .mobile-only.action-field button{width:100%;min-height:44px}
+  .description-filter-field{flex:1 1 100%;width:100%}
+  .toggle-options-row{flex:1 1 100%;width:100%;align-self:auto;justify-content:flex-end;margin-left:0;flex-wrap:wrap;gap:8px}
+  .toggle-options-row .toggle-field{flex:0 1 auto;min-height:36px}
+  .toggle-options-row .toggle-label{white-space:normal}
   .mobile-only{display:block;width:100%;margin:8px auto 0}
   .gallery{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
   .card-image{height:clamp(150px,38vw,230px)}
+  .card-images{height:clamp(150px,38vw,230px)}
   .card-body{padding:0 10px}
   .card-info{padding:8px;margin:8px 0 10px}
   .card-buttons{flex-direction:column}
@@ -1113,13 +1159,17 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   h1{font-size:25px}
   .gallery{grid-template-columns:minmax(0,1fr)}
   .card-image{height:230px}
+  .card-images{height:230px}
   .toolbar{padding:12px}
 }
 </style>
 </head>
 <body>
 <main>
-  <h1>FaceSearch</h1>
+  <header class="page-header">
+    <h1>FaceSearch</h1>
+    <button type="button" id="theme-button" class="secondary" aria-pressed="false">☀️ Дневная тема</button>
+  </header>
   <p class="subtitle">Загрузите изображение — определение лиц и поиск по первому найденному лицу запустятся автоматически. На групповом фото можно выбрать другое лицо и повторить поиск.</p>
   <div id="index-meta" class="index-meta" aria-label="Информация о FAISS-индексе">FAISS: получение информации об индексе…</div>
   <div id="index-status" class="index-status" role="status" aria-live="polite" hidden></div>
@@ -1130,37 +1180,31 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
         <input id="image-url" type="url" inputmode="url" autocomplete="url" placeholder="https://example.com/photo.jpg">
         <button type="button" id="load-url-button" class="secondary">Загрузить адрес</button>
       </div>
+      <div class="toggle-options-row" aria-label="Режим отображения изображений">
+        <div class="toggle-field" title="При отсутствии CROP веб-интерфейс создаст его автоматически.">
+          <label class="toggle-label" for="use-crop"><input id="use-crop" type="checkbox" __CROP_CHECKED__> Использовать CROP</label>
+        </div>
+        <div class="toggle-field" title="Показывать CROP и оригинал рядом в одной карточке.">
+          <label class="toggle-label" for="double-images"><input id="double-images" type="checkbox"> Двойные изображения</label>
+        </div>
+      </div>
       <span class="hint">Для локального изображения используйте кнопку «Выбрать файл» ниже.</span>
     </div>
-    <div class="field numeric-field">
+    <div class="field numeric-field numeric-action-field">
       <label for="similarity">Минимальное сходство, %</label>
       <input id="similarity" class="numeric-input" type="number" min="0" max="100" step="1" value="__DEFAULT_MIN_SIMILARITY__">
+      <button type="button" id="detect-button" class="secondary numeric-action-button">Определить лица</button>
     </div>
-    <div class="field numeric-field">
+    <div class="field numeric-field numeric-action-field">
       <label for="top-k">Количество результатов</label>
       <input id="top-k" class="numeric-input" type="number" min="1" max="500" step="1" value="__DEFAULT_TOP_K__">
+      <button type="button" id="file-button" class="secondary numeric-action-button">Выбрать файл</button>
+      <input id="file-input" type="file" accept="image/*" hidden>
     </div>
-    <div class="field" style="grid-column:1/-1">
+    <div class="field description-filter-field">
       <label for="description-filter">Фильтр описания карточки</label>
       <input id="description-filter" type="text" maxlength="500" autocomplete="off" placeholder="Например: Москва или katerina">
       <span class="hint">Частичное совпадение без учёта регистра во всех полях и вложенных метаданных карточки.</span>
-    </div>
-    <div class="toggle-field">
-      <label class="toggle-label" for="use-crop"><input id="use-crop" type="checkbox" __CROP_CHECKED__> Использовать CROP</label>
-      <span class="hint">Показывать локальные вырезки лиц, если они доступны.</span>
-    </div>
-    <div class="field action-field" style="min-width:0">
-      <label>&nbsp;</label>
-      <button type="button" id="theme-button" class="secondary" aria-pressed="false">☀️ Дневная тема</button>
-    </div>
-    <div class="field action-field" style="min-width:0">
-      <label>&nbsp;</label>
-      <button type="button" id="detect-button" class="secondary">Определить лица</button>
-    </div>
-    <div class="field action-field">
-      <label>&nbsp;</label>
-      <button type="button" id="file-button" class="secondary">Выбрать файл</button>
-      <input id="file-input" type="file" accept="image/*" hidden>
     </div>
     <div class="field action-field mobile-only">
       <label>&nbsp;</label>
@@ -1175,7 +1219,22 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       <strong>Перетащите фотографию сюда</strong><br>
       <span class="hint">Также можно вставить изображение из буфера обмена.</span>
     </div>
-    <canvas id="preview-canvas" aria-label="Предпросмотр. Нажмите на рамку нужного лица, чтобы выбрать его."></canvas>
+    <div id="preview-controls" class="preview-controls" hidden aria-label="Определение лиц и управление масштабом">
+      <div class="preview-control-buttons">
+        <button type="button" id="identify-faces-button" class="secondary" disabled>Определить</button>
+        <button type="button" id="zoom-out-button" class="secondary" aria-label="Уменьшить масштаб">−</button>
+        <span id="preview-zoom-value" class="preview-zoom-value">100%</span>
+        <button type="button" id="zoom-in-button" class="secondary" aria-label="Увеличить масштаб">+</button>
+        <button type="button" id="zoom-fit-button" class="secondary">Вписать</button>
+      </div>
+      <span class="preview-zoom-hint">Ctrl — масштаб · Shift — вверх/вниз · Alt — влево/вправо · колесо — страница</span>
+    </div>
+    <div id="preview-viewport" class="preview-viewport" hidden>
+      <div id="preview-stage" class="preview-stage">
+        <canvas id="preview-canvas" aria-label="Предпросмотр. Нажмите на рамку нужного лица, чтобы выбрать его." tabindex="0"></canvas>
+        <div id="face-link-overlay" class="face-link-overlay" aria-label="Ссылки на профили найденных лиц"></div>
+      </div>
+    </div>
   </section>
   <div id="camera-modal" class="camera-modal" aria-hidden="true" role="dialog" aria-modal="true" aria-label="Съёмка фотографии">
     <div class="camera-dialog">
@@ -1228,6 +1287,16 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   const dropCopy=document.getElementById("drop-copy");
   const canvas=document.getElementById("preview-canvas");
   const ctx=canvas.getContext("2d");
+  const previewViewport=document.getElementById("preview-viewport");
+  const previewStage=document.getElementById("preview-stage");
+  const faceLinkOverlay=document.getElementById("face-link-overlay");
+  const previewControls=document.getElementById("preview-controls");
+  const identifyFacesButton=document.getElementById("identify-faces-button");
+  const previewZoomValue=document.getElementById("preview-zoom-value");
+  const zoomOutButton=document.getElementById("zoom-out-button");
+  const zoomInButton=document.getElementById("zoom-in-button");
+  const zoomFitButton=document.getElementById("zoom-fit-button");
+  let previewZoom=1;
   const statusBox=document.getElementById("status");
   const detectButton=document.getElementById("detect-button");
   const searchButton=document.getElementById("search-button");
@@ -1237,6 +1306,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   const topKInput=document.getElementById("top-k");
   const descriptionFilterInput=document.getElementById("description-filter");
   const useCropCheckbox=document.getElementById("use-crop");
+  const doubleImagesCheckbox=document.getElementById("double-images");
   const themeButton=document.getElementById("theme-button");
   const lightbox=document.getElementById("image-lightbox");
   const lightboxImage=document.getElementById("lightbox-image");
@@ -1251,10 +1321,14 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   let faces=[];
   let selectedFace=-1;
   let busy=false;
+  let faceMatchResults=[];
+  let faceIdentificationRun=0;
+  let identificationInProgress=false;
   let lightboxItems=[];
   let lightboxIndex=-1;
   let cameraStream=null;
   let cameraOpening=false;
+  let lastResults=[];
 
   const indexStatusBox=document.getElementById("index-status");
   const indexMetaBox=document.getElementById("index-meta");
@@ -1441,7 +1515,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     };
     image.onerror=function(){
       if(image.dataset.imageRequestId!==requestId)return;
-      if(image.dataset.cropEnabled==="true"&&CREATE_CROPS_ON_HTML){
+      if(image.dataset.cropEnabled==="true"){
         pollCropStatus(image,requestId);
         return;
       }
@@ -1452,14 +1526,43 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   }
   function refreshCardImages(){
     gallery.querySelectorAll("img[data-face-image='true']").forEach(function(image){
-      configureCardImage(image,image.dataset.faceId,useCropCheckbox.checked,true);
+      const useCrop=image.dataset.fixedCrop!==undefined
+        ?image.dataset.fixedCrop==="true"
+        :useCropCheckbox.checked;
+      configureCardImage(image,image.dataset.faceId,useCrop,true);
     });
   }
   useCropCheckbox.addEventListener("change",refreshCardImages);
+  function syncDoubleImageControls(){
+    if(doubleImagesCheckbox.checked){
+      useCropCheckbox.checked=true;
+      useCropCheckbox.disabled=true;
+    }else{
+      useCropCheckbox.disabled=false;
+    }
+  }
+  doubleImagesCheckbox.addEventListener("change",function(){
+    syncDoubleImageControls();
+    renderResults(lastResults);
+  });
+  syncDoubleImageControls();
 
   function openLightboxForImage(image){
-    lightboxItems=Array.from(gallery.querySelectorAll("img[data-face-image='true']"));
-    lightboxIndex=lightboxItems.indexOf(image);
+    const selectedCard=image.closest(".card");
+    if(!selectedCard)return;
+    // В двойном режиме в карточке два <img>, но это один результат поиска.
+    // Карусель хранит ровно одну позицию на карточку, чтобы оригиналы не дублировались.
+    lightboxItems=Array.from(gallery.querySelectorAll(".card")).map(function(card){
+      const cardImage=card.querySelector("img[data-face-image='true']");
+      if(!cardImage)return null;
+      const title=card.querySelector(".card-title");
+      return {
+        card:card,
+        faceId:cardImage.dataset.faceId,
+        alt:(title&&title.textContent)||cardImage.alt||"Увеличенное изображение"
+      };
+    }).filter(Boolean);
+    lightboxIndex=lightboxItems.findIndex(function(item){return item.card===selectedCard;});
     if(lightboxIndex<0)return;
     displayLightboxImage();
     lightbox.classList.add("open");
@@ -1471,8 +1574,9 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     if(lightboxIndex<0||lightboxIndex>=lightboxItems.length)return;
     const current=lightboxItems[lightboxIndex];
     lightboxImage.alt=current.alt||"Увеличенное изображение";
-    // В HTML-отчёте просмотр открывает оригинал, а не только локальную вырезку.
-    lightboxImage.src=faceImageUrl(current.dataset.faceId,false,true);
+    // Просмотр всегда показывает оригинал; двойные CROP/оригинал одной карточки
+    // не образуют две отдельные позиции в карусели.
+    lightboxImage.src=faceImageUrl(current.faceId,false,true);
     lightboxCounter.textContent=(lightboxIndex+1)+" / "+lightboxItems.length;
     const navigation=lightboxItems.length>1;
     lightboxPrevious.hidden=!navigation;
@@ -1516,9 +1620,16 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     cameraInput.disabled=value;
     cameraButton.disabled=value||cameraOpening;
     descriptionFilterInput.disabled=value;
+    identifyFacesButton.disabled=value||!queryId||!faces.length||identificationInProgress;
   }
   function useDataUrl(sourceDataUrl){
     dataUrl=String(sourceDataUrl||"");
+    previewZoom=1;
+    faceIdentificationRun++;
+    faceMatchResults=[];
+    identificationInProgress=false;
+    faceLinkOverlay.replaceChildren();
+    identifyFacesButton.textContent="Определить";
     imageObject=new Image();
     imageObject.onload=function(){
       queryId="";faces=[];selectedFace=-1;
@@ -1526,7 +1637,12 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       canvas.height=imageObject.naturalHeight;
       ctx.clearRect(0,0,canvas.width,canvas.height);
       ctx.drawImage(imageObject,0,0);
-      canvas.style.display="block";dropCopy.style.display="none";
+      canvas.style.display="block";
+      previewViewport.hidden=false;
+      previewControls.hidden=false;
+      dropzone.classList.add("preview-active");
+      dropCopy.style.display="none";
+      applyPreviewZoom(true);
       searchButton.disabled=true;
       gallery.replaceChildren();
       const empty=document.createElement("div");empty.className="empty";
@@ -1690,21 +1806,154 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     if(!imageObject)return;
     ctx.clearRect(0,0,canvas.width,canvas.height);
     ctx.drawImage(imageObject,0,0);
-    const scale=Math.max(1,canvas.width/450);
-    faces.forEach(function(face,index){
-      const b=face.bbox;
-      ctx.lineWidth=Math.max(2,2.5*scale);
+    previewStage.style.width=canvas.style.width||canvas.width+"px";
+    previewStage.style.height=canvas.style.height||canvas.height+"px";
+    faceLinkOverlay.replaceChildren();
+    // Рамки и метки задаются в экранных пикселях с учётом масштаба canvas.
+    const displayScale=Math.max(0.01,canvas.getBoundingClientRect().width/canvas.width||1);
+    const lineWidth=1.2/displayScale;
+    const selectedLineWidth=2/displayScale;
+    const fontSize=11/displayScale;
+    const padding=4/displayScale;
+    const labelHeight=17/displayScale;
+    const anchors=[];
+    const drawOrder=faces.map(function(face,index){return {face:face,index:index};})
+      .sort(function(a,b){return (a.index===selectedFace?1:0)-(b.index===selectedFace?1:0);});
+    drawOrder.forEach(function(entry){
+      const face=entry.face,index=entry.index,b=face.bbox;
+      ctx.lineWidth=index===selectedFace?selectedLineWidth:lineWidth;
       ctx.strokeStyle=index===selectedFace?"#4dffad":"#4d9cf5";
       ctx.strokeRect(b[0],b[1],b[2]-b[0],b[3]-b[1]);
-      const label="Лицо "+(index+1)+" · "+Math.round(face.confidence*100)+"%";
-      ctx.font=(14*scale)+"px sans-serif";
-      const padding=5*scale, labelHeight=22*scale, labelWidth=ctx.measureText(label).width+padding*2;
-      const y=Math.max(0,b[1]-labelHeight);
+    });
+    drawOrder.forEach(function(entry){
+      const face=entry.face,index=entry.index,b=face.bbox;
+      const match=faceMatchResults[index]||null;
+      const fullName=String(match&&match.name||"").trim();
+      const labelSource=fullName||"#"+(index+1);
+      ctx.font="600 "+fontSize+"px sans-serif";
+      const maxLabelWidth=Math.min(220/displayScale,Math.max(72/displayScale,(b[2]-b[0])+44/displayScale));
+      let label=labelSource;
+      while(label.length>4&&ctx.measureText(label).width+padding*2>maxLabelWidth){
+        label=label.slice(0,-2).trimEnd()+"…";
+      }
+      const labelWidth=Math.min(maxLabelWidth,ctx.measureText(label).width+padding*2);
+      const labelX=Math.max(0,Math.min(canvas.width-labelWidth,b[0]));
+      let labelY=b[1]-labelHeight-2/displayScale;
+      if(labelY<0)labelY=Math.min(canvas.height-labelHeight,b[3]+2/displayScale);
+      ctx.globalAlpha=index===selectedFace?0.84:0.58;
       ctx.fillStyle=index===selectedFace?"#147a4b":"#1763a5";
-      ctx.fillRect(b[0],y,labelWidth,labelHeight);
-      ctx.fillStyle="#ffffff";ctx.fillText(label,b[0]+padding,y+16*scale);
+      ctx.fillRect(labelX,labelY,labelWidth,labelHeight);
+      ctx.globalAlpha=1;
+      ctx.fillStyle="#ffffff";
+      ctx.fillText(label,labelX+padding,labelY+labelHeight*0.72);
+      const profileUrl=fullName&&match?safeLink(match.profileUrl):"";
+      if(profileUrl){
+        anchors.push({
+          url:profileUrl,
+          name:fullName,
+          score:match.similarity,
+          x:labelX*displayScale,
+          y:labelY*displayScale,
+          width:labelWidth*displayScale,
+          height:labelHeight*displayScale
+        });
+      }
+    });
+    anchors.forEach(function(item){
+      const link=document.createElement("a");
+      link.href=item.url;
+      link.target="_blank";
+      link.rel="noopener noreferrer";
+      link.title=item.name+(Number.isFinite(item.score)?" · сходство "+item.score.toFixed(2)+"%":"");
+      link.setAttribute("aria-label","Открыть профиль: "+item.name);
+      link.style.left=item.x+"px";
+      link.style.top=item.y+"px";
+      link.style.width=item.width+"px";
+      link.style.height=item.height+"px";
+      link.textContent=item.name;
+      faceLinkOverlay.appendChild(link);
     });
   }
+  function previewFitScale(){
+    if(!imageObject)return 1;
+    const width=Math.max(1,previewViewport.clientWidth-18);
+    const height=Math.max(1,previewViewport.clientHeight-18);
+    return Math.min(width/imageObject.naturalWidth,height/imageObject.naturalHeight,1);
+  }
+  function applyPreviewZoom(reset,anchorX,anchorY){
+    if(!imageObject)return;
+    if(reset)previewZoom=1;
+    const viewportRect=previewViewport.getBoundingClientRect();
+    const oldRect=canvas.getBoundingClientRect();
+    const clientX=Number.isFinite(anchorX)?anchorX:viewportRect.left+previewViewport.clientWidth/2;
+    const clientY=Number.isFinite(anchorY)?anchorY:viewportRect.top+previewViewport.clientHeight/2;
+    const ratioX=oldRect.width>0?Math.max(0,Math.min(1,(clientX-oldRect.left)/oldRect.width)):0.5;
+    const ratioY=oldRect.height>0?Math.max(0,Math.min(1,(clientY-oldRect.top)/oldRect.height)):0.5;
+    const fit=previewFitScale();
+    canvas.style.width=Math.max(1,Math.round(imageObject.naturalWidth*fit*previewZoom))+"px";
+    canvas.style.height=Math.max(1,Math.round(imageObject.naturalHeight*fit*previewZoom))+"px";
+    previewStage.style.width=canvas.style.width;
+    previewStage.style.height=canvas.style.height;
+    previewZoomValue.textContent=Math.round(previewZoom*100)+"%";
+    zoomOutButton.disabled=previewZoom<=0.25;
+    zoomInButton.disabled=previewZoom>=8;
+    if(reset){
+      previewViewport.scrollLeft=0;
+      previewViewport.scrollTop=0;
+      drawFaces();
+      return;
+    }
+    requestAnimationFrame(function(){
+      const nextRect=canvas.getBoundingClientRect();
+      previewViewport.scrollLeft+=nextRect.left+ratioX*nextRect.width-clientX;
+      previewViewport.scrollTop+=nextRect.top+ratioY*nextRect.height-clientY;
+      drawFaces();
+    });
+  }
+  function changePreviewZoom(direction,anchorX,anchorY){
+    previewZoom=Math.max(0.25,Math.min(8,previewZoom*(direction>0?1.25:1/1.25)));
+    applyPreviewZoom(false,anchorX,anchorY);
+  }
+  zoomInButton.addEventListener("click",function(){changePreviewZoom(1);});
+  zoomOutButton.addEventListener("click",function(){changePreviewZoom(-1);});
+  zoomFitButton.addEventListener("click",function(){applyPreviewZoom(true);});
+  function wheelDeltaPixels(event,axis){
+    let delta=axis==="x"?event.deltaX:event.deltaY;
+    if(event.deltaMode===1)delta*=16;
+    else if(event.deltaMode===2){
+      delta*=Math.max(100,axis==="x"?previewViewport.clientWidth:previewViewport.clientHeight);
+    }
+    return delta;
+  }
+  previewViewport.addEventListener("wheel",function(event){
+    if(!imageObject||previewViewport.hidden)return;
+    const deltaX=wheelDeltaPixels(event,"x");
+    const deltaY=wheelDeltaPixels(event,"y");
+    if(event.ctrlKey){
+      // Ctrl + колесо меняет масштаб с фокусом на участке под курсором.
+      event.preventDefault();
+      if(deltaY!==0)changePreviewZoom(deltaY<0?1:-1,event.clientX,event.clientY);
+      return;
+    }
+    if(event.shiftKey){
+      // Shift + колесо двигает увеличенное изображение вверх/вниз.
+      event.preventDefault();
+      previewViewport.scrollTop+=deltaY||deltaX;
+      return;
+    }
+    if(event.altKey){
+      // Alt + колесо двигает изображение влево/вправо.
+      event.preventDefault();
+      previewViewport.scrollLeft+=deltaX||deltaY;
+      return;
+    }
+    // Без модификаторов колесо прокручивает страницу, а не внутреннюю область изображения.
+    event.preventDefault();
+    window.scrollBy({top:deltaY,left:deltaX,behavior:"auto"});
+  },{passive:false});
+  window.addEventListener("resize",function(){
+    if(imageObject&&!previewViewport.hidden)applyPreviewZoom(false);
+  });
   canvas.addEventListener("click",function(event){
     if(!faces.length)return;
     const rect=canvas.getBoundingClientRect();
@@ -1733,6 +1982,11 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   }
   async function detectFaces(autoSearch){
     if(!dataUrl||busy)return;
+    faceIdentificationRun++;
+    faceMatchResults=[];
+    identificationInProgress=false;
+    faceLinkOverlay.replaceChildren();
+    identifyFacesButton.textContent="Определить";
     let detected=false;
     setBusy(true);setStatus("Определение лиц...");
     try{
@@ -1749,6 +2003,77 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     if(detected&&autoSearch)await searchSimilar();
   }
   detectButton.addEventListener("click",function(){detectFaces(false);});
+
+  async function identifyAllFaces(){
+    if(!queryId||!faces.length||busy||identificationInProgress)return;
+    const runId=++faceIdentificationRun;
+    const activeQueryId=queryId;
+    const faceCount=faces.length;
+    identificationInProgress=true;
+    faceMatchResults=Array(faceCount).fill(null);
+    identifyFacesButton.textContent="Определение…";
+    setBusy(true);
+    drawFaces();
+    setStatus("Ищу наиболее похожие профили для всех лиц: 0 / "+faceCount+"…");
+    let nextIndex=0,completed=0,failed=0;
+    async function worker(){
+      while(true){
+        const faceIndex=nextIndex++;
+        if(faceIndex>=faceCount)return;
+        try{
+          const response=await postJson("/api/search",{
+            query_id:activeQueryId,
+            face_index:faceIndex,
+            min_similarity:0,
+            top_k:1,
+            text_filter:""
+          });
+          const results=Array.isArray(response.results)?response.results:[];
+          let best=null;
+          results.forEach(function(item){
+            if(!best||Number(item.similarity||0)>Number(best.similarity||0))best=item;
+          });
+          if(best){
+            const profileName=String(best.profile_name||"").replace(/\s+/g," ").trim();
+            const profileUrl=safeLink(best.profile_url||"");
+            if(profileName){
+              faceMatchResults[faceIndex]={
+                name:profileName,
+                profileUrl:profileUrl,
+                similarity:Number(best.similarity)
+              };
+            }
+          }
+        }catch(error){
+          failed++;
+          console.warn("Не удалось определить профиль для лица "+(faceIndex+1)+":",error);
+        }
+        completed++;
+        if(runId!==faceIdentificationRun)return;
+        drawFaces();
+        setStatus("Поиск профилей: "+completed+" / "+faceCount+"…");
+      }
+    }
+    try{
+      // До трёх запросов одновременно: параллельный поиск, но оставляем один
+      // слот API-семафора свободным для обычных действий пользователя.
+      await Promise.all(Array.from({length:Math.min(3,faceCount)},worker));
+    }finally{
+      if(runId===faceIdentificationRun){
+        identificationInProgress=false;
+        identifyFacesButton.textContent="Определить";
+        setBusy(false);
+        drawFaces();
+        const identified=faceMatchResults.filter(function(item){return item&&item.name;}).length;
+        setStatus(
+          "Определение завершено: "+identified+" из "+faceCount+" лиц сопоставлено"+
+          (failed?"; ошибок запросов: "+failed:"")+".",
+          failed>0
+        );
+      }
+    }
+  }
+  identifyFacesButton.addEventListener("click",identifyAllFaces);
 
   function safeLink(value){
     if(!value)return "";
@@ -1915,7 +2240,21 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     });
     body.appendChild(box);
   }
+  function createDualImageCell(faceId,useCrop,labelText,altText){
+    const cell=document.createElement("div");cell.className="card-image-cell";
+    const view=document.createElement("div");view.className="card-image-view";
+    const image=document.createElement("img");image.loading="lazy";image.dataset.faceImage="true";
+    image.dataset.fixedCrop=String(Boolean(useCrop));image.alt=altText;
+    const placeholder=document.createElement("div");placeholder.className="no-image";
+    placeholder.textContent=useCrop?"Идёт создание миниатюры":"Нет изображения";placeholder.hidden=true;
+    const label=document.createElement("div");label.className="card-image-label";label.textContent=labelText;
+    view.append(image,placeholder,label);cell.append(view);
+    configureCardImage(image,faceId,useCrop,false);
+    return cell;
+  }
   function renderResults(results){
+    lastResults=Array.isArray(results)?results:[];
+    results=lastResults;
     gallery.replaceChildren();
     resultCount.textContent=results.length?"Совпадений: "+results.length:"Совпадений не найдено";
     if(!results.length){
@@ -1927,14 +2266,25 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       const imported=item.source_type==="import";
       const displayName=String(item.display_name||"");
       const card=document.createElement("article");card.className="card";
-      const imageBox=document.createElement("div");imageBox.className="card-image";
+      let imageBox;
       const rank=document.createElement("div");rank.className="rank";rank.textContent="#"+String(item.rank||"");
       const score=document.createElement("div");score.className="score";score.textContent=Number(item.similarity||0).toFixed(2)+"%";
-      const image=document.createElement("img");image.loading="lazy";image.dataset.faceImage="true";
-      image.alt=displayName||("Лицо ID "+faceId);
-      const placeholder=document.createElement("div");placeholder.className="no-image";placeholder.textContent="Нет изображения";placeholder.hidden=true;
-      imageBox.append(image,placeholder,rank,score);
-      configureCardImage(image,faceId,useCropCheckbox.checked,false);
+      if(doubleImagesCheckbox.checked){
+        imageBox=document.createElement("div");imageBox.className="card-images";
+        const alt=displayName||("Лицо ID "+faceId);
+        imageBox.append(
+          createDualImageCell(faceId,true,"CROP",alt+" — CROP"),
+          createDualImageCell(faceId,false,"Оригинал",alt+" — оригинал"),
+          rank,score
+        );
+      }else{
+        imageBox=document.createElement("div");imageBox.className="card-image";
+        const image=document.createElement("img");image.loading="lazy";image.dataset.faceImage="true";
+        image.alt=displayName||("Лицо ID "+faceId);
+        const placeholder=document.createElement("div");placeholder.className="no-image";placeholder.textContent="Нет изображения";placeholder.hidden=true;
+        imageBox.append(image,placeholder,rank,score);
+        configureCardImage(image,faceId,useCropCheckbox.checked,false);
+      }
       const body=document.createElement("div");body.className="card-body";
       const title=document.createElement("div");title.className="card-title";
       title.textContent="#"+faceId.padStart(8,"0");
@@ -2000,12 +2350,27 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       });
       renderResults(data.results||[]);
       setStatus("Поиск завершён. Найдено результатов: "+(data.results||[]).length+".");
+      requestAnimationFrame(function(){
+        const resultsSection=gallery.closest("section");
+        const resultsHeader=resultsSection&&resultsSection.querySelector(".section-title");
+        if(resultsHeader)resultsHeader.scrollIntoView({behavior:"smooth",block:"start"});
+      });
     }catch(error){setStatus(error.message||String(error),true);}
     finally{setBusy(false);}
   }
   searchButton.addEventListener("click",searchSimilar);
   descriptionFilterInput.addEventListener("keydown",function(event){
     if(event.key==="Enter"){event.preventDefault();searchSimilar();}
+  });
+  document.addEventListener("keydown",function(event){
+    if(event.key!=="Enter"||event.repeat||event.isComposing)return;
+    const target=event.target;
+    if(target===imageUrlInput||target===descriptionFilterInput)return;
+    if(target&&target.closest&&target.closest("button,a,textarea,select,[contenteditable='true']"))return;
+    if(target&&target.matches&&target.matches('input[type="file"],input[type="checkbox"],input[type="radio"]'))return;
+    if(!queryId||selectedFace<0||busy)return;
+    event.preventDefault();
+    searchSimilar();
   });
 })();
 </script>
@@ -2333,13 +2698,25 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             else:
                 display_name = ""
 
+            profile_first_name = str(result.get("first_name") or "").strip()
+            profile_last_name = str(result.get("last_name") or "").strip()
+            profile_name = " ".join(
+                part for part in (profile_first_name, profile_last_name) if part
+            ).strip()
+            if not profile_name:
+                profile_name = str(
+                    result.get("screen_name") or result.get("domain") or raw_meta.get("name") or ""
+                ).strip()
+            profile_url = str(result.get("profile_url") or "").strip()
+
             cards.append({
                 "rank": int(result.get("rank") or len(cards) + 1),
                 "face_id": face_id,
                 "filename": str(result.get("filename") or ""),
                 "similarity": round(float(result.get("score") or 0.0) * 100.0, 2),
                 "source_url": source_url,
-                "profile_url": str(result.get("profile_url") or ""),
+                "profile_name": profile_name,
+                "profile_url": profile_url,
                 "url_image": url_image,
                 "source_type": source_type,
                 "display_name": display_name,
@@ -2397,10 +2774,10 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
-        if CREATE_CROPS_ON_HTML and _original_image_available(source_url, url_image):
-            # Если первая попытка завершилась ошибкой, пробуем восстановить CROP повторно,
-            # но не чаще интервала cooldown для каждого лица.
-            _start_crop_repair([face_id])
+        if _original_image_available(source_url, url_image):
+            # В веб-интерфейсе CROP создаётся по запросу независимо от настройки GUI.
+            # Cooldown и список активных задач защищают от повторного запуска.
+            _start_crop_repair([face_id], force=True)
             self._json(200, {"state": "creating"})
             return
 
@@ -2443,20 +2820,23 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         crop_path = face_search._resolve_db_crop_path(
             stored_path, image_id=int(image_id)
         )
-        if use_crop and crop_path.is_file():
-            try:
-                body = crop_path.read_bytes()
-                content_type = mimetypes.guess_type(str(crop_path))[0] or "image/jpeg"
-                self._send(200, body, content_type)
+        if use_crop:
+            if crop_path.is_file():
+                try:
+                    body = crop_path.read_bytes()
+                    content_type = mimetypes.guess_type(str(crop_path))[0] or "image/jpeg"
+                    self._send(200, body, content_type)
+                    return
+                except OSError:
+                    pass
+            if _original_image_available(source_url, url_image):
+                # Просим браузер ждать готовности CROP; фоновая задача запускается
+                # даже при выключенной настройке create_crops_on_html в основной форме.
+                _start_crop_repair([face_id], force=True)
+                self._json(404, {"error": "CROP ещё формируется."})
                 return
-            except OSError:
-                pass
-        elif use_crop and CREATE_CROPS_ON_HTML:
-            # Браузерный скрипт будет повторять запрос, пока CROP формируется.
-            self._json(404, {"error": "CROP ещё формируется."})
-            return
 
-        # Если CROP не создавался/утерян, показываем сохранённый оригинал.
+        # Если CROP создать невозможно, показываем сохранённый оригинал.
         local_source = face_search._source_url_to_local_path(source_url)
         if local_source is not None and local_source.is_file():
             try:
