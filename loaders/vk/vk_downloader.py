@@ -2505,6 +2505,9 @@ def run_download_job(
         search_offset = 0
 
     EXISTING_PROFILE_IDS = load_existing_vk_profile_ids(importer)
+    # Не считаем профиль новым только потому, что в нём появились новые фото:
+    # при загрузке альбомов уже существующие профили также проходят импорт.
+    existing_profile_ids_at_start = set(EXISTING_PROFILE_IDS)
     if importer is not None:
         print(
             f"[DB-CHECK] Активный профиль FaceSearch: {importer.config['active_name']}; "
@@ -3114,7 +3117,10 @@ def run_download_job(
                                     restored_crops = _db_result_count("restored")
                                     created_records = _db_result_count("faces")
                                     db_faces_added_total += created_records
-                                    if new_records > 0:
+                                    if (
+                                        new_records > 0
+                                        and abs(downloaded_uid) not in existing_profile_ids_at_start
+                                    ):
                                         new_profile_ids.add(abs(downloaded_uid))
                                     detected_raw = import_result.get("detected_faces")
                                     try:
