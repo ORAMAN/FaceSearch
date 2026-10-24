@@ -1385,6 +1385,8 @@ def save_avatar_to_root(
 
     try:
         with requests.get(avatar_url, timeout=20, stream=True) as resp:
+            if resp.status_code == 404:
+                return False, "HTTP 404: фотография недоступна по URL; повтор этого URL не выполняется", "http_404"
             if resp.status_code != 200:
                 return False, f"HTTP {resp.status_code} при загрузке фотографии", "download_error"
             content_type = resp.headers.get("content-type", "").lower()
@@ -1719,6 +1721,8 @@ def process_entity(
             print(f"[AVATAR-OK] ID {display_id} | {name}: аватар скачан.")
         elif result_kind == "no_avatar":
             print(f"[NO-AVATAR] ID {display_id} | {name}: {reason}.")
+        elif result_kind == "http_404":
+            print(f"[AVATAR-404-SKIP] ID {display_id} | {name}: {reason}; ID не будет возвращён в начало обхода.")
         else:
             print(f"[AVATAR-ERROR] ID {display_id} | {name}: {reason}.")
     else:
@@ -1811,7 +1815,10 @@ def process_entity(
                             ))
                             if not ok or not image_path or not json_path:
                                 album_errors += 1
-                                print(f"[PHOTO-ERROR] ID {display_id}, фото {photo_id}, альбом «{title}»: {error or 'не удалось сохранить файл'}")
+                                if error and "HTTP 404" in str(error):
+                                    print(f"[PHOTO-404-SKIP] ID {display_id}, фото {photo_id}, альбом «{title}»: URL недоступен; фотография пропущена без повторных запросов.")
+                                else:
+                                    print(f"[PHOTO-ERROR] ID {display_id}, фото {photo_id}, альбом «{title}»: {error or 'не удалось сохранить файл'}")
                                 continue
                             photo_owner = photo.get("owner_id") or (-abs(uid) if is_group else abs(uid))
                             items.append({
@@ -1893,11 +1900,12 @@ def process_entity(
             "reason": avatar_reason or "Нет доступных фотографий", "base_dir": str(base_dir),
             "album_errors": album_errors,
         }
-    if avatar_result_kind == "download_error":
+    if avatar_result_kind in ("download_error", "http_404"):
         post_ui_event("status", f"VK ID {display_id}: ошибка загрузки аватара; фотографии альбомов не сохранены.")
         return {
             "status": "download_error", "uid": abs(uid), "name": name,
             "reason": avatar_reason or "Ошибка загрузки", "base_dir": str(base_dir),
+            "retryable": avatar_result_kind != "http_404",
             "album_errors": album_errors,
         }
     return {
@@ -3154,7 +3162,14 @@ def run_download_job(
                             if outcome_status == "download_error":
                                 download_errors_total += 1
                                 batch_errors += 1
-                                batch_retry_ids.add(int(uid))
+                                if outcome.get("retryable", True):
+                                    batch_retry_ids.add(int(uid))
+                                else:
+                                    print(
+                                        f"[DOWNLOAD-404-NO-RETRY] ID {uid} | "
+                                        f"{outcome.get('name', name_by_id.get(uid, ''))}: "
+                                        "постоянная ошибка HTTP 404; повторная обработка ID не планируется."
+                                    )
                                 continue
 
                             if outcome_status != "downloaded":
