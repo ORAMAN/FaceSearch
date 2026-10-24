@@ -3294,14 +3294,16 @@ def run_download_job(
                     if ready_item_stats_counter["count"] % 10 == 0:
                         publish_stats()
 
-                def consume_ready_items():
-                    """Обрабатывает очередь готовых файлов в потоке соединения FaceSearch."""
+                def consume_ready_items(max_items: int = 32):
+                    """Обрабатывает ограниченную порцию очереди, не блокируя планировщик загрузок."""
                     nonlocal batch_errors, import_errors_total
-                    while True:
+                    processed_count = 0
+                    while processed_count < max(1, int(max_items)):
                         try:
                             item_uid, item_name, item_is_group, file_item = ready_item_queue.get_nowait()
                         except queue.Empty:
                             break
+                        processed_count += 1
                         try:
                             process_ready_item(item_uid, item_name, item_is_group, file_item)
                         except Exception as exc:
