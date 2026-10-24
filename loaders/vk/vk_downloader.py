@@ -291,8 +291,17 @@ def build_entity_json(
     Базовые ключи url_source/name/url_image/info сохранены. Дополнительные поля
     photo и album необязательны и содержат идентификаторы/характеристики снимка.
     """
+    try:
+        entity_id = int(entity.get("id", 0))
+    except (TypeError, ValueError):
+        entity_id = 0
+    is_group = bool(
+        is_group
+        or entity.get("_facesearch_entity_type") == "group"
+        or entity_id < 0
+    )
     if is_group:
-        gid = abs(int(entity.get("id", 0)))
+        gid = abs(entity_id)
         url_source = f"https://vk.com/club{gid}"
         name = entity.get("name", "") or ""
         info = {}
@@ -1825,6 +1834,7 @@ def process_entity(
                                 image_url,
                                 album_title=title,
                                 album_id=album_id_value,
+                                is_group=is_group,
                                 photo=photo,
                                 album=album_data,
                                 source_kind="photo",
