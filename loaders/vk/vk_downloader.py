@@ -3120,7 +3120,13 @@ def run_download_job(
                     if worker_controller is None:
                         return
                     try:
-                        report = worker_controller.observe(adaptive_completed)
+                        completed_since_report = adaptive_completed > int(
+                            getattr(worker_controller, "last_completed", 0) or 0
+                        )
+                        report = worker_controller.observe(
+                            adaptive_completed,
+                            adapt=completed_since_report,
+                        )
                     except Exception as exc:
                         if not worker_telemetry_error_logged:
                             worker_telemetry_error_logged = True
