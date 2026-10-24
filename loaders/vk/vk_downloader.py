@@ -3296,12 +3296,24 @@ def run_download_job(
 
                 def consume_ready_items():
                     """Обрабатывает очередь готовых файлов в потоке соединения FaceSearch."""
+                    nonlocal batch_errors, import_errors_total
                     while True:
                         try:
                             item_uid, item_name, item_is_group, file_item = ready_item_queue.get_nowait()
                         except queue.Empty:
                             break
-                        process_ready_item(item_uid, item_name, item_is_group, file_item)
+                        try:
+                            process_ready_item(item_uid, item_name, item_is_group, file_item)
+                        except Exception as exc:
+                            batch_errors += 1
+                            batch_retry_ids.add(int(item_uid))
+                            import_errors_total += 1
+                            print(
+                                f"[DB-STREAM-ERROR] ID {item_uid} | {item_name}: "
+                                f"ошибка потокового импорта {type(exc).__name__}: {exc}. "
+                                "Файлы остаются на диске для повторной проверки."
+                            )
+                            publish_stats()
 
 
                 def submit_next_tasks():
@@ -3331,6 +3343,10 @@ def run_download_job(
                         )
                         pending[future] = uid
 
+                print(
+                    "[PIPELINE] Потоковый импорт включён: каждое изображение поступает в БД сразу "
+                    "после скачивания; ограниченная очередь регулирует скорость загрузки по скорости импорта."
+                )
                 submit_next_tasks()
                 while pending:
                     consume_ready_items()
