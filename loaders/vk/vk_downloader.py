@@ -1689,7 +1689,7 @@ def process_entity(
 
     album_photos_downloaded = 0
     album_errors = 0
-    if download_albums and not is_group and not STOP_REQUESTED.is_set():
+    if download_albums and not STOP_REQUESTED.is_set():
         try:
             limit = max(0, int(album_photo_limit or 0))
         except (TypeError, ValueError):
@@ -1713,7 +1713,8 @@ def process_entity(
         try:
             with requests.Session() as api_session:
                 try:
-                    albums = get_albums(abs(uid), api_session)
+                    owner_id = -abs(uid) if is_group else abs(uid)
+                    albums = get_albums(owner_id, api_session)
                 except Exception as exc:
                     album_errors += 1
                     albums = []
@@ -1746,7 +1747,7 @@ def process_entity(
                         if not isinstance(photo, dict):
                             continue
                         photo_id = photo.get("id")
-                        owner_id = photo.get("owner_id") or abs(uid)
+                        owner_id = photo.get("owner_id") or (-abs(uid) if is_group else abs(uid))
                         if photo_id is None:
                             continue
                         try:
@@ -1775,7 +1776,7 @@ def process_entity(
                                 album_errors += 1
                                 print(f"[PHOTO-ERROR] ID {display_id}, фото {photo_id}, альбом «{title}»: {error or 'не удалось сохранить файл'}")
                                 continue
-                            photo_owner = metadata.get("photo", {}).get("owner_id", abs(uid))
+                            photo_owner = photo.get("owner_id") or (-abs(uid) if is_group else abs(uid))
                             items.append({
                                 "image_path": Path(image_path),
                                 "json_path": Path(json_path),
@@ -1798,7 +1799,8 @@ def process_entity(
                         continue
                     title = _album_title(album_data)
                     try:
-                        photos = get_photos_by_album(abs(uid), current_album_id, api_session, limit=limit)
+                        owner_id = -abs(uid) if is_group else abs(uid)
+                        photos = get_photos_by_album(owner_id, current_album_id, api_session, limit=limit)
                     except Exception as exc:
                         album_errors += 1
                         print(f"[ALBUM-ERROR] ID {display_id}, альбом «{title}» ({current_album_id}): {type(exc).__name__}: {exc}")
@@ -1808,7 +1810,7 @@ def process_entity(
 
                 # Фото с отметками — отдельная лента photos.getUserPhotos, а не обычный
                 # альбом photos.getAlbums. «Все альбомы» включает её автоматически.
-                if download_tagged_photos and not STOP_REQUESTED.is_set():
+                if download_tagged_photos and not is_group and not STOP_REQUESTED.is_set():
                     try:
                         tagged_photos = get_user_photos(abs(uid), api_session, limit=limit)
                         print(f"[TAGGED-PHOTOS] ID {display_id}: фото с отметками получено {len(tagged_photos)}.")
@@ -1837,6 +1839,7 @@ def process_entity(
             "image_path": next((item["image_path"] for item in items if item["kind"] == "avatar"), items[0]["image_path"]),
             "json_path": next((item["json_path"] for item in items if item["kind"] == "avatar"), items[0]["json_path"]),
             "uid": abs(uid),
+            "is_group": bool(is_group),
             "name": name,
             "base_dir": str(base_dir),
             "avatar_result_kind": avatar_result_kind,
@@ -2380,11 +2383,16 @@ def parse_specific_identifiers(raw_value: str) -> list[str]:
     return values
 
 
-def collect_specific_user_ids(raw_value: str, friend_depth: int = 0) -> list[int]:
-    """Разрешает введённые ID/ссылки и собирает друзей до заданной глубины без дублей."""
+def collect_specific_entity_ids(raw_value: str, friend_depth: int = 0) -> list[int]:
+    """Разрешает конкретные ID/ссылки VK и собирает друзей только у пользователей.
+
+    Положительные ID обозначают пользователей, отрицательные — сообщества.
+    Поэтому оба типа можно передавать в общий конвейер загрузки, не смешивая
+    пользовательские методы API с методами для групп.
+    """
     identifiers = parse_specific_identifiers(raw_value)
     if not identifiers:
-        raise ValueError("Введите хотя бы один ID, ссылку на профиль или короткое имя VK.")
+        raise ValueError("Введите хотя бы один ID, ссылку на профиль/группу или короткое имя VK.")
     try:
         depth = max(0, int(friend_depth or 0))
     except (TypeError, ValueError):
@@ -2399,51 +2407,50 @@ def collect_specific_user_ids(raw_value: str, friend_depth: int = 0) -> list[int
         for identifier in identifiers:
             if STOP_REQUESTED.is_set():
                 break
-            if re.fullmatch(r"\d+", identifier):
-                user_id = int(identifier)
-                if user_id <= 0:
-                    print(f"[SPECIFIC-ID-SKIP] Пропущен некорректный ID пользователя: {identifier}")
-                    continue
-            elif re.fullmatch(r"-\d+", identifier):
-                print(f"[SPECIFIC-ID-SKIP] {identifier} — ID сообщества; этот режим принимает ID пользователей.")
+            try:
+                resolved = get_vk_entity(identifier)
+            except Exception as exc:
+                print(f"[SPECIFIC-ID-ERROR] Не удалось определить тип «{identifier}»: {type(exc).__name__}: {exc}")
                 continue
+
+            entity_type = str((resolved or {}).get("type") or "unknown").lower()
+            try:
+                entity_id = int((resolved or {}).get("id"))
+            except (TypeError, ValueError):
+                entity_id = 0
+
+            if entity_type == "user" and entity_id > 0:
+                signed_id = entity_id
+            elif entity_type == "group" and entity_id != 0:
+                signed_id = -abs(entity_id)
             else:
-                try:
-                    resolved = _vk_get_page(
-                        "utils.resolveScreenName", {"screen_name": identifier}, session, timeout=20
-                    )
-                except Exception as exc:
-                    print(f"[SPECIFIC-ID-ERROR] Не удалось разрешить «{identifier}»: {type(exc).__name__}: {exc}")
-                    continue
-                if not isinstance(resolved, dict) or not resolved.get("object_id"):
-                    print(f"[SPECIFIC-ID-NOT-FOUND] VK не разрешил имя/ссылку «{identifier}».")
-                    continue
-                if str(resolved.get("type", "")).lower() != "user":
-                    print(f"[SPECIFIC-ID-SKIP] «{identifier}» разрешён как {resolved.get('type')}; нужны личные профили пользователей.")
-                    continue
-                try:
-                    user_id = int(resolved["object_id"])
-                except (TypeError, ValueError):
-                    print(f"[SPECIFIC-ID-SKIP] VK вернул некорректный ID для «{identifier}».")
-                    continue
-                if user_id <= 0:
-                    continue
-            if user_id not in root_seen:
-                roots.append(user_id)
-                root_seen.add(user_id)
+                print(f"[SPECIFIC-ID-NOT-FOUND] VK не разрешил пользователя или группу «{identifier}».")
+                continue
+
+            if signed_id not in root_seen:
+                roots.append(signed_id)
+                root_seen.add(signed_id)
+                label = "группа" if signed_id < 0 else "пользователь"
+                resolved_name = str((resolved or {}).get("name") or "").strip()
+                print(
+                    f"[SPECIFIC-ID-RESOLVED] {identifier} → {label} "
+                    f"{abs(signed_id)}{f' ({resolved_name})' if resolved_name else ''}."
+                )
 
         if not roots and not STOP_REQUESTED.is_set():
-            raise ValueError("VK не разрешил ни одного введённого ID/профиля пользователя.")
+            raise ValueError("VK не разрешил ни одного введённого ID/профиля/группы.")
 
         collected = list(roots)
         visited = set(roots)
-        frontier = list(roots)
+        # Группы остаются в итоговом списке, но friends.get вызывается только
+        # для положительных ID пользователей.
+        frontier = [entity_id for entity_id in roots if entity_id > 0]
         for level in range(depth):
             if STOP_REQUESTED.is_set() or not frontier:
                 break
             next_frontier = []
-            print(f"[FRIENDS] Уровень {level + 1}/{depth}: поиск друзей у {len(frontier)} профилей.")
-            post_ui_event("status", f"Получение друзей: уровень {level + 1}/{depth}; профилей: {len(frontier)}…")
+            print(f"[FRIENDS] Уровень {level + 1}/{depth}: поиск друзей у {len(frontier)} пользователей.")
+            post_ui_event("status", f"Получение друзей: уровень {level + 1}/{depth}; пользователей: {len(frontier)}…")
             for index, uid in enumerate(frontier, start=1):
                 if STOP_REQUESTED.is_set():
                     break
@@ -2466,11 +2473,18 @@ def collect_specific_user_ids(raw_value: str, friend_depth: int = 0) -> list[int
                         next_frontier.append(friend_id)
                         added += 1
                 print(f"[FRIENDS] {index}/{len(frontier)}: ID {uid}; друзей доступно {len(friends)}, новых {added}.")
-            print(f"[FRIENDS] Уровень {level + 1}: добавлено {len(next_frontier)} уникальных профилей.")
+            print(f"[FRIENDS] Уровень {level + 1}: добавлено {len(next_frontier)} уникальных пользователей.")
             frontier = next_frontier
 
-    print(f"[SPECIFIC-ID] Введено корневых профилей: {len(roots)}; всего ID с учётом глубины {depth}: {len(collected)}.")
+    user_roots = sum(1 for entity_id in roots if entity_id > 0)
+    group_roots = sum(1 for entity_id in roots if entity_id < 0)
+    print(
+        f"[SPECIFIC-ID] Корневых сущностей: {len(roots)} "
+        f"(пользователей: {user_roots}, групп: {group_roots}); "
+        f"всего ID с учётом глубины друзей {depth}: {len(collected)}."
+    )
     return collected
+
 
 
 def run_download_job(
@@ -2609,17 +2623,17 @@ def run_download_job(
     # Самый ранний ID, который в этой сессии не был обработан успешно.
     # Нужен, чтобы ошибки предыдущих пачек не терялись при дальнейшем сканировании.
     earliest_retry_id: int | None = None
-    specific_user_ids = []
+    specific_entity_ids = []
     specific_cursor = 0
     search_total = 0
     search_accessible_total = 0
     if specific_mode:
-        specific_user_ids = collect_specific_user_ids(specific_ids, friend_depth=friend_depth)
-        if not specific_user_ids and not STOP_REQUESTED.is_set():
+        specific_entity_ids = collect_specific_entity_ids(specific_ids, friend_depth=friend_depth)
+        if not specific_entity_ids and not STOP_REQUESTED.is_set():
             raise ValueError("Не удалось получить ID для обработки.")
         print(
             f"[SOURCE] Режим конкретных ID; глубина друзей: {max(0, int(friend_depth or 0))}; "
-            f"профилей к обработке: {len(specific_user_ids)}."
+            f"пользователей и групп к обработке: {len(specific_entity_ids)}."
         )
 
     checked_total = 0
@@ -2689,7 +2703,7 @@ def run_download_job(
 
     print(f"🖼️ VK Downloader — каталог: {output_root}")
     if specific_mode:
-        print(f"▶ Источник ID: конкретный список; глубина друзей: {max(0, int(friend_depth or 0))}; потоков: {worker_count}.")
+        print(f"▶ Источник ID: конкретный список пользователей и групп; глубина друзей: {max(0, int(friend_depth or 0))}; потоков: {worker_count}.")
     elif search_mode:
         print(
             f"▶ Источник ID: поиск VK users.search; смещение: {search_offset}; "
@@ -2767,12 +2781,12 @@ def run_download_job(
             while not STOP_REQUESTED.is_set():
                 search_users_batch = {}
                 if specific_mode:
-                    if specific_cursor >= len(specific_user_ids):
+                    if specific_cursor >= len(specific_entity_ids):
                         break
-                    batch_ids = specific_user_ids[specific_cursor:specific_cursor + USER_BATCH_SIZE]
+                    batch_ids = specific_entity_ids[specific_cursor:specific_cursor + USER_BATCH_SIZE]
                     batch_start = specific_cursor + 1
                     batch_end = batch_start + len(batch_ids)
-                    batch_label = f"конкретные ID {batch_start}–{batch_end - 1} из {len(specific_user_ids)}"
+                    batch_label = f"конкретные ID {batch_start}–{batch_end - 1} из {len(specific_entity_ids)}"
                 elif search_mode:
                     if search_offset >= search_accessible_total:
                         break
@@ -2874,7 +2888,41 @@ def run_download_job(
                 returned_users = []
                 if request_ids:
                     try:
-                        if search_mode:
+                        if specific_mode:
+                            # Разделяем типы до запросов: users.get вызывается только
+                            # для людей, а groups.getById — только для сообществ.
+                            specific_person_ids = [int(uid) for uid in request_ids if int(uid) > 0]
+                            specific_group_ids = [int(uid) for uid in request_ids if int(uid) < 0]
+                            if specific_person_ids:
+                                request_preview = ", ".join(map(str, specific_person_ids[:20]))
+                                if len(specific_person_ids) > 20:
+                                    request_preview += f", … (+{len(specific_person_ids) - 20} ID)"
+                                print(
+                                    f"[VK-REQUEST] users.get: {len(specific_person_ids)} ID пользователей; "
+                                    f"список: {request_preview}"
+                                )
+                                returned_users.extend(get_user_info(specific_person_ids, session))
+
+                            for group_signed_id in specific_group_ids:
+                                if STOP_REQUESTED.is_set():
+                                    break
+                                try:
+                                    group = get_group_info(abs(group_signed_id), session)
+                                    group_id = int(group.get("id"))
+                                    group["id"] = -abs(group_id)
+                                    group["_facesearch_entity_type"] = "group"
+                                    returned_users.append(group)
+                                    print(
+                                        f"[VK-REQUEST] groups.getById: получена группа "
+                                        f"{abs(group_signed_id)} | {group.get('name') or group.get('screen_name') or ''}."
+                                    )
+                                except Exception as exc:
+                                    api_errors_total += 1
+                                    print(
+                                        f"[SPECIFIC-GROUP-ERROR] ID {abs(group_signed_id)}: "
+                                        f"{type(exc).__name__}: {exc}"
+                                    )
+                        elif search_mode:
                             # users.search уже вернул расширенные поля; повторный users.get не нужен.
                             returned_users = [
                                 search_users_batch[uid]
@@ -2906,7 +2954,7 @@ def run_download_job(
                             )
                         print(
                             f"[VK-API-ERROR] Пакет {batch_label}: "
-                            f"users.get завершился ошибкой: {type(exc).__name__}: {exc}. "
+                            f"запрос к VK API завершился ошибкой: {type(exc).__name__}: {exc}. "
                             f"Пакет не будет пропущен; повторите задание."
                         )
                         post_ui_event(
@@ -2935,7 +2983,7 @@ def run_download_job(
                 profiles_completed_total += missing_count
                 if missing_ids:
                     print(
-                        f"[VK-NOT-FOUND] Профиль не возвращён users.get для {missing_count} ID "
+                        f"[VK-NOT-FOUND] Объект не возвращён VK API для {missing_count} ID "
                         f"(профиль может быть удалён, недоступен или не существовать): "
                         f"{_format_id_list(missing_ids)}"
                     )
@@ -2952,11 +3000,14 @@ def run_download_job(
                     user = users_by_id.get(uid)
                     if user is None:
                         continue
-                    display_name = (
-                        f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
-                        or user.get("screen_name")
-                        or f"user_{uid}"
-                    )
+                    if uid < 0 or user.get("_facesearch_entity_type") == "group":
+                        display_name = str(user.get("name") or user.get("screen_name") or f"group_{abs(uid)}").strip()
+                    else:
+                        display_name = (
+                            f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+                            or user.get("screen_name")
+                            or f"user_{uid}"
+                        )
                     if user.get("deactivated"):
                         deactivated_total += 1
                         profiles_completed_total += 1
@@ -2966,7 +3017,7 @@ def run_download_job(
                         )
                         continue
 
-                    folder_name = sanitize_filename(f"{display_name} ({uid})")
+                    folder_name = sanitize_filename(f"{display_name} ({abs(uid)})")
                     base_dir = str(output_root / folder_name)
                     # Не создаём папку заранее: при отсутствии аватарки или ошибке сети
                     # не останется пустого каталога.
@@ -2995,7 +3046,7 @@ def run_download_job(
                             process_entity,
                             user,
                             base_dir,
-                            False,
+                            uid < 0 or user.get("_facesearch_entity_type") == "group",
                             worker_count,
                             None,   # соединение FaceSearch не передаётся в worker-потоки
                             False,
@@ -3278,7 +3329,7 @@ def run_download_job(
                                     )
 
                             if imported_for_user or saved_for_user:
-                                log_user_processed(downloaded_name, str(downloaded_uid), False)
+                                log_user_processed(downloaded_name, str(downloaded_uid), bool(outcome.get("is_group")))
 
                         except Exception as exc:
                             batch_errors += 1
