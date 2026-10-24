@@ -1676,8 +1676,9 @@ def process_entity(
     download_albums: bool = False, all_albums: bool = False, album_photo_limit: int = 0,
     selected_system_albums: list[int] | tuple[int, ...] | set[int] | None = None,
     download_tagged_photos: bool = False,
+    download_item_queue: queue.Queue | None = None,
 ):
-    """Скачивает аватар и выбранные системные/пользовательские альбомы; возвращает пары файлов."""
+    """Скачивает медиа; готовые файлы можно сразу передавать в очередь импорта."""
     raw_id = entity.get("id")
     if is_group:
         uid = -abs(int(raw_id))
@@ -1718,7 +1719,9 @@ def process_entity(
                 "source_key": f"vk:{'group' if is_group else 'user'}:{abs(uid)}:avatar",
                 "kind": "avatar",
             })
-            print(f"[AVATAR-OK] ID {display_id} | {name}: аватар скачан.")
+            if download_item_queue is not None:
+                download_item_queue.put((abs(uid), name, bool(is_group), dict(items[-1])))
+            print(f"[AVATAR-OK] ID {display_id} | {name}: аватар скачан; передан в очередь импорта.")
         elif result_kind == "no_avatar":
             print(f"[NO-AVATAR] ID {display_id} | {name}: {reason}.")
         elif result_kind == "http_404":
@@ -1827,6 +1830,8 @@ def process_entity(
                                 "source_key": f"vk:{'group' if is_group else 'user'}:{abs(uid)}:photo:{photo_owner}_{photo_id}",
                                 "kind": "photo",
                             })
+                            if download_item_queue is not None:
+                                download_item_queue.put((abs(uid), name, bool(is_group), dict(items[-1])))
                             album_photos_downloaded += 1
                         except Exception as exc:
                             album_errors += 1
@@ -3078,6 +3083,214 @@ def run_download_job(
                 batch_retry_ids = set()
                 batch_finished = 0
 
+                ready_item_queue = queue.Queue()
+                processed_stream_paths = set()
+
+                def _download_item_key(file_item):
+                    raw_path = file_item.get("image_path")
+                    try:
+                        return str(Path(raw_path).resolve())
+                    except (OSError, RuntimeError, TypeError, ValueError):
+                        return str(raw_path)
+
+                def process_ready_item(downloaded_uid, downloaded_name, is_group, file_item):
+                    """Импортирует одну уже скачанную пару, не дожидаясь остальных фото ID."""
+                    nonlocal batch_errors, imported_total, import_errors_total
+                    nonlocal db_faces_added_total, db_removed_records_total, db_restored_crops_total
+                    nonlocal db_new_records_total, db_updated_records_total, db_unclassified_total
+                    nonlocal db_skipped_existing_total, db_no_faces_total, db_skipped_duplicate_total
+                    nonlocal deleted_source_files_total, cleanup_errors_total, downloaded_without_import_total
+
+                    image_path = Path(file_item["image_path"])
+                    json_path = Path(file_item["json_path"])
+                    source_key = str(
+                        file_item.get("source_key")
+                        or f"vk:{'group' if is_group else 'user'}:{downloaded_uid}:avatar"
+                    )
+                    media_kind = str(file_item.get("kind") or "photo")
+
+                    if importer is not None and import_to_database:
+                        try:
+                            import_result = importer.import_image(
+                                image_path,
+                                json_path,
+                                source_key=source_key,
+                            )
+                            if not isinstance(import_result, dict):
+                                raise RuntimeError(
+                                    f"импортёр вернул неожиданный результат: {type(import_result).__name__}"
+                                )
+                        except Exception as exc:
+                            batch_errors += 1
+                            batch_retry_ids.add(int(downloaded_uid))
+                            import_errors_total += 1
+                            print(
+                                f"[DB-ERROR] ID {downloaded_uid} | {downloaded_name} | {image_path.name}: "
+                                f"файл скачан, но импорт в FaceSearch завершился ошибкой "
+                                f"{type(exc).__name__}: {exc}. Файлы оставлены для повторного импорта: {image_path.parent}"
+                            )
+                            publish_stats()
+                            return
+
+                        imported_total += 1
+                        with EXISTING_PROFILE_IDS_LOCK:
+                            if not is_group:
+                                # Кэш содержит только пользователей, не сообщества.
+                                EXISTING_PROFILE_IDS.add(abs(downloaded_uid))
+
+                        def _db_result_count(key):
+                            try:
+                                return max(0, int(import_result.get(key) or 0))
+                            except (TypeError, ValueError):
+                                return 0
+
+                        new_records = _db_result_count("added")
+                        updated_records = _db_result_count("updated")
+                        removed_records = _db_result_count("removed")
+                        restored_crops = _db_result_count("restored")
+                        created_records = _db_result_count("faces")
+                        db_faces_added_total += created_records
+                        if new_records > 0 and (is_group or abs(downloaded_uid) not in existing_profile_ids_at_start):
+                            new_profile_ids.add(-abs(downloaded_uid) if is_group else abs(downloaded_uid))
+                        detected_raw = import_result.get("detected_faces")
+                        try:
+                            detected_faces = None if detected_raw is None else max(0, int(detected_raw))
+                        except (TypeError, ValueError):
+                            detected_faces = None
+                        result_message = str(import_result.get("message") or "").strip()
+                        normalized_message = result_message.casefold()
+                        known_existing_source = (
+                            "исходное изображение уже есть в бд" in normalized_message
+                            or "исправлена привязка локальных crop" in normalized_message
+                        )
+                        db_removed_records_total += removed_records
+                        db_restored_crops_total += restored_crops
+                        should_cleanup_source = False
+                        detected_label = (
+                            "не запускалось/не сообщено" if detected_faces is None else str(detected_faces)
+                        )
+                        detail = (
+                            f"обнаружено лиц: {detected_label}; "
+                            f"новых записей: {new_records}; обновлено записей: {updated_records}; "
+                            f"удалено устаревших записей: {removed_records}; "
+                            f"восстановлено CROP: {restored_crops}; источник: {source_key}"
+                        )
+                        if result_message:
+                            detail += f"; результат импортёра: {result_message}"
+
+                        if new_records or updated_records:
+                            db_new_records_total += new_records
+                            db_updated_records_total += updated_records
+                            should_cleanup_source = True
+                            if new_records and updated_records:
+                                tag = "DB-CHANGED"
+                            elif new_records:
+                                tag = "DB-NEW"
+                            else:
+                                tag = "DB-UPDATED"
+                            print(f"[{tag}] ID {downloaded_uid} | {downloaded_name} | {media_kind}: {detail}.")
+                        elif created_records > 0:
+                            db_unclassified_total += 1
+                            should_cleanup_source = True
+                            print(
+                                f"[DB-RESULT-WARN] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
+                                f"импортёр сообщил {created_records} обработанных записей, но не заполнил "
+                                f"added/updated; {detail}."
+                            )
+                        elif restored_crops > 0:
+                            db_skipped_existing_total += 1
+                            should_cleanup_source = True
+                            print(
+                                f"[DB-UPDATED] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
+                                f"новых/обновлённых строк БД нет, восстановлены CROP; {detail}."
+                            )
+                        elif known_existing_source:
+                            db_skipped_existing_total += 1
+                            should_cleanup_source = True
+                            print(
+                                f"[DB-SKIP-EXISTING] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
+                                f"источник уже представлен в БД, повторное распознавание пропущено; {detail}."
+                            )
+                        elif detected_faces == 0:
+                            db_no_faces_total += 1
+                            should_cleanup_source = True
+                            print(
+                                f"[DB-NO-FACE] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
+                                f"детектор не обнаружил лиц; новые/обновлённые записи не созданы; "
+                                f"при включённой очистке исходники будут удалены; {detail}."
+                            )
+                        elif detected_faces is not None and detected_faces > 0:
+                            db_skipped_duplicate_total += 1
+                            should_cleanup_source = True
+                            print(
+                                f"[DB-SKIP-DUPLICATE] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
+                                f"лицо обнаружено, но новые/обновлённые записи не нужны (вероятный дубликат CROP); "
+                                f"{detail}."
+                            )
+                        else:
+                            db_unclassified_total += 1
+                            print(
+                                f"[DB-SKIP-UNKNOWN] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
+                                f"импортёр не подтвердил запись или пропуск в БД; исходники сохранены: "
+                                f"{image_path.parent}; {detail}."
+                            )
+
+                        # Удаляем исходники только после того, как импортёр подтвердил
+                        # обработку в БД, ровно как и в прежней схеме.
+                        if delete_processed_files and should_cleanup_source:
+                            try:
+                                if json_path.exists():
+                                    json_path.unlink()
+                                    deleted_source_files_total += 1
+                                if image_path.exists():
+                                    image_path.unlink()
+                                    deleted_source_files_total += 1
+                                _remove_empty_directories_upwards(image_path.parent, output_root)
+                                print(
+                                    f"[CLEANUP] ID {downloaded_uid}: удалены локальные файлы "
+                                    f"{image_path.name} и JSON после успешного результата обработки."
+                                )
+                            except Exception as exc:
+                                cleanup_errors_total += 1
+                                batch_retry_ids.add(int(downloaded_uid))
+                                print(
+                                    f"[CLEANUP-ERROR] ID {downloaded_uid}: импорт завершился, "
+                                    f"но не удалось удалить {image_path.name} и/или JSON: {exc}"
+                                )
+                        elif delete_processed_files:
+                            print(
+                                f"[CLEANUP-SKIP] ID {downloaded_uid}: пара {image_path.name} не удалена, "
+                                "поскольку результат импортёра не подтвердил успешную обработку."
+                            )
+
+                        # Функция защищает лог от дублей, поэтому её безопасно вызывать
+                        # при обработке каждого отдельного файла.
+                        log_user_processed(downloaded_name, str(downloaded_uid), bool(is_group))
+                    else:
+                        downloaded_without_import_total += 1
+                        print(
+                            f"[SAVED-NO-IMPORT] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
+                            f"файл сохранён на диск, импорт выключен: {image_path}"
+                        )
+                        log_user_processed(downloaded_name, str(downloaded_uid), bool(is_group))
+
+                    publish_stats()
+
+                def consume_ready_items():
+                    """Обрабатывает очередь готовых файлов в потоке соединения FaceSearch."""
+                    while True:
+                        try:
+                            item_uid, item_name, item_is_group, file_item = ready_item_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        item_key = _download_item_key(file_item)
+                        if item_key in processed_stream_paths:
+                            continue
+                        # Помечаем перед импортом: при исключении файл не должен обрабатываться
+                        # повторно из списка outcome["items"] в конце загрузки этого ID.
+                        processed_stream_paths.add(item_key)
+                        process_ready_item(item_uid, item_name, item_is_group, file_item)
+
                 def submit_next_tasks():
                     nonlocal next_task_index
                     while (
@@ -3101,12 +3314,17 @@ def run_download_job(
                             album_photo_limit,
                             selected_system_albums,
                             download_tagged_photos,
+                            ready_item_queue,
                         )
                         pending[future] = uid
 
                 submit_next_tasks()
                 while pending:
-                    completed_futures, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    consume_ready_items()
+                    completed_futures, _ = wait(
+                        pending, timeout=0.15, return_when=FIRST_COMPLETED
+                    )
+                    consume_ready_items()
                     for future in completed_futures:
                         uid = pending.pop(future)
 
@@ -3190,201 +3408,17 @@ def run_download_job(
                                     "kind": "avatar",
                                 }]
 
-                            imported_for_user = 0
-                            saved_for_user = 0
                             for file_item in file_items:
-                                image_path = Path(file_item["image_path"])
-                                json_path = Path(file_item["json_path"])
-                                source_key = str(file_item.get("source_key") or f"vk:{'group' if outcome.get('is_group') else 'user'}:{downloaded_uid}:avatar")
-                                media_kind = str(file_item.get("kind") or "photo")
-
-                                if importer is not None and import_to_database:
-                                    try:
-                                        import_result = importer.import_image(
-                                            image_path,
-                                            json_path,
-                                            source_key=source_key,
-                                        )
-                                        if not isinstance(import_result, dict):
-                                            raise RuntimeError(
-                                                f"импортёр вернул неожиданный результат: {type(import_result).__name__}"
-                                            )
-                                    except Exception as exc:
-                                        batch_errors += 1
-                                        batch_retry_ids.add(int(downloaded_uid))
-                                        import_errors_total += 1
-                                        print(
-                                            f"[DB-ERROR] ID {downloaded_uid} | {downloaded_name} | {image_path.name}: "
-                                            f"файл скачан, но импорт в FaceSearch завершился ошибкой "
-                                            f"{type(exc).__name__}: {exc}. Файлы оставлены для повторного импорта: {image_path.parent}"
-                                        )
-                                        continue
-
-                                    imported_for_user += 1
-                                    imported_total += 1
-                                    with EXISTING_PROFILE_IDS_LOCK:
-                                        if not outcome.get("is_group"):
-                                            # Этот кэш содержит только ID пользователей; ID группы
-                                            # не должен случайно пропустить одноимённый числовой ID человека.
-                                            EXISTING_PROFILE_IDS.add(abs(downloaded_uid))
-
-                                    def _db_result_count(key):
-                                        try:
-                                            return max(0, int(import_result.get(key) or 0))
-                                        except (TypeError, ValueError):
-                                            return 0
-
-                                    new_records = _db_result_count("added")
-                                    updated_records = _db_result_count("updated")
-                                    removed_records = _db_result_count("removed")
-                                    restored_crops = _db_result_count("restored")
-                                    created_records = _db_result_count("faces")
-                                    db_faces_added_total += created_records
-                                    if (
-                                        new_records > 0
-                                        and abs(downloaded_uid) not in existing_profile_ids_at_start
-                                    ):
-                                        new_profile_ids.add(-abs(downloaded_uid) if outcome.get("is_group") else abs(downloaded_uid))
-                                    detected_raw = import_result.get("detected_faces")
-                                    try:
-                                        detected_faces = (
-                                            None if detected_raw is None
-                                            else max(0, int(detected_raw))
-                                        )
-                                    except (TypeError, ValueError):
-                                        detected_faces = None
-                                    result_message = str(import_result.get("message") or "").strip()
-                                    normalized_message = result_message.casefold()
-                                    known_existing_source = (
-                                        "исходное изображение уже есть в бд" in normalized_message
-                                        or "исправлена привязка локальных crop" in normalized_message
-                                    )
-                                    db_removed_records_total += removed_records
-                                    db_restored_crops_total += restored_crops
-                                    should_cleanup_source = False
-                                    detected_label = (
-                                        "не запускалось/не сообщено"
-                                        if detected_faces is None else str(detected_faces)
-                                    )
-                                    detail = (
-                                        f"обнаружено лиц: {detected_label}; "
-                                        f"новых записей: {new_records}; обновлено записей: {updated_records}; "
-                                        f"удалено устаревших записей: {removed_records}; "
-                                        f"восстановлено CROP: {restored_crops}; "
-                                        f"источник: {source_key}"
-                                    )
-                                    if result_message:
-                                        detail += f"; результат импортёра: {result_message}"
-
-                                    if new_records or updated_records:
-                                        db_new_records_total += new_records
-                                        db_updated_records_total += updated_records
-                                        should_cleanup_source = True
-                                        if new_records and updated_records:
-                                            tag = "DB-CHANGED"
-                                        elif new_records:
-                                            tag = "DB-NEW"
-                                        else:
-                                            tag = "DB-UPDATED"
-                                        print(
-                                            f"[{tag}] ID {downloaded_uid} | {downloaded_name} | {media_kind}: {detail}."
-                                        )
-                                    elif created_records > 0:
-                                        # Защита от изменения контракта импортёра: поле faces
-                                        # обычно равно added + updated, но если нет, результат
-                                        # нужно явно показать, а не называть пропуском.
-                                        db_unclassified_total += 1
-                                        should_cleanup_source = True
-                                        print(
-                                            f"[DB-RESULT-WARN] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
-                                            f"импортёр сообщил {created_records} обработанных записей, но не заполнил "
-                                            f"added/updated; {detail}."
-                                        )
-                                    elif restored_crops > 0:
-                                        db_skipped_existing_total += 1
-                                        should_cleanup_source = True
-                                        print(
-                                            f"[DB-UPDATED] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
-                                            f"новых/обновлённых строк БД нет, восстановлены CROP; {detail}."
-                                        )
-                                    elif known_existing_source:
-                                        db_skipped_existing_total += 1
-                                        should_cleanup_source = True
-                                        print(
-                                            f"[DB-SKIP-EXISTING] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
-                                            f"источник уже представлен в БД, повторное распознавание пропущено; {detail}."
-                                        )
-                                    elif detected_faces == 0:
-                                        db_no_faces_total += 1
-                                        # Ноль лиц — штатный завершённый результат, а не ошибка.
-                                        # При включённом удалении не сохраняем заведомо бесполезную пару.
-                                        should_cleanup_source = True
-                                        print(
-                                            f"[DB-NO-FACE] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
-                                            f"детектор не обнаружил лиц; новые/обновлённые записи не созданы; "
-                                            f"при включённой очистке исходники будут удалены; {detail}."
-                                        )
-                                    elif detected_faces is not None and detected_faces > 0:
-                                        # Импортёр успешно обработал изображение и обнаружил лицо,
-                                        # но запись уже представлена другим CROP. Считаем такой
-                                        # результат обработанным: при включённой очистке исходник
-                                        # можно удалить так же, как при совпадении source_key.
-                                        db_skipped_duplicate_total += 1
-                                        should_cleanup_source = True
-                                        print(
-                                            f"[DB-SKIP-DUPLICATE] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
-                                            f"лицо обнаружено, но новые/обновлённые записи не нужны (вероятный дубликат CROP); "
-                                            f"{detail}."
-                                        )
-                                    else:
-                                        db_unclassified_total += 1
-                                        print(
-                                            f"[DB-SKIP-UNKNOWN] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
-                                            f"импортёр не подтвердил запись или пропуск в БД; исходники сохранены: "
-                                            f"{image_path.parent}; {detail}."
-                                        )
-
-                                    # Локальное изображение нужно для распознавания и текущего импорта.
-                                    # После подтверждённого результата БД его можно удалять независимо
-                                    # от create_crop_files: дальнейшее восстановление CROP использует URL
-                                    # источника/метаданные FaceSearch, а не временный файл загрузчика.
-                                    if delete_processed_files and should_cleanup_source:
-                                        try:
-                                            # Сначала удаляем JSON: если удаление метаданных не удастся,
-                                            # изображение останется для повторного импорта/проверки.
-                                            if json_path.exists():
-                                                json_path.unlink()
-                                                deleted_source_files_total += 1
-                                            if image_path.exists():
-                                                image_path.unlink()
-                                                deleted_source_files_total += 1
-                                            _remove_empty_directories_upwards(image_path.parent, output_root)
-                                            print(
-                                                f"[CLEANUP] ID {downloaded_uid}: удалены локальные файлы "
-                                                f"{image_path.name} и JSON после успешного результата обработки."
-                                            )
-                                        except Exception as exc:
-                                            cleanup_errors_total += 1
-                                            batch_retry_ids.add(int(downloaded_uid))
-                                            print(
-                                                f"[CLEANUP-ERROR] ID {downloaded_uid}: импорт завершился, "
-                                                f"но не удалось удалить {image_path.name} и/или JSON: {exc}"
-                                            )
-                                    elif delete_processed_files:
-                                        print(
-                                            f"[CLEANUP-SKIP] ID {downloaded_uid}: пара {image_path.name} не удалена, "
-                                            "поскольку результат импортёра не подтвердил успешную обработку."
-                                        )
-                                else:
-                                    saved_for_user += 1
-                                    downloaded_without_import_total += 1
-                                    print(
-                                        f"[SAVED-NO-IMPORT] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
-                                        f"файл сохранён на диск, импорт выключен: {image_path}"
-                                    )
-
-                            if imported_for_user or saved_for_user:
-                                log_user_processed(downloaded_name, str(downloaded_uid), bool(outcome.get("is_group")))
+                                item_key = _download_item_key(file_item)
+                                if item_key in processed_stream_paths:
+                                    continue
+                                processed_stream_paths.add(item_key)
+                                process_ready_item(
+                                    downloaded_uid,
+                                    downloaded_name,
+                                    bool(outcome.get("is_group")),
+                                    file_item,
+                                )
 
                         except Exception as exc:
                             batch_errors += 1
