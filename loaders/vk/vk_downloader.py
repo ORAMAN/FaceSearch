@@ -1676,7 +1676,7 @@ def process_entity(
             items.append({
                 "image_path": avatar_path,
                 "json_path": avatar_json,
-                "source_key": f"vk:{abs(uid)}:avatar",
+                "source_key": f"vk:{'group' if is_group else 'user'}:{abs(uid)}:avatar",
                 "kind": "avatar",
             })
             print(f"[AVATAR-OK] ID {display_id} | {name}: аватар скачан.")
@@ -1780,7 +1780,7 @@ def process_entity(
                             items.append({
                                 "image_path": Path(image_path),
                                 "json_path": Path(json_path),
-                                "source_key": f"vk:{abs(uid)}:photo:{photo_owner}_{photo_id}",
+                                "source_key": f"vk:{'group' if is_group else 'user'}:{abs(uid)}:photo:{photo_owner}_{photo_id}",
                                 "kind": "photo",
                             })
                             album_photos_downloaded += 1
@@ -3134,7 +3134,7 @@ def run_download_job(
                                 file_items = [{
                                     "image_path": outcome["image_path"],
                                     "json_path": outcome["json_path"],
-                                    "source_key": f"vk:{downloaded_uid}:avatar",
+                                    "source_key": f"vk:{'group' if outcome.get('is_group') else 'user'}:{downloaded_uid}:avatar",
                                     "kind": "avatar",
                                 }]
 
@@ -3143,7 +3143,7 @@ def run_download_job(
                             for file_item in file_items:
                                 image_path = Path(file_item["image_path"])
                                 json_path = Path(file_item["json_path"])
-                                source_key = str(file_item.get("source_key") or f"vk:{downloaded_uid}:avatar")
+                                source_key = str(file_item.get("source_key") or f"vk:{'group' if outcome.get('is_group') else 'user'}:{downloaded_uid}:avatar")
                                 media_kind = str(file_item.get("kind") or "photo")
 
                                 if importer is not None and import_to_database:
@@ -3171,7 +3171,10 @@ def run_download_job(
                                     imported_for_user += 1
                                     imported_total += 1
                                     with EXISTING_PROFILE_IDS_LOCK:
-                                        EXISTING_PROFILE_IDS.add(abs(downloaded_uid))
+                                        if not outcome.get("is_group"):
+                                            # Этот кэш содержит только ID пользователей; ID группы
+                                            # не должен случайно пропустить одноимённый числовой ID человека.
+                                            EXISTING_PROFILE_IDS.add(abs(downloaded_uid))
 
                                     def _db_result_count(key):
                                         try:
@@ -3189,7 +3192,7 @@ def run_download_job(
                                         new_records > 0
                                         and abs(downloaded_uid) not in existing_profile_ids_at_start
                                     ):
-                                        new_profile_ids.add(abs(downloaded_uid))
+                                        new_profile_ids.add(-abs(downloaded_uid) if outcome.get("is_group") else abs(downloaded_uid))
                                     detected_raw = import_result.get("detected_faces")
                                     try:
                                         detected_faces = (
