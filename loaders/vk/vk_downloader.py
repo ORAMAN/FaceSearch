@@ -508,39 +508,59 @@ def build_entity_json(
 # VK API
 # ============================================================
 
-def get_group_info(group_id_or_screen_name: str, session: requests.Session):
-    url = (
-        f"https://api.vk.ru/method/groups.getById"
-        f"?group_ids={group_id_or_screen_name}"
-        f"&fields=photo_max_orig,screen_name,description,members_count,status"
-        f"&access_token={reload_tokens()}"
-        f"&v={API_VERSION}"
-    )
-    time.sleep(0.35)
-    resp = session.post(url, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
+def _api_entity_items(payload, collection_key: str | None = None) -> list[dict]:
+    """Нормализует варианты ответа VK API: список, объект сущности или контейнер items/groups."""
+    if not isinstance(payload, dict):
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        return []
 
-    if "error" in data:
+    error = payload.get("error")
+    if error:
         raise RuntimeError(
-            f"API error: {data['error']['error_msg']} "
-            f"(code {data['error']['error_code']})"
+            f"VK API: {error.get('error_msg', error)} "
+            f"(код {error.get('error_code', 'неизвестен')})"
         )
 
-    response = data.get("response", {})
+    response = payload.get("response", payload)
+    # В зависимости от версии метода VK может вернуть обычный список,
+    # объект сущности либо контейнер {"groups": [...]} / {"items": [...]}.
+    for _ in range(4):
+        if isinstance(response, list):
+            return [item for item in response if isinstance(item, dict)]
+        if not isinstance(response, dict):
+            return []
+        if collection_key and collection_key in response:
+            response = response.get(collection_key)
+            continue
+        if "items" in response and isinstance(response.get("items"), (list, dict)):
+            response = response.get("items")
+            continue
+        if "groups" in response and isinstance(response.get("groups"), (list, dict)):
+            response = response.get("groups")
+            continue
+        if "id" in response:
+            return [response]
+        return []
+    return []
 
-    if isinstance(response, dict) and "groups" in response:
-        groups = response["groups"]
-    elif isinstance(response, list):
-        groups = response
-    else:
-        groups = []
 
+def get_group_info(group_id_or_screen_name: str, session: requests.Session):
+    """Получает метаданные группы, поддерживая разные форматы ответа groups.getById."""
+    response = _vk_get_page(
+        "groups.getById",
+        {
+            "group_ids": str(group_id_or_screen_name),
+            "fields": "photo_max_orig,screen_name,description,members_count,status",
+        },
+        session,
+        timeout=20,
+    )
+    groups = _api_entity_items(response, collection_key="groups")
     if not groups:
         raise ValueError(
-            f"Group '{group_id_or_screen_name}' not found, private, or deleted"
+            f"Группа '{group_id_or_screen_name}' не найдена, закрыта для запроса или удалена."
         )
-
     return groups[0]
 
 
@@ -1439,111 +1459,128 @@ def log_user_processed(NameUser: str, user_id: str, groupe: bool = False):
 
 def get_vk_entity(identifier):
     """
-    Определяет тип сущности по ID (число или строка) или screen_name.
-    Возвращает dict: {'type': 'user'|'group'|'unknown', 'id': ..., 'name': ...}
+    Определяет тип сущности VK по числовому ID, screen_name или нормализованной ссылке.
+    Возвращает dict: {'type': 'user'|'group'|'unknown', 'id': ..., 'name': ...}.
+    ID группы всегда возвращается отрицательным.
     """
-    headers = {'User-Agent': 'VKEntityResolver/1.0'}
+    headers = {"User-Agent": "VKEntityResolver/1.1"}
 
-    # --- Шаг 1: попытка как число ---
+    def api_items(method: str, params: dict, collection_key: str | None = None) -> list[dict]:
+        # Этот путь намеренно поддерживает оба формата ответа VK:
+        # response=[{...}] и response={id: ..., name: ...}.
+        response = requests.get(
+            f"{BASE_URL}/{method}",
+            params={**params, "v": API_VERSION, "access_token": reload_tokens()},
+            headers=headers,
+            timeout=20,
+        )
+        response.raise_for_status()
+        return _api_entity_items(response.json(), collection_key=collection_key)
+
+    def as_group(group: dict):
+        try:
+            group_id = abs(int(group.get("id")))
+        except (TypeError, ValueError):
+            return None
+        if not group_id:
+            return None
+        return {
+            "type": "group",
+            "id": -group_id,
+            "name": group.get("name") or group.get("screen_name") or f"group_{group_id}",
+        }
+
+    def as_user(user: dict):
+        try:
+            user_id = int(user.get("id"))
+        except (TypeError, ValueError):
+            return None
+        if user_id <= 0:
+            return None
+        name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+        return {
+            "type": "user",
+            "id": user_id,
+            "name": name or user.get("screen_name") or f"user_{user_id}",
+        }
+
     try:
-        user_or_group_id = int(identifier)
-        if user_or_group_id < 0:
-            resp = requests.get(f'{BASE_URL}/groups.getById', params={
-                'group_ids': str(-user_or_group_id),
-                'v': API_VERSION,
-                'access_token': reload_tokens(),
-                'fields': 'screen_name'
-            }, headers=headers).json()
-            if 'response' in resp and resp['response']:
-                group = resp['response'][0]
-                return {
-                    'type': 'group',
-                    'id': -group['id'],
-                    'name': group.get('name') or group.get('screen_name')
-                }
-            return {'type': 'unknown', 'id': user_or_group_id, 'name': None}
-        else:
-            resp = requests.get(f'{BASE_URL}/users.get', params={
-                'user_ids': str(user_or_group_id),
-                'v': API_VERSION,
-                'access_token': reload_tokens(),
-                'fields': 'screen_name'
-            }, headers=headers).json()
-            if 'response' in resp and resp['response']:
-                user = resp['response'][0]
-                return {
-                    'type': 'user',
-                    'id': user['id'],
-                    'name': f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or user.get('screen_name')
-                }
-            resp = requests.get(f'{BASE_URL}/groups.getById', params={
-                'group_ids': str(user_or_group_id),
-                'v': API_VERSION,
-                'access_token': reload_tokens(),
-                'fields': 'screen_name'
-            }, headers=headers).json()
-            if 'response' in resp and resp['response']:
-                group = resp['response'][0]
-                return {
-                    'type': 'group',
-                    'id': -group['id'],
-                    'name': group.get('name') or group.get('screen_name')
-                }
-            return {'type': 'unknown', 'id': user_or_group_id, 'name': None}
+        numeric_id = int(identifier)
     except (ValueError, TypeError):
-        pass
+        numeric_id = None
 
-    # --- Шаг 2: resolveScreenName ---
-    resolve_resp = requests.get(f'{BASE_URL}/utils.resolveScreenName', params={
-        'screen_name': str(identifier),
-        'v': API_VERSION,
-        'access_token': reload_tokens()
-    }, headers=headers).json()
+    if numeric_id is not None:
+        if numeric_id < 0:
+            groups = api_items("groups.getById", {"group_ids": str(abs(numeric_id)), "fields": "screen_name"}, "groups")
+            return as_group(groups[0]) if groups and as_group(groups[0]) else {
+                "type": "unknown", "id": numeric_id, "name": None
+            }
+        if numeric_id > 0:
+            users = api_items("users.get", {"user_ids": str(numeric_id), "fields": "screen_name"})
+            if users:
+                user = as_user(users[0])
+                if user:
+                    return user
+            # Оставляем поддержку числового ID сообщества без префикса club/public.
+            groups = api_items("groups.getById", {"group_ids": str(numeric_id), "fields": "screen_name"}, "groups")
+            if groups:
+                group = as_group(groups[0])
+                if group:
+                    return group
+        return {"type": "unknown", "id": numeric_id, "name": None}
 
-    obj = resolve_resp.get('response', {})
-    if obj:
-        obj_type = obj.get('type')
-        obj_id = obj.get('object_id')
-        if obj_type == 'user':
-            return {'type': 'user', 'id': obj_id, 'name': str(identifier)}
-        elif obj_type == 'group':
-            return {'type': 'group', 'id': -obj_id, 'name': str(identifier)}
-        elif obj_type == 'application':
-            return {'type': 'application', 'id': obj_id, 'name': str(identifier)}
-        else:
-            return {'type': 'unknown', 'id': None, 'name': str(identifier)}
+    screen_name = str(identifier or "").strip()
+    if not screen_name:
+        return {"type": "unknown", "id": None, "name": screen_name}
 
-    # --- Шаг 3: явно как группа ---
-    group_resp = requests.get(f'{BASE_URL}/groups.getById', params={
-        'group_ids': str(identifier),
-        'v': API_VERSION,
-        'access_token': reload_tokens(),
-        'fields': 'screen_name'
-    }, headers=headers).json()
-    if 'response' in group_resp and group_resp['response']:
-        group = group_resp['response'][0]
-        return {
-            'type': 'group',
-            'id': -group['id'],
-            'name': group.get('name') or group.get('screen_name')
-        }
+    # Сначала используем resolveScreenName: это корректно определяет пользовательские
+    # страницы, сообщества, а также ссылки с коротким именем без дополнительных догадок.
+    resolved_payload = requests.get(
+        f"{BASE_URL}/utils.resolveScreenName",
+        params={
+            "screen_name": screen_name,
+            "v": API_VERSION,
+            "access_token": reload_tokens(),
+        },
+        headers=headers,
+        timeout=20,
+    )
+    resolved_payload.raise_for_status()
+    resolved = resolved_payload.json()
+    if resolved.get("error"):
+        error = resolved["error"]
+        raise RuntimeError(
+            f"utils.resolveScreenName: {error.get('error_msg', error)} "
+            f"(код {error.get('error_code', 'неизвестен')})"
+        )
+    obj = resolved.get("response") or {}
+    if isinstance(obj, dict) and obj.get("object_id"):
+        obj_type = str(obj.get("type") or "").lower()
+        try:
+            object_id = int(obj.get("object_id"))
+        except (TypeError, ValueError):
+            object_id = 0
+        if obj_type == "user" and object_id > 0:
+            return {"type": "user", "id": object_id, "name": screen_name}
+        if obj_type in {"group", "page", "event"} and object_id > 0:
+            return {"type": "group", "id": -object_id, "name": screen_name}
+        if obj_type == "application":
+            return {"type": "application", "id": object_id, "name": screen_name}
+        return {"type": "unknown", "id": object_id or None, "name": screen_name}
 
-    # --- Шаг 4: явно как пользователь ---
-    user_resp = requests.get(f'{BASE_URL}/users.get', params={
-        'user_ids': str(identifier),
-        'v': API_VERSION,
-        'access_token': reload_tokens(),
-        'fields': 'screen_name'
-    }, headers=headers).json()
-    if 'response' in user_resp and user_resp['response']:
-        user = user_resp['response'][0]
-        return {
-            'type': 'user',
-            'id': user['id'],
-            'name': f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or user.get('screen_name')
-        }
-
-    return {'type': 'unknown', 'id': None, 'name': str(identifier)}
+    # Резервная проверка оставлена для идентификаторов, которые VK не разрешил через
+    # utils.resolveScreenName, но принимает один из профильных методов.
+    groups = api_items("groups.getById", {"group_ids": screen_name, "fields": "screen_name"}, "groups")
+    if groups:
+        group = as_group(groups[0])
+        if group:
+            return group
+    users = api_items("users.get", {"user_ids": screen_name, "fields": "screen_name"})
+    if users:
+        user = as_user(users[0])
+        if user:
+            return user
+    return {"type": "unknown", "id": None, "name": screen_name}
 
 
 # ============================================================
