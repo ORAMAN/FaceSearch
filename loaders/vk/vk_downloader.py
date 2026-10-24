@@ -1699,6 +1699,25 @@ def process_entity(
     print(f"\n{'=' * 60}")
     print(f"👤 {name} | ID: {display_id}")
     items = []
+    items_count = 0
+    first_item = None
+    avatar_downloaded = False
+
+    def _record_downloaded_item(item: dict) -> None:
+        """Учитывает файл и передаёт его потребителю сразу после сохранения."""
+        nonlocal items_count, first_item, avatar_downloaded
+        items_count += 1
+        if first_item is None:
+            first_item = dict(item)
+        if item.get("kind") == "avatar":
+            avatar_downloaded = True
+        if download_item_queue is None:
+            items.append(item)
+        else:
+            # Queue.put блокируется при заполнении очереди и тем самым создаёт
+            # backpressure, не позволяя сетевым потокам копить бесконечный backlog.
+            download_item_queue.put((abs(uid), name, bool(is_group), dict(item)))
+
     # Если загружаем ещё и фотографии из альбомов, профиль не отбрасываем по ID:
     # заново скачиваем и аватар, а штатный импортёр FaceSearch сам определит,
     # нужно ли обновить источник или это уже известное изображение.
@@ -1713,14 +1732,12 @@ def process_entity(
         if success:
             avatar_path = Path(base_dir) / "Avatar.jpg"
             avatar_json = Path(base_dir) / "Avatar.json"
-            items.append({
+            _record_downloaded_item({
                 "image_path": avatar_path,
                 "json_path": avatar_json,
                 "source_key": f"vk:{'group' if is_group else 'user'}:{abs(uid)}:avatar",
                 "kind": "avatar",
             })
-            if download_item_queue is not None:
-                download_item_queue.put((abs(uid), name, bool(is_group), dict(items[-1])))
             print(f"[AVATAR-OK] ID {display_id} | {name}: аватар скачан; передан в очередь импорта.")
         elif result_kind == "no_avatar":
             print(f"[NO-AVATAR] ID {display_id} | {name}: {reason}.")
@@ -1824,14 +1841,12 @@ def process_entity(
                                     print(f"[PHOTO-ERROR] ID {display_id}, фото {photo_id}, альбом «{title}»: {error or 'не удалось сохранить файл'}")
                                 continue
                             photo_owner = photo.get("owner_id") or (-abs(uid) if is_group else abs(uid))
-                            items.append({
+                            _record_downloaded_item({
                                 "image_path": Path(image_path),
                                 "json_path": Path(json_path),
                                 "source_key": f"vk:{'group' if is_group else 'user'}:{abs(uid)}:photo:{photo_owner}_{photo_id}",
                                 "kind": "photo",
                             })
-                            if download_item_queue is not None:
-                                download_item_queue.put((abs(uid), name, bool(is_group), dict(items[-1])))
                             album_photos_downloaded += 1
                         except Exception as exc:
                             album_errors += 1
@@ -1876,17 +1891,18 @@ def process_entity(
     if album_errors:
         print(f"[ALBUMS-WARN] ID {display_id} | {name}: ошибок/пропусков фотографий и альбомов: {album_errors}.")
 
-    if items:
+    if items_count:
         post_ui_event(
             "status",
-            f"VK ID {display_id}: подготовлено файлов — {len(items)} "
-            f"(аватар: {'да' if any(item['kind'] == 'avatar' for item in items) else 'нет'}, фото из альбомов: {album_photos_downloaded}).",
+            f"VK ID {display_id}: подготовлено файлов — {items_count} "
+            f"(аватар: {'да' if avatar_downloaded else 'нет'}, фото из альбомов: {album_photos_downloaded}).",
         )
         return {
             "status": "downloaded",
             "items": items,
-            "image_path": next((item["image_path"] for item in items if item["kind"] == "avatar"), items[0]["image_path"]),
-            "json_path": next((item["json_path"] for item in items if item["kind"] == "avatar"), items[0]["json_path"]),
+            "items_streamed": download_item_queue is not None,
+            "image_path": first_item["image_path"],
+            "json_path": first_item["json_path"],
             "uid": abs(uid),
             "is_group": bool(is_group),
             "name": name,
@@ -3083,15 +3099,9 @@ def run_download_job(
                 batch_retry_ids = set()
                 batch_finished = 0
 
-                ready_item_queue = queue.Queue()
-                processed_stream_paths = set()
-
-                def _download_item_key(file_item):
-                    raw_path = file_item.get("image_path")
-                    try:
-                        return str(Path(raw_path).resolve())
-                    except (OSError, RuntimeError, TypeError, ValueError):
-                        return str(raw_path)
+                ready_item_queue = queue.Queue(maxsize=max(32, pool_worker_limit * 8))
+                logged_processed_entities = set()
+                ready_item_stats_counter = {"count": 0}
 
                 def process_ready_item(downloaded_uid, downloaded_name, is_group, file_item):
                     """Импортирует одну уже скачанную пару, не дожидаясь остальных фото ID."""
@@ -3265,16 +3275,24 @@ def run_download_job(
 
                         # Функция защищает лог от дублей, поэтому её безопасно вызывать
                         # при обработке каждого отдельного файла.
-                        log_user_processed(downloaded_name, str(downloaded_uid), bool(is_group))
+                        log_key = ("group" if is_group else "user", abs(int(downloaded_uid)))
+                        if log_key not in logged_processed_entities:
+                            log_user_processed(downloaded_name, str(downloaded_uid), bool(is_group))
+                            logged_processed_entities.add(log_key)
                     else:
                         downloaded_without_import_total += 1
                         print(
                             f"[SAVED-NO-IMPORT] ID {downloaded_uid} | {downloaded_name} | {media_kind}: "
                             f"файл сохранён на диск, импорт выключен: {image_path}"
                         )
-                        log_user_processed(downloaded_name, str(downloaded_uid), bool(is_group))
+                        log_key = ("group" if is_group else "user", abs(int(downloaded_uid)))
+                        if log_key not in logged_processed_entities:
+                            log_user_processed(downloaded_name, str(downloaded_uid), bool(is_group))
+                            logged_processed_entities.add(log_key)
 
-                    publish_stats()
+                    ready_item_stats_counter["count"] += 1
+                    if ready_item_stats_counter["count"] % 10 == 0:
+                        publish_stats()
 
                 def consume_ready_items():
                     """Обрабатывает очередь готовых файлов в потоке соединения FaceSearch."""
@@ -3283,13 +3301,8 @@ def run_download_job(
                             item_uid, item_name, item_is_group, file_item = ready_item_queue.get_nowait()
                         except queue.Empty:
                             break
-                        item_key = _download_item_key(file_item)
-                        if item_key in processed_stream_paths:
-                            continue
-                        # Помечаем перед импортом: при исключении файл не должен обрабатываться
-                        # повторно из списка outcome["items"] в конце загрузки этого ID.
-                        processed_stream_paths.add(item_key)
                         process_ready_item(item_uid, item_name, item_is_group, file_item)
+
 
                 def submit_next_tasks():
                     nonlocal next_task_index
@@ -3400,7 +3413,7 @@ def run_download_job(
                                 no_avatar_total += 1
 
                             file_items = outcome.get("items") or []
-                            if not file_items and outcome.get("image_path") and outcome.get("json_path"):
+                            if not file_items and not outcome.get("items_streamed") and outcome.get("image_path") and outcome.get("json_path"):
                                 file_items = [{
                                     "image_path": outcome["image_path"],
                                     "json_path": outcome["json_path"],
@@ -3409,10 +3422,6 @@ def run_download_job(
                                 }]
 
                             for file_item in file_items:
-                                item_key = _download_item_key(file_item)
-                                if item_key in processed_stream_paths:
-                                    continue
-                                processed_stream_paths.add(item_key)
                                 process_ready_item(
                                     downloaded_uid,
                                     downloaded_name,
