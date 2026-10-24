@@ -534,7 +534,7 @@ class AdaptiveWorkerController:
         )
         self._last_metrics: dict[str, Any] = self._last_sample
 
-    def observe(self, completed: int) -> dict[str, Any] | None:
+    def observe(self, completed: int, *, adapt: bool = True) -> dict[str, Any] | None:
         now = time.monotonic()
         elapsed = now - self.last_report
         if elapsed < AUTO_WORKERS_SAMPLE_SEC and completed - self.last_completed < max(2, self.current_workers // 2):
@@ -629,7 +629,11 @@ class AdaptiveWorkerController:
             )
         )
 
-        if not self.auto_adjust:
+        if not adapt:
+            # Monitor-only samples keep resource telemetry fresh while a network
+            # request or DB import is slow, without changing worker concurrency.
+            reason = "ожидание завершения задач; телеметрия обновлена"
+        elif not self.auto_adjust:
             reason = "ручной режим, число потоков не меняется"
         elif enough_time:
             if severe or regression:
