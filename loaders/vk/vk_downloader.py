@@ -2672,6 +2672,7 @@ def run_download_job(
         if worker_controller is not None else worker_count
     )
     adaptive_completed = 0
+    worker_telemetry_error_logged = False
     if auto_workers and worker_controller is not None:
         initial_worker_status = (
             f"Авто: старт {worker_controller.current_workers} "
@@ -3113,6 +3114,35 @@ def run_download_job(
                 logged_processed_entities = set()
                 ready_item_stats_counter = {"count": 0}
 
+                def update_worker_telemetry():
+                    """Публикует свежую телеметрию независимо от завершения сетевых Future."""
+                    nonlocal worker_count, worker_telemetry_error_logged
+                    if worker_controller is None:
+                        return
+                    try:
+                        report = worker_controller.observe(adaptive_completed)
+                    except Exception as exc:
+                        if not worker_telemetry_error_logged:
+                            worker_telemetry_error_logged = True
+                            message = (
+                                "Автоподстройка: ошибка чтения телеметрии "
+                                f"({type(exc).__name__}: {exc}); повторная проверка продолжается."
+                            )
+                            post_ui_event("workers_status", message)
+                            print(f"[WORKERS-TELEMETRY-ERROR] {message}")
+                        return
+                    if report is None:
+                        return
+                    worker_count = max(
+                        1, min(pool_worker_limit, int(report.get("workers") or worker_count))
+                    )
+                    worker_status = worker_controller.status_text(report).replace(
+                        "ф/с", "проф./с"
+                    )
+                    post_ui_event("workers_status", worker_status)
+                    if report.get("changed"):
+                        print(f"[AUTO-WORKERS] {worker_status}")
+
                 def process_ready_item(downloaded_uid, downloaded_name, is_group, file_item):
                     """Импортирует одну уже скачанную пару, не дожидаясь остальных фото ID."""
                     nonlocal batch_errors, imported_total, import_errors_total
@@ -3326,6 +3356,10 @@ def run_download_job(
                                 "Файлы остаются на диске для повторной проверки."
                             )
                             publish_stats()
+                        finally:
+                            # Импортёр выполняется в потоке планировщика; после каждого
+                            # файла сразу обновляем мониторинг даже при медленной загрузке.
+                            update_worker_telemetry()
 
 
                 def submit_next_tasks():
@@ -3361,29 +3395,22 @@ def run_download_job(
                 )
                 submit_next_tasks()
                 while pending:
+                    # Таймер телеметрии не зависит от завершения профиля: даже если
+                    # VK долго отвечает, CPU/RAM/GPU/диск/сеть продолжают обновляться.
+                    update_worker_telemetry()
                     consume_ready_items()
                     completed_futures, _ = wait(
                         pending, timeout=0.15, return_when=FIRST_COMPLETED
                     )
                     consume_ready_items()
+                    update_worker_telemetry()
                     for future in completed_futures:
                         uid = pending.pop(future)
 
-                        # Подстраиваем целевое число активных профилей по фактической
-                        # скорости завершения задач и показателям системной нагрузки.
+                        # После завершения профиля обновляем счётчик скорости и даём
+                        # контроллеру возможность сразу скорректировать число worker-ов.
                         adaptive_completed += 1
-                        if worker_controller is not None:
-                            report = worker_controller.observe(adaptive_completed)
-                            if report is not None:
-                                worker_count = max(
-                                    1, min(pool_worker_limit, int(report.get("workers") or worker_count))
-                                )
-                                worker_status = worker_controller.status_text(report).replace(
-                                    "ф/с", "проф./с"
-                                )
-                                post_ui_event("workers_status", worker_status)
-                                if report.get("changed"):
-                                    print(f"[AUTO-WORKERS] {worker_status}")
+                        update_worker_telemetry()
 
                         # Сразу запускаем следующую сетевую задачу до импорта
                         # результата: свободный worker не простаивает на записи в БД.
