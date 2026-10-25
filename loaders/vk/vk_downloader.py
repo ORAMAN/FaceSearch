@@ -3739,32 +3739,34 @@ def main():
     root = tk.Tk()
     root.title("VK — загрузчик изображений")
 
-    # Две темы: светлая по умолчанию и графитовая ночная.
+    # Палитры согласованы с веб-интерфейсом server_http.py.
+    # Тёмная тема использует его графитовый фон и синий акцент; светлая — ту же
+    # структуру поверхностей и контрастность в дневном варианте.
     theme_palettes = {
         "light": {
-            "app": "#F2F5F9", "panel": "#F8FAFD", "white": "#FFFFFF",
-            "text": "#202B3C", "muted": "#627187", "border": "#D7E0EB",
-            "accent": "#0077FF", "accent_active": "#0066DE", "accent_disabled": "#9ABFF0", "accent_text": "#FFFFFF",
+            "app": "#F4F5F7", "panel": "#FFFFFF", "white": "#FFFFFF",
+            "text": "#202124", "muted": "#62666B", "border": "#C8CFD8",
+            "accent": "#1479C9", "accent_active": "#0F6DB6", "accent_disabled": "#9AC4E5", "accent_text": "#FFFFFF",
             "danger_bg": "#FDECEC", "danger_text": "#B42318", "danger_border": "#F5C5C5",
-            "selection": "#C9E1FF", "log_green": "#16803C", "log_gray": "#687386",
-            "log_amber": "#9A6700", "log_blue": "#175CD3", "button": "#E5ECF5",
-            "button_active": "#DCE8F6", "button_pressed": "#D5E1EF", "button_disabled": "#E9EEF5",
-            "disabled_text": "#99A4B4", "progress_track": "#DFE7F1", "scrollbar": "#D7E0EB",
+            "selection": "#D6E8F8", "log_green": "#16803C", "log_gray": "#62666B",
+            "log_amber": "#9A6700", "log_blue": "#075EB5", "button": "#E5E7EB",
+            "button_active": "#D1D5DB", "button_pressed": "#C5CBD4", "button_disabled": "#EFF0F2",
+            "disabled_text": "#8A9098", "progress_track": "#E9EDF2", "scrollbar": "#D1D5DB",
             "danger_active": "#F9DEDE", "danger_pressed": "#F5D0D0", "danger_disabled": "#F7F2F2",
         },
         "dark": {
-            "app": "#1C2026", "panel": "#252A31", "white": "#30363F",
-            "text": "#E7EAF0", "muted": "#A8B0BC", "border": "#424A55",
-            "accent": "#2D77D4", "accent_active": "#2465BA", "accent_disabled": "#3E5876", "accent_text": "#FFFFFF",
+            "app": "#151515", "panel": "#242424", "white": "#1C1C1C",
+            "text": "#EEEEEE", "muted": "#AAAAAA", "border": "#383838",
+            "accent": "#167AC6", "accent_active": "#1989DC", "accent_disabled": "#38566D", "accent_text": "#FFFFFF",
             "danger_bg": "#482D32", "danger_text": "#FFB4AB", "danger_border": "#704148",
-            "selection": "#3C5879", "log_green": "#7EE0A3", "log_gray": "#A4ACB8",
-            "log_amber": "#F2C66D", "log_blue": "#91B8FF", "button": "#363D47",
-            "button_active": "#454E5B", "button_pressed": "#2E343D", "button_disabled": "#2B3037",
-            "disabled_text": "#77818E", "progress_track": "#343B45", "scrollbar": "#454E5B",
+            "selection": "#244A68", "log_green": "#80DDA0", "log_gray": "#AAAAAA",
+            "log_amber": "#F2C66D", "log_blue": "#79BFFF", "button": "#333333",
+            "button_active": "#444444", "button_pressed": "#292929", "button_disabled": "#292929",
+            "disabled_text": "#777777", "progress_track": "#383838", "scrollbar": "#444444",
             "danger_active": "#613B42", "danger_pressed": "#542F37", "danger_disabled": "#332E32",
         },
     }
-    theme_state = {"value": "light"}
+    theme_state = {"value": "dark"}
     palette = dict(theme_palettes[theme_state["value"]])
     style = ttk.Style(root)
     try:
@@ -3897,7 +3899,7 @@ def main():
         except (NameError, tk.TclError):
             pass
         try:
-            theme_button.configure(text="☀ Светлая тема" if selected == "dark" else "☾ Тёмная тема")
+            theme_button.configure(text="☀️ Дневная тема" if selected == "dark" else "🌙 Ночная тема")
         except (NameError, tk.TclError):
             pass
         if persist:
@@ -3998,7 +4000,7 @@ def main():
         row=0, column=0, sticky="w", pady=(0, 3)
     )
     theme_button = ttk.Button(
-        header_frame, text="☾ Тёмная тема", command=toggle_theme, style="TButton"
+        header_frame, text="🌙 Ночная тема", command=toggle_theme, style="TButton"
     )
     theme_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(14, 0), pady=2)
     ttk.Label(
@@ -4342,7 +4344,7 @@ def main():
             "system_albums": {str(album_id): True for album_id, _label in SYSTEM_ALBUM_OPTIONS},
             "download_tagged_photos": False,
             "album_photo_limit": 0,
-            "theme": "light",
+            "theme": "dark",
         }
         try:
             if APP_SETTINGS_PATH.is_file():
@@ -4403,7 +4405,7 @@ def main():
             saved_limit = 0
         album_photo_limit_var.set(str(saved_limit))
         # Применяем сохранённую тему только после создания всех виджетов.
-        apply_theme(defaults.get("theme", "light"), persist=False)
+        apply_theme(defaults.get("theme", "dark"), persist=False)
 
     def save_gui_settings():
         payload = {
