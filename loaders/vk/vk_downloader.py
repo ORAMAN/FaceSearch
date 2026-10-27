@@ -59,8 +59,8 @@ CATALOG24_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
 }
-CATALOG24_CS_RE = re.compile(r"[?&]cs=\\d+x\\d+(?=&|$)")
-CATALOG24_ID_RE = re.compile(r"-(\\d+)\\.html$")
+CATALOG24_CS_VALUE_RE = re.compile(r"^\d+x\d+$")
+CATALOG24_ID_RE = re.compile(r"-(\d+)\.html$")
 CATALOG24_PLACEHOLDER = "l5w5aIHioYc.jpg"
 FRIENDS_PAGE_SIZE = 5000
 USER_BATCH_SIZE = 100
@@ -2593,12 +2593,12 @@ def parse_vkontakte24_catalog_page(html: str) -> tuple[list[dict], int, int]:
             continue
 
         # Убираем параметр размера cs, чтобы запрашивать стабильную ссылку на файл.
-        src = CATALOG24_CS_RE.sub("", raw_src.strip()).replace("?&", "?").rstrip("?&")
+        src = raw_src.strip()
         image_parts = urlsplit(urljoin(CATALOG24_BASE + "/", src))
         image_query = [
             (key, value)
             for key, value in parse_qsl(image_parts.query, keep_blank_values=True)
-            if not (key.lower() == "cs" and re.fullmatch(r"\d+x\d+", value))
+            if not (key.lower() == "cs" and CATALOG24_CS_VALUE_RE.fullmatch(value))
         ]
         image_url = urlunsplit((
             image_parts.scheme, image_parts.netloc, image_parts.path,
@@ -2980,9 +2980,10 @@ def run_vkontakte24_job(
             if controller is not None:
                 try:
                     report = controller.observe(completed_for_controller, adapt=True)
-                    worker_count = max(1, min(64, int(report.get("workers") or worker_count)))
-                    status_text = controller.status_text(report).replace("ф/с", "проф./с")
-                    post_ui_event("workers_status", status_text)
+                    if report:
+                        worker_count = max(1, min(64, int(report.get("workers") or worker_count)))
+                        status_text = controller.status_text(report).replace("ф/с", "проф./с")
+                        post_ui_event("workers_status", status_text)
                 except Exception as exc:
                     print(f"[CATALOG24-WORKERS-WARN] Не удалось обновить автоподстройку: {exc}")
             else:
@@ -2996,6 +2997,9 @@ def run_vkontakte24_job(
                 print(f"[CATALOG24-CURSOR] Следующий запуск продолжится с ID {cursor}.")
 
             publish_stats()
+            if page_retry:
+                print("[CATALOG24] Обход приостановлен из-за ошибки; исправьте причину и запустите задание повторно с сохранённого курсора.")
+                break
             if STOP_REQUESTED.is_set():
                 break
 
