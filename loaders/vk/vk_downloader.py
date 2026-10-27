@@ -55,9 +55,10 @@ BASE_URL = "https://api.vk.ru/method"
 
 # Экспериментальный источник аватарок из публичного каталога.
 CATALOG24_BASE = "https://xn--24-6kchq2abwi5bc.xn--p1ai"
+# Воспроизводим User-Agent из проверенного пользователем рабочего запроса.
+# Некоторые сайты фильтруют автоматические запросы по полному набору браузерных заголовков.
 CATALOG24_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
 }
 CATALOG24_CS_VALUE_RE = re.compile(r"^\d+x\d+$")
 CATALOG24_ID_RE = re.compile(r"-(\d+)\.html$")
@@ -2736,6 +2737,17 @@ def run_vkontakte24_job(
                     print(f"[CATALOG24-END] Страница каталога {page_cursor} вернула HTTP 404; обход остановлен.")
                     post_ui_event("status", f"Каталог вконтакте24.рф: страница {page_cursor} недоступна (HTTP 404).")
                     break
+                if response.status_code == 403:
+                    # Сохраняем достаточно информации, чтобы различить запрет сервера,
+                    # CDN/WAF и страницу проверки доступа, не печатая всю HTML-страницу.
+                    body_preview = BeautifulSoup(response.text[:12000], "html.parser").get_text(" ", strip=True)
+                    body_preview = re.sub(r"\\s+", " ", body_preview)[:350]
+                    server_header = response.headers.get("server", "не указан")
+                    details = (
+                        f"HTTP 403 Forbidden; Server={server_header}; URL={response.url}; "
+                        f"ответ сервера: {body_preview or '(тело пустое)'}"
+                    )
+                    raise RuntimeError(details)
                 response.raise_for_status()
                 response.encoding = response.apparent_encoding or "utf-8"
                 entries, card_count, skipped_count = parse_vkontakte24_catalog_page(response.text)
