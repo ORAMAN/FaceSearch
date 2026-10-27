@@ -2773,8 +2773,10 @@ def run_vkontakte24_job(
                 f"{entity.get('first_name') or ''}: достигнут лимит попыток; "
                 "этот профиль пропускается, каталог продолжит работу."
             )
-            last_outcome["retryable"] = False
-        return last_outcome or {"status": "download_error", "reason": "неизвестная ошибка", "retryable": False}
+            # Оставляем retryable=True, чтобы вызывающий код не принял исчерпание
+            # повторов за постоянный HTTP 404: этот результат должен отдельно попасть в журнал ошибок.
+            last_outcome["retry_exhausted"] = True
+        return last_outcome or {"status": "download_error", "reason": "неизвестная ошибка", "retryable": True}
 
     publish_stats()
     print("=" * 68)
