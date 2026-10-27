@@ -2767,6 +2767,7 @@ def run_vkontakte24_job(
                 user_id = int(entry["id"])
                 if user_id in seen_ids_this_run:
                     skipped_count += 1
+                    totals["profiles_completed"] += 1
                     continue
                 seen_ids_this_run.add(user_id)
                 if user_id in existing_ids_at_start:
