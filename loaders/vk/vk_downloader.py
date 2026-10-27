@@ -53,7 +53,7 @@ _META_DUPLICATE_REASON = "_duplicate_reason"
 API_VERSION = "5.199"
 BASE_URL = "https://api.vk.ru/method"
 
-# Экспериментальный источник аватарок из публичного каталога.
+# Дополнительный источник аватарок из публичного каталога.
 CATALOG24_BASE = "https://xn--24-6kchq2abwi5bc.xn--p1ai"
 # Воспроизводим User-Agent из проверенного пользователем рабочего запроса.
 # Некоторые сайты фильтруют автоматические запросы по полному набору браузерных заголовков.
@@ -2780,7 +2780,7 @@ def run_vkontakte24_job(
 
     publish_stats()
     print("=" * 68)
-    print("[SOURCE] Экспериментальный источник: каталог вконтакте24.рф.")
+    print("[SOURCE] Каталог аватарок: вконтакте24.рф.")
     print(f"[CATALOG24] Стартовый курсор: {cursor}; каталог: {CATALOG24_BASE}; потоков: {worker_count}.")
     print("[CATALOG24] Обрабатываются только карточки с фотографией; страницы читаются последовательно до Stop или конца каталога.")
     if importer is not None:
@@ -4558,27 +4558,31 @@ def main():
     source_frame.columnconfigure(2, weight=1)
     source_frame.columnconfigure(3, weight=1)
 
+    # Радиокнопки находятся в отдельном контейнере и выстраиваются слева подряд.
+    source_modes_frame = ttk.Frame(source_frame)
+    source_modes_frame.grid(row=0, column=0, columnspan=4, sticky="ew", pady=2)
+
     acquisition_mode_var = tk.StringVar(value="counter")
     ttk.Radiobutton(
-        source_frame, text="Счётчик ID", value="counter",
+        source_modes_frame, text="Счётчик ID", value="counter",
         variable=acquisition_mode_var,
         command=lambda: (update_id_source_state(), save_gui_settings()),
-    ).grid(row=0, column=0, sticky="w", padx=(0, 10), pady=2)
+    ).pack(side="left", padx=(0, 12), pady=2)
     ttk.Radiobutton(
-        source_frame, text="Конкретные ID / ссылки", value="specific",
+        source_modes_frame, text="Конкретные ID / ссылки", value="specific",
         variable=acquisition_mode_var,
         command=lambda: (update_id_source_state(), save_gui_settings()),
-    ).grid(row=0, column=1, sticky="w", padx=(0, 10), pady=2)
+    ).pack(side="left", padx=(0, 12), pady=2)
     ttk.Radiobutton(
-        source_frame, text="Поиск users.search", value="search",
+        source_modes_frame, text="Поиск users.search", value="search",
         variable=acquisition_mode_var,
         command=lambda: (update_id_source_state(), save_gui_settings()),
-    ).grid(row=0, column=2, sticky="w", pady=2)
+    ).pack(side="left", padx=(0, 12), pady=2)
     ttk.Radiobutton(
-        source_frame, text="Каталог вконтакте24.рф", value="catalog24",
+        source_modes_frame, text="Каталог вконтакте24.рф", value="catalog24",
         variable=acquisition_mode_var,
         command=lambda: (update_id_source_state(), save_gui_settings()),
-    ).grid(row=0, column=3, sticky="w", padx=(10, 0), pady=2)
+    ).pack(side="left", padx=(0, 12), pady=2)
 
     counter_frame = ttk.Frame(source_frame)
     counter_frame.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(4, 0))
@@ -5040,7 +5044,7 @@ def main():
                 pass
         search_country_combo.configure(state="readonly" if search_mode else "disabled")
         if catalog24_mode:
-            source_help_var.set("Экспериментальный режим: считывает карточки с фото из каталога вконтакте24.рф и импортирует аватарки в FaceSearch; курсор сохраняется для продолжения. Альбомы VK не запрашиваются.")
+            source_help_var.set("Для этого источника токены VK не требуются: используется публичный каталог, API VK не вызывается. Аватарки загружаются и импортируются в FaceSearch; курсор сохраняется для продолжения.")
         elif mode == "counter":
             source_help_var.set("В режиме счётчика обход продолжается от стартового ID до нажатия «Остановить».")
         elif specific_mode:
