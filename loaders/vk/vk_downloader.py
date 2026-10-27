@@ -2741,7 +2741,7 @@ def run_vkontakte24_job(
                     # Сохраняем достаточно информации, чтобы различить запрет сервера,
                     # CDN/WAF и страницу проверки доступа, не печатая всю HTML-страницу.
                     body_preview = BeautifulSoup(response.text[:12000], "html.parser").get_text(" ", strip=True)
-                    body_preview = re.sub(r"\\s+", " ", body_preview)[:350]
+                    body_preview = re.sub(r"\s+", " ", body_preview)[:350]
                     server_header = response.headers.get("server", "не указан")
                     details = (
                         f"HTTP 403 Forbidden; Server={server_header}; URL={response.url}; "
