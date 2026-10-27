@@ -2858,8 +2858,14 @@ def run_vkontakte24_job(
                             if status == "download_error":
                                 totals["download_errors"] += 1
                                 if outcome.get("retryable", True):
-                                    page_retry = True
-                                    print(f"[CATALOG24-AVATAR-ERROR] ID {user_id} | {display_name}: {outcome.get('reason', 'ошибка загрузки')}; страница будет повторена.")
+                                    # Ошибка отдельного файла не должна останавливать весь каталог:
+                                    # иначе один HTTP 500 удерживает курсор на той же странице,
+                                    # повторно скачивает уже обработанные профили и не даёт идти дальше.
+                                    print(
+                                        f"[CATALOG24-AVATAR-ERROR] ID {user_id} | {display_name}: "
+                                        f"{outcome.get('reason', 'ошибка загрузки')}; профиль пропущен, "
+                                        "переход к следующим профилям продолжается."
+                                    )
                                 else:
                                     print(f"[CATALOG24-AVATAR-404-SKIP] ID {user_id} | {display_name}: постоянный HTTP 404; профиль пропущен без повтора.")
                                 continue
