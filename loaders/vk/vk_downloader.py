@@ -3034,8 +3034,8 @@ def run_vkontakte24_job(
             "[CATALOG24-SUMMARY] "
             f"профилей рассмотрено: {totals['profiles_taken']}; скачано: {totals['profiles_downloaded']}; "
             f"в БД файлов обработано: {totals['files_imported']}; уже в БД: {totals['already_in_db']}; "
-            f"пропущено без аватарки: {totals['no_avatar']}; ошибок загрузки/импорта: "
-            f"{totals['download_errors'] + totals['import_errors']}; курсор: {cursor}."
+            f"пропущено без аватарки: {totals['no_avatar']}; ошибок страниц/API: {totals['api_errors']}; "
+            f"ошибок загрузки/импорта: {totals['download_errors'] + totals['import_errors']}; курсор: {cursor}."
         )
     return cursor
 
