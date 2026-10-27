@@ -11,10 +11,11 @@ import webbrowser
 import importlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 import requests
+from bs4 import BeautifulSoup
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
@@ -51,6 +52,16 @@ _META_DUPLICATE_OF = "_duplicate_of"
 _META_DUPLICATE_REASON = "_duplicate_reason"
 API_VERSION = "5.199"
 BASE_URL = "https://api.vk.ru/method"
+
+# Экспериментальный источник аватарок из публичного каталога.
+CATALOG24_BASE = "https://xn--24-6kchq2abwi5bc.xn--p1ai"
+CATALOG24_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+}
+CATALOG24_CS_RE = re.compile(r"[?&]cs=\\d+x\\d+(?=&|$)")
+CATALOG24_ID_RE = re.compile(r"-(\\d+)\\.html$")
+CATALOG24_PLACEHOLDER = "l5w5aIHioYc.jpg"
 FRIENDS_PAGE_SIZE = 5000
 USER_BATCH_SIZE = 100
 # Фактически VK users.search возвращает до 100 объектов на страницу,
@@ -316,7 +327,7 @@ def build_entity_json(
                 info[label] = value
     else:
         uid = entity.get("id")
-        url_source = f"https://vk.com/id{uid}"
+        url_source = str(entity.get("_facesearch_url_source") or f"https://vk.com/id{uid}")
         first = str(entity.get("first_name") or "").strip()
         last = str(entity.get("last_name") or "").strip()
         name = f"{first} {last}".strip() or str(entity.get("screen_name") or f"user_{uid}")
@@ -1393,7 +1404,10 @@ def save_avatar_to_root(
     image_created = False
 
     try:
-        with requests.get(avatar_url, timeout=20, stream=True) as resp:
+        request_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        if entity.get("_facesearch_referer"):
+            request_headers["Referer"] = str(entity["_facesearch_referer"])
+        with requests.get(avatar_url, headers=request_headers, timeout=20, stream=True) as resp:
             if resp.status_code == 404:
                 return False, "HTTP 404: фотография недоступна по URL; повтор этого URL не выполняется", "http_404"
             if resp.status_code != 200:
@@ -2563,6 +2577,450 @@ def collect_specific_entity_ids(raw_value: str, friend_depth: int = 0) -> list[i
 
 
 
+def parse_vkontakte24_catalog_page(html: str) -> tuple[list[dict], int, int]:
+    """Извлекает из страницы каталога профили с реальными аватарками."""
+    soup = BeautifulSoup(html, "html.parser")
+    cards = soup.select("div.col-md-3.text-center")
+    entries = []
+    skipped = 0
+    seen_ids = set()
+
+    for card in cards:
+        img = card.find("img", src=True)
+        raw_src = img.get("src") if img else None
+        if not isinstance(raw_src, str) or not raw_src.strip() or CATALOG24_PLACEHOLDER in raw_src:
+            skipped += 1
+            continue
+
+        # Убираем параметр размера cs, чтобы запрашивать стабильную ссылку на файл.
+        src = CATALOG24_CS_RE.sub("", raw_src.strip()).replace("?&", "?").rstrip("?&")
+        image_parts = urlsplit(urljoin(CATALOG24_BASE + "/", src))
+        image_query = [
+            (key, value)
+            for key, value in parse_qsl(image_parts.query, keep_blank_values=True)
+            if not (key.lower() == "cs" and re.fullmatch(r"\d+x\d+", value))
+        ]
+        image_url = urlunsplit((
+            image_parts.scheme, image_parts.netloc, image_parts.path,
+            urlencode(image_query, doseq=True), image_parts.fragment,
+        ))
+
+        anchor = card.find("a", href=True)
+        href_path = anchor.get("href") if anchor else None
+        if not isinstance(href_path, str) or not href_path.strip():
+            skipped += 1
+            continue
+        catalog_url = urljoin(CATALOG24_BASE + "/", href_path.lstrip("/"))
+        match = CATALOG24_ID_RE.search(urlsplit(catalog_url).path)
+        if not match:
+            skipped += 1
+            continue
+        try:
+            user_id = int(match.group(1))
+        except (TypeError, ValueError):
+            skipped += 1
+            continue
+        name = anchor.get_text(" ", strip=True) if anchor else ""
+        if user_id <= 0 or not name or user_id in seen_ids or not image_url:
+            skipped += 1
+            continue
+        seen_ids.add(user_id)
+        entries.append({
+            "id": user_id,
+            "name": name,
+            "image_url": image_url,
+            "catalog_url": catalog_url,
+            "vk_url": f"https://vk.ru/id{user_id}",
+        })
+
+    return entries, len(cards), skipped
+
+
+def run_vkontakte24_job(
+    start_id: int,
+    max_workers: int,
+    output_dir: str,
+    importer=None,
+    delete_processed_files: bool = False,
+    import_to_database: bool = True,
+    auto_workers: bool = False,
+) -> int:
+    """Последовательно читает каталог вконтакте24.рф, скачивает аватары и импортирует их в FaceSearch."""
+    global EXISTING_PROFILE_IDS
+
+    try:
+        cursor = int(start_id)
+    except (TypeError, ValueError):
+        cursor = 1
+    if cursor < 1:
+        raise ValueError("Стартовый ID каталога должен быть положительным числом.")
+
+    output_root = Path(output_dir).expanduser().resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    EXISTING_PROFILE_IDS = load_existing_vk_profile_ids(importer)
+    existing_ids_at_start = set(EXISTING_PROFILE_IDS)
+    requested_workers = max(1, min(64, int(max_workers or 1)))
+    worker_count = requested_workers
+    controller = None
+
+    if auto_workers:
+        profile_data = {}
+        if importer is not None and isinstance(getattr(importer, "config", None), dict):
+            profile_data = importer.config.get("profile") or {}
+        db_type = str(
+            profile_data.get("type") or profile_data.get("backend") or profile_data.get("driver") or ""
+        ).strip().lower() if isinstance(profile_data, dict) else ""
+        db_host = str(profile_data.get("host") or "").strip().lower() if isinstance(profile_data, dict) else ""
+        remote_db = (
+            db_type not in ("", "sqlite", "sqlite3", "local", "file")
+            and db_host not in ("", "localhost", "127.0.0.1", "::1")
+        )
+        try:
+            controller = AdaptiveWorkerController(
+                initial_workers=0,
+                backend="gpu" if import_to_database else "cpu",
+                operation="vk_download",
+                input_paths=[],
+                output_path=output_root,
+                input_is_network=True,
+                remote_db=remote_db,
+                auto_adjust=True,
+            )
+            worker_count = max(1, min(64, int(controller.current_workers or requested_workers)))
+        except Exception as exc:
+            print(f"[CATALOG24-WORKERS-WARN] Автоподстройка недоступна; используется {requested_workers} поток(ов): {exc}")
+            controller = None
+            worker_count = requested_workers
+
+    totals = {
+        "profiles_taken": 0, "profiles_completed": 0, "profiles_pending": 0,
+        "already_in_db": 0, "new_profiles": 0, "profiles_downloaded": 0,
+        "profiles_missing_or_deactivated": 0, "no_avatar": 0, "no_media": 0,
+        "faces_added": 0, "db_new_records": 0, "db_updated_records": 0,
+        "db_skipped_duplicate": 0, "db_no_faces": 0, "db_unclassified": 0,
+        "files_imported": 0, "downloaded_without_import": 0, "download_errors": 0,
+        "import_errors": 0, "deleted_source_files": 0, "cleanup_errors": 0,
+        "api_errors": 0, "album_errors": 0, "db_restored_crops": 0,
+        "db_removed_records": 0, "empty_dirs_removed": 0,
+    }
+    new_profile_ids = set()
+    seen_ids_this_run = set()
+    completed_for_controller = 0
+
+    def publish_stats():
+        totals["new_profiles"] = len(new_profile_ids)
+        totals["profiles_pending"] = max(0, totals["profiles_taken"] - totals["profiles_completed"])
+        post_ui_event("stats", dict(totals))
+
+    publish_stats()
+    print("=" * 68)
+    print("[SOURCE] Экспериментальный источник: каталог вконтакте24.рф.")
+    print(f"[CATALOG24] Стартовый курсор: {cursor}; каталог: {CATALOG24_BASE}; потоков: {worker_count}.")
+    print("[CATALOG24] Обрабатываются только карточки с фотографией; страницы читаются последовательно до Stop или конца каталога.")
+    if importer is not None:
+        print(
+            f"[DB-CHECK] Активный профиль FaceSearch: {importer.config.get('active_name', 'неизвестен')}; "
+            f"загружено ID для пропуска: {len(EXISTING_PROFILE_IDS)}."
+        )
+
+    session = requests.Session()
+    session.headers.update(CATALOG24_HEADERS)
+
+    try:
+        while not STOP_REQUESTED.is_set():
+            page_cursor = cursor
+            page_url = f"{CATALOG24_BASE}/catalog-u-{page_cursor}.html"
+            try:
+                response = session.get(page_url, timeout=30)
+                if response.status_code == 404:
+                    print(f"[CATALOG24-END] Страница каталога {page_cursor} вернула HTTP 404; обход остановлен.")
+                    post_ui_event("status", f"Каталог вконтакте24.рф: страница {page_cursor} недоступна (HTTP 404).")
+                    break
+                response.raise_for_status()
+                response.encoding = response.apparent_encoding or "utf-8"
+                entries, card_count, skipped_count = parse_vkontakte24_catalog_page(response.text)
+            except Exception as exc:
+                totals["api_errors"] += 1
+                publish_stats()
+                print(
+                    f"[CATALOG24-PAGE-ERROR] Страница {page_cursor}: "
+                    f"{type(exc).__name__}: {exc}. Курсор оставлен для повтора."
+                )
+                post_ui_event("status", f"Ошибка чтения каталога на ID {page_cursor}; курсор сохранён для повтора.")
+                cursor = page_cursor
+                break
+
+            if card_count == 0:
+                print(f"[CATALOG24-END] На странице {page_cursor} карточки не найдены; обход остановлен.")
+                post_ui_event("status", f"Каталог вконтакте24.рф: на странице {page_cursor} нет карточек.")
+                cursor = page_cursor
+                break
+
+            # По исходному механизму пользователя следующий курсор равен ID последней
+            # подходящей карточки + 1; если фотографий на странице нет, двигаемся на 1.
+            next_cursor = entries[-1]["id"] + 1 if entries else page_cursor + 1
+            if next_cursor <= page_cursor:
+                next_cursor = page_cursor + 1
+
+            page_tasks = []
+            for entry in entries:
+                user_id = int(entry["id"])
+                if user_id in seen_ids_this_run:
+                    skipped_count += 1
+                    continue
+                seen_ids_this_run.add(user_id)
+                if user_id in existing_ids_at_start:
+                    totals["already_in_db"] += 1
+                    totals["profiles_completed"] += 1
+                    print(f"[DB-SKIP] ID {user_id} | {entry['name']}: профиль уже есть в активной БД FaceSearch.")
+                    continue
+
+                entity = {
+                    "id": user_id,
+                    "first_name": entry["name"],
+                    "last_name": "",
+                    "photo_max_orig": entry["image_url"],
+                    "photo_200": entry["image_url"],
+                    "_facesearch_url_source": entry["vk_url"],
+                    "_facesearch_referer": CATALOG24_BASE + "/",
+                    "_facesearch_catalog_url": entry["catalog_url"],
+                }
+                folder_name = sanitize_filename(f"{entry['name']} ({user_id})")
+                page_tasks.append((entry, entity, str(output_root / folder_name)))
+
+            totals["profiles_taken"] += len(entries)
+            publish_stats()
+            print(
+                f"[CATALOG24-PAGE] ID {page_cursor}: карточек {card_count}, пригодных с фото {len(entries)}, "
+                f"пропущено {skipped_count}, к загрузке {len(page_tasks)}; следующий курсор {next_cursor}."
+            )
+            post_ui_event(
+                "status",
+                f"Каталог вконтакте24.рф: страница/ID {page_cursor}; карточек {card_count}; к загрузке {len(page_tasks)}.",
+            )
+
+            page_retry = False
+            page_finished = 0
+            if page_tasks:
+                # Сетевые загрузки идут параллельно; импорт выполняется здесь,
+                # в потоке, где создано соединение FaceSearch.
+                with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="Catalog24Avatar") as executor:
+                    future_map = {
+                        executor.submit(
+                            process_entity,
+                            entity,
+                            base_dir,
+                            False,
+                            worker_count,
+                            importer=None,
+                            delete_processed_files=False,
+                            import_to_database=False,
+                            download_albums=False,
+                            all_albums=False,
+                            album_photo_limit=0,
+                            selected_system_albums=DEFAULT_SYSTEM_ALBUM_IDS,
+                            download_tagged_photos=False,
+                            download_item_queue=None,
+                        ): entry
+                        for entry, entity, base_dir in page_tasks
+                    }
+
+                    for future in as_completed(future_map):
+                        entry = future_map[future]
+                        user_id = int(entry["id"])
+                        display_name = entry["name"]
+                        try:
+                            outcome = future.result()
+                            status = outcome.get("status") if isinstance(outcome, dict) else None
+                            if status == "already_in_db":
+                                totals["already_in_db"] += 1
+                                continue
+                            if status == "no_avatar":
+                                totals["no_avatar"] += 1
+                                print(f"[NO-AVATAR] ID {user_id} | {display_name}: источник не вернул пригодную аватарку.")
+                                continue
+                            if status == "no_media":
+                                totals["no_media"] += 1
+                                continue
+                            if status == "download_error":
+                                totals["download_errors"] += 1
+                                page_retry = True
+                                print(f"[CATALOG24-AVATAR-ERROR] ID {user_id} | {display_name}: {outcome.get('reason', 'ошибка загрузки')}.")
+                                continue
+                            if status != "downloaded":
+                                raise RuntimeError(f"неизвестный результат загрузки: {status!r}")
+
+                            totals["profiles_downloaded"] += 1
+                            file_items = outcome.get("items") or []
+                            if not file_items and outcome.get("image_path") and outcome.get("json_path"):
+                                file_items = [{
+                                    "image_path": outcome["image_path"],
+                                    "json_path": outcome["json_path"],
+                                    "source_key": f"vk:user:{user_id}:avatar",
+                                    "kind": "avatar",
+                                }]
+
+                            for item in file_items:
+                                image_path = Path(item["image_path"])
+                                json_path = Path(item["json_path"])
+                                if importer is None or not import_to_database:
+                                    totals["downloaded_without_import"] += 1
+                                    print(
+                                        f"[SAVED-NO-IMPORT] ID {user_id} | {display_name}: "
+                                        f"аватар сохранён без импорта: {image_path}"
+                                    )
+                                    continue
+
+                                try:
+                                    result = importer.import_image(
+                                        image_path,
+                                        json_path,
+                                        source_key=str(item.get("source_key") or f"vk:user:{user_id}:avatar"),
+                                    )
+                                    if not isinstance(result, dict):
+                                        raise RuntimeError(
+                                            f"импортёр вернул неожиданный результат: {type(result).__name__}"
+                                        )
+                                except Exception as exc:
+                                    totals["import_errors"] += 1
+                                    page_retry = True
+                                    print(
+                                        f"[DB-ERROR] ID {user_id} | {display_name}: "
+                                        f"ошибка импорта {type(exc).__name__}: {exc}; исходники сохранены."
+                                    )
+                                    continue
+
+                                totals["files_imported"] += 1
+                                with EXISTING_PROFILE_IDS_LOCK:
+                                    EXISTING_PROFILE_IDS.add(user_id)
+
+                                def result_count(key):
+                                    try:
+                                        return max(0, int(result.get(key) or 0))
+                                    except (TypeError, ValueError):
+                                        return 0
+
+                                added = result_count("added")
+                                updated = result_count("updated")
+                                removed = result_count("removed")
+                                restored = result_count("restored")
+                                faces = result_count("faces")
+                                detected = result.get("detected_faces")
+                                try:
+                                    detected = None if detected is None else max(0, int(detected))
+                                except (TypeError, ValueError):
+                                    detected = None
+                                message = str(result.get("message") or "")
+                                known_source = (
+                                    "исходное изображение уже есть в бд" in message.casefold()
+                                    or "исправлена привязка локальных crop" in message.casefold()
+                                )
+                                totals["faces_added"] += faces
+                                totals["db_removed_records"] += removed
+                                totals["db_restored_crops"] += restored
+                                totals["db_new_records"] += added
+                                totals["db_updated_records"] += updated
+                                if added and user_id not in existing_ids_at_start:
+                                    new_profile_ids.add(user_id)
+
+                                detail = (
+                                    f"обнаружено лиц: {detected if detected is not None else 'не сообщено'}; "
+                                    f"новых записей: {added}; обновлено: {updated}; "
+                                    f"восстановлено CROP: {restored}; источник: {entry['catalog_url']}"
+                                )
+                                should_cleanup = bool(added or updated or removed or restored or faces or known_source or detected is not None)
+                                if added or updated:
+                                    tag = "DB-CHANGED" if added and updated else ("DB-NEW" if added else "DB-UPDATED")
+                                    print(f"[{tag}] ID {user_id} | {display_name} | avatar: {detail}.")
+                                elif restored or known_source:
+                                    print(f"[DB-SKIP-EXISTING] ID {user_id} | {display_name}: {detail}.")
+                                elif detected == 0:
+                                    totals["db_no_faces"] += 1
+                                    print(f"[DB-NO-FACE] ID {user_id} | {display_name}: {detail}.")
+                                elif detected is not None and detected > 0:
+                                    totals["db_skipped_duplicate"] += 1
+                                    print(f"[DB-SKIP-DUPLICATE] ID {user_id} | {display_name}: {detail}.")
+                                else:
+                                    totals["db_unclassified"] += 1
+                                    print(f"[DB-SKIP-UNKNOWN] ID {user_id} | {display_name}: {detail}; исходники оставлены.")
+
+                                if delete_processed_files and should_cleanup:
+                                    try:
+                                        if json_path.exists():
+                                            json_path.unlink()
+                                            totals["deleted_source_files"] += 1
+                                        if image_path.exists():
+                                            image_path.unlink()
+                                            totals["deleted_source_files"] += 1
+                                        _remove_empty_directories_upwards(image_path.parent, output_root)
+                                        print(f"[CLEANUP] ID {user_id}: исходные файлы удалены после подтверждённой обработки.")
+                                    except Exception as exc:
+                                        totals["cleanup_errors"] += 1
+                                        page_retry = True
+                                        print(f"[CLEANUP-ERROR] ID {user_id}: {type(exc).__name__}: {exc}")
+                                elif delete_processed_files:
+                                    print(f"[CLEANUP-SKIP] ID {user_id}: исходники оставлены, результат импорта не подтверждён.")
+
+                        except Exception as exc:
+                            totals["download_errors"] += 1
+                            page_retry = True
+                            print(f"[CATALOG24-PROFILE-ERROR] ID {user_id} | {display_name}: {type(exc).__name__}: {exc}")
+                        finally:
+                            totals["profiles_completed"] += 1
+                            completed_for_controller += 1
+                            page_finished += 1
+                            post_ui_event(
+                                "progress", page_finished, len(page_tasks),
+                                f"Каталог {page_cursor} | профили: {page_finished}/{len(page_tasks)} | "
+                                f"импортировано файлов: {totals['files_imported']:,} | ошибок: "
+                                f"{totals['download_errors'] + totals['import_errors']:,}.",
+                            )
+                            publish_stats()
+
+            if controller is not None:
+                try:
+                    report = controller.observe(completed_for_controller, adapt=True)
+                    worker_count = max(1, min(64, int(report.get("workers") or worker_count)))
+                    status_text = controller.status_text(report).replace("ф/с", "проф./с")
+                    post_ui_event("workers_status", status_text)
+                except Exception as exc:
+                    print(f"[CATALOG24-WORKERS-WARN] Не удалось обновить автоподстройку: {exc}")
+            else:
+                post_ui_event("workers_status", f"Мониторинг загрузки каталога: фиксировано {worker_count} поток(ов).")
+
+            cursor = page_cursor if page_retry else next_cursor
+            post_ui_event("start_id_updated", cursor)
+            if page_retry:
+                print(f"[CATALOG24-CURSOR] На странице {page_cursor} были ошибки; курсор оставлен для повтора.")
+            else:
+                print(f"[CATALOG24-CURSOR] Следующий запуск продолжится с ID {cursor}.")
+
+            publish_stats()
+            if STOP_REQUESTED.is_set():
+                break
+
+    finally:
+        session.close()
+        if delete_processed_files and import_to_database and importer is not None:
+            try:
+                removed_empty = _remove_empty_directories_recursively(output_root)
+                totals["empty_dirs_removed"] = removed_empty
+                print(f"[CLEANUP-DIRS] Финальная очистка: удалено пустых папок: {removed_empty}.")
+            except Exception as exc:
+                totals["cleanup_errors"] += 1
+                print(f"[CLEANUP-ERROR] Финальная очистка каталога: {type(exc).__name__}: {exc}")
+        publish_stats()
+        print(
+            "[CATALOG24-SUMMARY] "
+            f"профилей рассмотрено: {totals['profiles_taken']}; скачано: {totals['profiles_downloaded']}; "
+            f"в БД файлов обработано: {totals['files_imported']}; уже в БД: {totals['already_in_db']}; "
+            f"пропущено без аватарки: {totals['no_avatar']}; ошибок загрузки/импорта: "
+            f"{totals['download_errors'] + totals['import_errors']}; курсор: {cursor}."
+        )
+    return cursor
+
+
+
 def run_download_job(
     start_id: int, max_workers: int, output_dir: str,
     importer=None, delete_processed_files: bool = False, import_to_database: bool = True,
@@ -2593,6 +3051,17 @@ def run_download_job(
             raise ValueError("Смещение результатов поиска не может быть отрицательным.")
     else:
         search_offset = 0
+
+    if source_mode == "catalog24":
+        return run_vkontakte24_job(
+            start_id,
+            max_workers,
+            output_dir,
+            importer=importer,
+            delete_processed_files=delete_processed_files,
+            import_to_database=import_to_database,
+            auto_workers=auto_workers,
+        )
 
     EXISTING_PROFILE_IDS = load_existing_vk_profile_ids(importer)
     # Не считаем профиль новым только потому, что в нём появились новые фото:
@@ -4013,6 +4482,7 @@ def main():
     source_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 10))
     source_frame.columnconfigure(1, weight=1)
     source_frame.columnconfigure(2, weight=1)
+    source_frame.columnconfigure(3, weight=1)
 
     acquisition_mode_var = tk.StringVar(value="counter")
     ttk.Radiobutton(
@@ -4030,10 +4500,16 @@ def main():
         variable=acquisition_mode_var,
         command=lambda: (update_id_source_state(), save_gui_settings()),
     ).grid(row=0, column=2, sticky="w", pady=2)
+    ttk.Radiobutton(
+        source_frame, text="Каталог вконтакте24.рф", value="catalog24",
+        variable=acquisition_mode_var,
+        command=lambda: (update_id_source_state(), save_gui_settings()),
+    ).grid(row=0, column=3, sticky="w", padx=(10, 0), pady=2)
 
     counter_frame = ttk.Frame(source_frame)
-    counter_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
-    ttk.Label(counter_frame, text="ID для продолжения (обновляется во время загрузки):").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+    counter_frame.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+    start_id_label = ttk.Label(counter_frame, text="ID для продолжения (обновляется во время загрузки):")
+    start_id_label.grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
     start_id_var = tk.StringVar(value="")
     start_id_entry = ttk.Entry(counter_frame, textvariable=start_id_var, width=20)
     start_id_entry.grid(row=0, column=1, sticky="w", pady=3)
@@ -4045,7 +4521,7 @@ def main():
     ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 3))
 
     specific_frame = ttk.Frame(source_frame)
-    specific_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+    specific_frame.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
     specific_frame.columnconfigure(0, weight=1)
     ttk.Label(specific_frame, text="ID / ссылки / короткие имена пользователей (через запятую, пробел или новую строку):").grid(
         row=0, column=0, columnspan=3, sticky="w", pady=(0, 2)
@@ -4064,7 +4540,7 @@ def main():
     friend_depth_spin.grid(row=2, column=1, sticky="w", pady=3)
 
     search_frame = ttk.LabelFrame(source_frame, text="Критерии поиска VK", padding=6)
-    search_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+    search_frame.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
     for column in (1, 3, 5):
         search_frame.columnconfigure(column, weight=1)
 
@@ -4462,9 +4938,16 @@ def main():
 
     def update_id_source_state():
         mode = acquisition_mode_var.get()
-        counter_mode = mode == "counter"
+        counter_mode = mode in ("counter", "catalog24")
+        catalog24_mode = mode == "catalog24"
         specific_mode = mode == "specific"
         search_mode = mode == "search"
+        start_id_label.configure(
+            text=(
+                "ID каталога для продолжения (обновляется во время загрузки):"
+                if catalog24_mode else "ID для продолжения (обновляется во время загрузки):"
+            )
+        )
         for frame, visible in ((counter_frame, counter_mode), (specific_frame, specific_mode), (search_frame, search_mode)):
             if visible:
                 frame.grid()
@@ -4482,7 +4965,9 @@ def main():
             except tk.TclError:
                 pass
         search_country_combo.configure(state="readonly" if search_mode else "disabled")
-        if counter_mode:
+        if catalog24_mode:
+            source_help_var.set("Экспериментальный режим: считывает карточки с фото из каталога вконтакте24.рф и импортирует аватарки в FaceSearch; курсор сохраняется для продолжения. Альбомы VK не запрашиваются.")
+        elif mode == "counter":
             source_help_var.set("В режиме счётчика обход продолжается от стартового ID до нажатия «Остановить».")
         elif specific_mode:
             source_help_var.set("Для конкретных ID: глубина 0 — только введённые профили; 1 — их друзья; 2 — друзья друзей. До 10 уровней.")
@@ -5006,10 +5491,10 @@ def main():
             raw_specific_ids = specific_ids_text.get("1.0", "end-1c").strip()
             search_filters = {}
             search_offset = 0
-            if source_mode == "counter":
+            if source_mode in ("counter", "catalog24"):
                 raw_start_id = start_id_var.get().strip()
                 if not raw_start_id:
-                    raise ValueError("Укажите стартовый ID пользователя VK.")
+                    raise ValueError("Укажите стартовый ID каталога." if source_mode == "catalog24" else "Укажите стартовый ID пользователя VK.")
                 start_id = int(raw_start_id)
                 if start_id < 1:
                     raise ValueError("Стартовый ID должен быть положительным числом.")
@@ -5017,7 +5502,7 @@ def main():
                 if not parse_specific_identifiers(raw_specific_ids):
                     raise ValueError("Введите список конкретных ID/ссылок на профили VK.")
                 start_id = 1
-            else:
+            elif source_mode == "search":
                 start_id = 1
                 raw_query = search_query_var.get().strip()
                 raw_city = search_city_var.get().strip()
@@ -5074,8 +5559,8 @@ def main():
         except ValueError as exc:
             messagebox.showerror("Параметры", str(exc) or "Проверьте источник ID, глубину и число потоков.", parent=root)
             return
-        token_count = len(_read_token_file())
-        if token_count == 0:
+        token_count = len(_read_token_file()) if source_mode != "catalog24" else 1
+        if source_mode != "catalog24" and token_count == 0:
             saved_rows = _read_all_token_file()
             incompatible_count = sum(1 for saved_token in saved_rows if not _is_v1_token(saved_token))
             message = (
@@ -5087,7 +5572,8 @@ def main():
             messagebox.showwarning("Токены VK API v1", message, parent=root)
             return
 
-        reload_token_cache()
+        if source_mode != "catalog24":
+            reload_token_cache()
         save_gui_settings()
         auto_workers = bool(auto_workers_var.get())
         auto_import = bool(auto_import_var.get())
@@ -5102,7 +5588,7 @@ def main():
         output_dir = output_var.get().strip() or str(DEFAULT_OUTPUT_DIR)
         STOP_REQUESTED.clear()
         reset_stats_table()
-        current_job_start_id["value"] = start_id if source_mode == "counter" else None
+        current_job_start_id["value"] = start_id if source_mode in ("counter", "catalog24") else None
         # До завершения текущего задания не называем предыдущий ID последним
         # обработанным: стартовая позиция могла быть введена вручную.
         last_processed_id_var.set("Последний завершённый подряд ID: —")
@@ -5175,7 +5661,7 @@ def main():
                     search_filters=search_filters,
                     search_offset=search_offset,
                 )
-                if source_mode == "counter":
+                if source_mode in ("counter", "catalog24"):
                     # При Stop курсор публикуется из run_download_job и
                     # дополнительно извлекается QueueStream из [STOP-CURSOR].
                     # Не отправляем повторно потенциально устаревшее значение
