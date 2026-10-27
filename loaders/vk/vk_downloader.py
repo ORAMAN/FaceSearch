@@ -2713,6 +2713,69 @@ def run_vkontakte24_job(
         totals["profiles_pending"] = max(0, totals["profiles_taken"] - totals["profiles_completed"])
         post_ui_event("stats", dict(totals))
 
+    def process_catalog24_entity_with_retries(entity: dict, base_dir: str, worker_limit: int) -> dict:
+        """Повторяет временные ошибки загрузки аватарки, не останавливая обход каталога."""
+        max_attempts = 3
+        last_outcome = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                outcome = process_entity(
+                    entity,
+                    base_dir,
+                    False,
+                    worker_limit,
+                    importer=None,
+                    delete_processed_files=False,
+                    import_to_database=False,
+                    download_albums=False,
+                    all_albums=False,
+                    album_photo_limit=0,
+                    selected_system_albums=DEFAULT_SYSTEM_ALBUM_IDS,
+                    download_tagged_photos=False,
+                    download_item_queue=None,
+                )
+            except Exception as exc:
+                outcome = {
+                    "status": "download_error",
+                    "uid": entity.get("id"),
+                    "name": entity.get("first_name") or "",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                    "retryable": True,
+                }
+
+            last_outcome = outcome if isinstance(outcome, dict) else {
+                "status": "download_error",
+                "uid": entity.get("id"),
+                "name": entity.get("first_name") or "",
+                "reason": f"Неожиданный результат process_entity: {type(outcome).__name__}",
+                "retryable": True,
+            }
+            if last_outcome.get("status") != "download_error" or not last_outcome.get("retryable", True):
+                return last_outcome
+            if attempt >= max_attempts:
+                break
+
+            # Постепенно увеличиваем паузу между повторами: особенно важно для HTTP 429,
+            # 424 и 5xx от сервера фотографий при параллельном скачивании.
+            delay = 2 * attempt
+            retry_reason = str(last_outcome.get("reason") or "временная ошибка")
+            user_id = entity.get("id", "?")
+            display_name = entity.get("first_name") or f"user_{user_id}"
+            print(
+                f"[CATALOG24-RETRY] ID {user_id} | {display_name}: попытка {attempt}/{max_attempts} "
+                f"не удалась ({retry_reason}); повтор через {delay} сек."
+            )
+            time.sleep(delay)
+
+        if last_outcome:
+            print(
+                f"[CATALOG24-RETRY-EXHAUSTED] ID {entity.get('id', '?')} | "
+                f"{entity.get('first_name') or ''}: достигнут лимит попыток; "
+                "этот профиль пропускается, каталог продолжит работу."
+            )
+            last_outcome["retryable"] = False
+        return last_outcome or {"status": "download_error", "reason": "неизвестная ошибка", "retryable": False}
+
     publish_stats()
     print("=" * 68)
     print("[SOURCE] Экспериментальный источник: каталог вконтакте24.рф.")
@@ -2820,20 +2883,10 @@ def run_vkontakte24_job(
                 with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="Catalog24Avatar") as executor:
                     future_map = {
                         executor.submit(
-                            process_entity,
+                            process_catalog24_entity_with_retries,
                             entity,
                             base_dir,
-                            False,
                             worker_count,
-                            importer=None,
-                            delete_processed_files=False,
-                            import_to_database=False,
-                            download_albums=False,
-                            all_albums=False,
-                            album_photo_limit=0,
-                            selected_system_albums=DEFAULT_SYSTEM_ALBUM_IDS,
-                            download_tagged_photos=False,
-                            download_item_queue=None,
                         ): entry
                         for entry, entity, base_dir in page_tasks
                     }
@@ -2905,7 +2958,6 @@ def run_vkontakte24_job(
                                         )
                                 except Exception as exc:
                                     totals["import_errors"] += 1
-                                    page_retry = True
                                     print(
                                         f"[DB-ERROR] ID {user_id} | {display_name}: "
                                         f"ошибка импорта {type(exc).__name__}: {exc}; исходники сохранены."
@@ -2978,15 +3030,13 @@ def run_vkontakte24_job(
                                         print(f"[CLEANUP] ID {user_id}: исходные файлы удалены после подтверждённой обработки.")
                                     except Exception as exc:
                                         totals["cleanup_errors"] += 1
-                                        page_retry = True
                                         print(f"[CLEANUP-ERROR] ID {user_id}: {type(exc).__name__}: {exc}")
                                 elif delete_processed_files:
                                     print(f"[CLEANUP-SKIP] ID {user_id}: исходники оставлены, результат импорта не подтверждён.")
 
                         except Exception as exc:
                             totals["download_errors"] += 1
-                            page_retry = True
-                            print(f"[CATALOG24-PROFILE-ERROR] ID {user_id} | {display_name}: {type(exc).__name__}: {exc}")
+                            print(f"[CATALOG24-PROFILE-ERROR] ID {user_id} | {display_name}: {type(exc).__name__}: {exc}; обработка остальных карточек продолжается.")
                         finally:
                             totals["profiles_completed"] += 1
                             completed_for_controller += 1
@@ -3011,17 +3061,13 @@ def run_vkontakte24_job(
             else:
                 post_ui_event("workers_status", f"Мониторинг загрузки каталога: фиксировано {worker_count} поток(ов).")
 
-            cursor = page_cursor if page_retry else next_cursor
+            # Ошибки конкретных аватарок/импорта не должны возвращать каталог к той же странице.
+            # Ошибка загрузки самой HTML-страницы обрабатывается выше отдельно и сохраняет курсор.
+            cursor = next_cursor
             post_ui_event("start_id_updated", cursor)
-            if page_retry:
-                print(f"[CATALOG24-CURSOR] На странице {page_cursor} были ошибки; курсор оставлен для повтора.")
-            else:
-                print(f"[CATALOG24-CURSOR] Следующий запуск продолжится с ID {cursor}.")
+            print(f"[CATALOG24-CURSOR] Следующий запуск продолжится с ID {cursor}.")
 
             publish_stats()
-            if page_retry:
-                print("[CATALOG24] Обход приостановлен из-за ошибки; исправьте причину и запустите задание повторно с сохранённого курсора.")
-                break
             if STOP_REQUESTED.is_set():
                 break
 
