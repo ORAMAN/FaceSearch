@@ -2844,8 +2844,11 @@ def run_vkontakte24_job(
                                 continue
                             if status == "download_error":
                                 totals["download_errors"] += 1
-                                page_retry = True
-                                print(f"[CATALOG24-AVATAR-ERROR] ID {user_id} | {display_name}: {outcome.get('reason', 'ошибка загрузки')}.")
+                                if outcome.get("retryable", True):
+                                    page_retry = True
+                                    print(f"[CATALOG24-AVATAR-ERROR] ID {user_id} | {display_name}: {outcome.get('reason', 'ошибка загрузки')}; страница будет повторена.")
+                                else:
+                                    print(f"[CATALOG24-AVATAR-404-SKIP] ID {user_id} | {display_name}: постоянный HTTP 404; профиль пропущен без повтора.")
                                 continue
                             if status != "downloaded":
                                 raise RuntimeError(f"неизвестный результат загрузки: {status!r}")
