@@ -5394,12 +5394,12 @@ class FaceSearchGUI:
 
     def open_database_migration(self):
         """Запускает отдельную утилиту миграции в изолированном процессе."""
-        script = APP_DIR / "database_migration.py"
+        script = APP_DIR / "utilities" / "database_migration.py"
         if not script.is_file():
             messagebox.showerror(
                 "Миграция БД",
                 f"Не найден файл утилиты миграции:\n{script}\n\n"
-                "Поместите database_migration.py рядом с основным скриптом.",
+                "Поместите database_migration.py в папку utilities внутри проекта.",
                 parent=self.root,
             )
             return

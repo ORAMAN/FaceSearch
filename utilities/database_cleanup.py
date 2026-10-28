@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """FaceSearch — поиск и удаление профилей с зависимыми фотографиями/лицами.
 
-Поместить файл в корень FaceSearch, рядом с face_search_gui.py.
-Запуск: start_cleanup.bat или .venv\\Scripts\\python.exe face_search_cleanup.py
+Файл находится в папке utilities проекта FaceSearch.
+Запуск: .venv\\Scripts\\python.exe utilities\\database_cleanup.py
 
 Удаление затрагивает только выбранные profiles, их связанные images и faces.
 Локальные CROP удаляются после успешного COMMIT и только из CROP-каталогов.
@@ -29,7 +29,8 @@ from urllib.request import url2pathname
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 
-APP_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent
+APP_DIR = SCRIPT_DIR.parent  # корень проекта FaceSearch
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
@@ -47,7 +48,7 @@ try:
 except Exception as exc:
     raise SystemExit(
         "Не удалось импортировать конфигурацию FaceSearch.\n"
-        "Скрипт должен находиться в корне проекта рядом с face_search_gui.py.\n\n"
+        "Скрипт должен находиться в папке utilities внутри проекта FaceSearch.\n\n"
         f"Подробности: {exc}"
     )
 

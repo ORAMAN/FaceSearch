@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Отдельное окно миграции/слияния баз Face Search.
 
-Можно запускать напрямую: python database_migration.py
+Можно запускать напрямую: python utilities/database_migration.py
 Или открывать из основного GUI. Тяжёлый модуль приложения импортируется
 только в worker-потоке после нажатия кнопки переноса.
 """
@@ -23,7 +23,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-APP_DIR = Path(__file__).resolve().parent
+APP_DIR = Path(__file__).resolve().parent.parent  # корень проекта FaceSearch
 PROFILE_FILE = APP_DIR / "database_profiles.json"
 BATCH_IMAGES = 250       # не превышаем лимиты параметров SQL Server / SQLite
 BATCH_FACES = 2500

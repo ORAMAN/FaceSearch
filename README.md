@@ -153,7 +153,7 @@
 Окно миграции можно открыть из главного интерфейса кнопкой **«Миграция БД»**. Также его можно запустить отдельно:
 
 ```bat
-.venv\Scripts\python.exe database_migration.py
+.venv\Scripts\python.exe utilities\database_migration.py
 ```
 
 ## Первый запуск
@@ -349,7 +349,9 @@ CLI использует настройки/подключение базы, з�
 FaceSearch/
 ├── face_search_gui.py             # Основной GUI, обработка, поиск и CLI
 ├── server_http.py                 # Многопоточный веб-поиск по лицам
-├── database_migration.py          # Окно миграции/слияния БД
+├── utilities/                     # Вспомогательные инструменты обслуживания БД
+│   ├── database_migration.py       # Окно миграции/слияния БД
+│   └── database_cleanup.py         # Очистка БД и связанных записей
 ├── requirements.txt               # Общие Python-зависимости
 ├── setup.bat                      # Подготовка окружения и проверка CPU/GPU
 ├── start_gui.bat                  # Запуск GUI без консоли
