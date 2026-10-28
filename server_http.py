@@ -1067,6 +1067,37 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .preview-viewport:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .status{min-height:28px;color:var(--muted);padding:10px 2px;overflow-wrap:anywhere;scroll-margin-top:10px}
 .status.error{color:#c83e3e}
+.group-options{margin:0 0 16px}
+.group-options details,.group-panel{border:1px solid var(--line);background:var(--panel);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow)}
+.group-options summary{cursor:pointer;font-weight:650}
+.group-options-note{color:var(--muted);font-size:12px;margin:5px 0 12px}
+.group-options-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px;align-items:end}
+.group-options-grid .field{min-width:0}
+.group-options-grid input[type=number]{width:100%;min-width:0}
+.group-options-grid .toggle-label{white-space:normal}
+.group-panel{margin:18px 0 24px}
+.group-panel[hidden]{display:none!important}
+.group-panel-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.group-panel h2{font-size:20px;margin:0}
+.group-progress{height:10px;overflow:hidden;border-radius:99px;background:var(--secondary);margin:12px 0 5px}
+.group-progress-bar{height:100%;width:0;background:var(--accent);transition:width .18s}
+.group-progress-message{font-size:13px;color:var(--muted);overflow-wrap:anywhere}
+.group-graph-wrap{margin-top:14px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--drop)}
+.group-graph{display:block;width:100%;height:auto;max-height:440px}
+.group-combinations{display:grid;gap:8px;margin-top:14px}
+.group-combination{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;text-align:left;width:100%;min-height:auto;background:var(--secondary);color:var(--button-text);border:1px solid var(--button-line);padding:11px 13px}
+.group-combination[aria-pressed=true]{border-color:var(--accent);box-shadow:inset 3px 0 var(--accent)}
+.group-combination small{display:block;color:var(--muted);font-weight:400;margin-top:3px}
+.group-profile-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:12px;margin-top:14px}
+.group-profile-card{border:1px solid var(--line);border-radius:10px;padding:10px;min-width:0;background:var(--panel)}
+.group-profile-card img{display:block;width:100%;height:150px;object-fit:contain;background:var(--image-bg);border-radius:6px;margin-bottom:8px}
+.group-profile-card .group-profile-name{font-weight:650;overflow-wrap:anywhere}
+.group-profile-card .group-profile-meta{font-size:12px;color:var(--muted);margin-top:4px;overflow-wrap:anywhere}
+.group-profile-card a{color:var(--link);overflow-wrap:anywhere}
+.group-notice{font-size:12px;color:var(--muted);margin-top:12px;line-height:1.45}
+.group-empty{padding:14px;border:1px dashed var(--line);border-radius:8px;color:var(--muted)}
+@media(max-width:700px){.group-panel{padding:12px}.group-graph{min-height:190px}.group-combination{padding:10px}.group-profile-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:380px){.group-profile-list{grid-template-columns:minmax(0,1fr)}}
 .index-meta{margin:4px 0 9px;color:var(--muted);font-size:12px;line-height:1.35;overflow-wrap:anywhere}
 .index-status{margin:8px 0 12px;padding:11px 14px;border:1px solid var(--line);border-radius:9px;font-size:14px;line-height:1.45;overflow-wrap:anywhere}
 .index-status[hidden]{display:none}
@@ -1250,6 +1281,39 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     <span class="hint format-hint">Поддерживаются JPG, PNG, WEBP и другие форматы изображений.</span>
   </section>
 
+  <section class="group-options" aria-label="Параметры группового анализа">
+    <details>
+      <summary>Параметры анализа связей группы — только для текущего сеанса</summary>
+      <div class="group-options-note">Эти изменения не записываются в settings.xml. Постоянные значения задаются в окне FaceSearch → «Параметры группового анализа».</div>
+      <div class="group-options-grid">
+        <div class="field">
+          <label for="group-min-similarity">Минимальное сходство, %</label>
+          <input id="group-min-similarity" type="number" min="0" max="100" step="1" value="__GROUP_MIN_SIMILARITY__">
+        </div>
+        <div class="field">
+          <label for="group-candidates">Кандидатов на лицо</label>
+          <input id="group-candidates" type="number" min="1" max="10" step="1" value="__GROUP_CANDIDATES_PER_FACE__">
+        </div>
+        <div class="field">
+          <label for="group-friend-weight">Вес дружбы</label>
+          <input id="group-friend-weight" type="number" min="0" max="20" step="0.5" value="__GROUP_FRIEND_WEIGHT__">
+        </div>
+        <div class="field">
+          <label for="group-common-weight">Вес общих друзей</label>
+          <input id="group-common-weight" type="number" min="0" max="10" step="0.5" value="__GROUP_COMMON_FRIEND_WEIGHT__">
+        </div>
+        <div class="field">
+          <label for="group-city-weight">Вес совпадения города</label>
+          <input id="group-city-weight" type="number" min="0" max="10" step="0.5" value="__GROUP_CITY_WEIGHT__">
+        </div>
+        <div class="field toggle-field">
+          <label class="toggle-label" for="group-check-vk-friends"><input id="group-check-vk-friends" type="checkbox" __GROUP_CHECK_VK_FRIENDS__> Проверять друзей VK</label>
+          <span class="hint">Требуется токен VK.</span>
+        </div>
+      </div>
+    </details>
+  </section>
+
   <section id="dropzone" class="dropzone">
     <div class="dropzone-content" id="drop-copy">
       <strong>Перетащите фотографию сюда</strong><br>
@@ -1258,6 +1322,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     <div id="preview-controls" class="preview-controls" hidden aria-label="Определение лиц и управление масштабом">
       <div class="preview-control-buttons">
         <button type="button" id="identify-faces-button" class="secondary" disabled>Определить</button>
+        <button type="button" id="group-analysis-button" class="secondary" disabled title="Активируется, когда обнаружено не менее двух лиц">Анализ связей группы</button>
         <button type="button" id="zoom-out-button" class="secondary" aria-label="Уменьшить масштаб">−</button>
         <span id="preview-zoom-value" class="preview-zoom-value">100%</span>
         <button type="button" id="zoom-in-button" class="secondary" aria-label="Увеличить масштаб">+</button>
@@ -1291,6 +1356,27 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   </div>
   <div id="status" class="status" role="status">Выберите изображение, затем нажмите «Определить лица».</div>
   <button type="button" id="search-button" disabled>Искать похожее лицо</button>
+
+  <section id="group-analysis-panel" class="group-panel" hidden aria-live="polite">
+    <div class="group-panel-header">
+      <div>
+        <h2>Анализ связей группы</h2>
+        <div class="hint">Поиск согласованного набора профилей с учётом сходства лиц, дружбы и города.</div>
+      </div>
+      <button type="button" id="group-analysis-hide" class="secondary">Скрыть</button>
+    </div>
+    <div class="group-progress" id="group-progress" role="progressbar" aria-label="Ход анализа" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div class="group-progress-bar" id="group-progress-bar"></div>
+    </div>
+    <div id="group-progress-message" class="group-progress-message">Ожидание запуска анализа.</div>
+    <div id="group-analysis-summary"></div>
+    <div id="group-graph-wrap" class="group-graph-wrap" hidden>
+      <svg id="group-graph" class="group-graph" viewBox="0 0 600 360" role="img" aria-label="Граф связей выбранной комбинации"></svg>
+    </div>
+    <div id="group-profile-list" class="group-profile-list"></div>
+    <div id="group-combinations" class="group-combinations"></div>
+    <div id="group-analysis-notice" class="group-notice"></div>
+  </section>
 
   <section>
     <div class="section-title"><h2>Результаты</h2><span id="result-count"></span></div>
@@ -1328,6 +1414,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   const faceLinkOverlay=document.getElementById("face-link-overlay");
   const previewControls=document.getElementById("preview-controls");
   const identifyFacesButton=document.getElementById("identify-faces-button");
+  const groupAnalysisButton=document.getElementById("group-analysis-button");
   const previewZoomValue=document.getElementById("preview-zoom-value");
   const zoomOutButton=document.getElementById("zoom-out-button");
   const zoomInButton=document.getElementById("zoom-in-button");
@@ -1657,6 +1744,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     cameraButton.disabled=value||cameraOpening;
     descriptionFilterInput.disabled=value;
     identifyFacesButton.disabled=value||!queryId||!faces.length||identificationInProgress;
+    if(window.FaceSearchGroupUI)window.FaceSearchGroupUI.sync();
   }
   function useDataUrl(sourceDataUrl){
     dataUrl=String(sourceDataUrl||"");
@@ -1666,6 +1754,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     identificationInProgress=false;
     faceLinkOverlay.replaceChildren();
     identifyFacesButton.textContent="Определить";
+    if(window.FaceSearchGroupUI)window.FaceSearchGroupUI.reset();
     imageObject=new Image();
     imageObject.onload=function(){
       queryId="";faces=[];selectedFace=-1;
@@ -2035,7 +2124,10 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       detected=true;
       setStatus("Обнаружено лиц: "+faces.length+". "+(autoSearch?"Запускаю поиск по первому лицу...":"Выберите рамку лица и запустите поиск."));
     }catch(error){setStatus(error.message||String(error),true);queryId="";faces=[];selectedFace=-1;}
-    finally{setBusy(false);}
+    finally{
+      if(window.FaceSearchGroupUI)window.FaceSearchGroupUI.sync();
+      setBusy(false);
+    }
     if(detected&&autoSearch)await searchSimilar();
   }
   detectButton.addEventListener("click",function(){detectFaces(false);});
@@ -2410,6 +2502,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   });
 })();
 </script>
+<script src="/group-analysis.js"></script>
 </body>
 </html>
 """
@@ -2512,6 +2605,14 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 "__GROUP_CHECK_VK_FRIENDS__", "checked" if DEFAULT_GROUP_ANALYSIS_OPTIONS["check_vk_friends"] else ""
             )
             self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+            return
+        if path == "/group-analysis.js":
+            try:
+                script = (APP_DIR / "group_analysis_ui.js").read_bytes()
+            except OSError:
+                self._send(404, b"// group analysis UI is unavailable", "application/javascript; charset=utf-8")
+            else:
+                self._send(200, script, "application/javascript; charset=utf-8")
             return
         if path == "/favicon.ico":
             self._send(204, b"", "image/x-icon")
