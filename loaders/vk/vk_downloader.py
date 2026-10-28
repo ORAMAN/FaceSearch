@@ -753,6 +753,50 @@ def _vk_get_page(method: str, params: dict, session: requests.Session, timeout: 
     raise RuntimeError(f"{method}: VK API не вернул ответ.")
 
 
+def get_user_friend_ids(
+    user_id: int,
+    session: requests.Session,
+    limit: int = FRIENDS_PAGE_SIZE,
+) -> set[int]:
+    """Возвращает ID друзей для группового анализа, используя штатный пул токенов.
+
+    В отличие от get_user_friends(), запрашивает только ID, не загружая карточки,
+    фотографии и прочие поля друзей. Ротация access_token и повторы остаются
+    внутри _vk_get_page().
+    """
+    try:
+        user_id = int(user_id)
+        limit = max(1, min(FRIENDS_PAGE_SIZE, int(limit)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Для получения друзей нужен корректный числовой ID пользователя.") from exc
+    if user_id <= 0:
+        raise ValueError("ID пользователя VK должен быть положительным.")
+
+    response = _vk_get_page(
+        "friends.get",
+        {"user_id": user_id, "offset": 0, "count": limit},
+        session,
+        timeout=25,
+    )
+    if isinstance(response, list):
+        items = response
+    elif isinstance(response, dict):
+        items = response.get("items", []) or []
+    else:
+        items = []
+
+    friend_ids: set[int] = set()
+    for item in items:
+        value = item.get("id") if isinstance(item, dict) else item
+        try:
+            friend_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if friend_id > 0:
+            friend_ids.add(friend_id)
+    return friend_ids
+
+
 # users.search ограничивает доступную выдачу первыми 1000 результатами.
 SEARCH_MAX_RESULTS = 1000
 NO_COUNTRY_LABEL = "— Не выбрано —"
