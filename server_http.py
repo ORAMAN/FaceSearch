@@ -2859,11 +2859,13 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 message = str(exc).strip() or exc.__class__.__name__
                 print("[HTTP][GROUP-ANALYSIS][ERROR] " + message, flush=True)
-                update_job(100, "Анализ завершился с ошибкой.", "error")
                 with GROUP_ANALYSIS_JOBS_LOCK:
                     job = GROUP_ANALYSIS_JOBS.get(job_id)
                     if job is not None:
                         job["error"] = message[:1000]
+                        job["progress"] = 100
+                        job["message"] = "Анализ завершился с ошибкой."
+                        job["state"] = "error"
             finally:
                 if connection is not None:
                     try:
