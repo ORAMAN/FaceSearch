@@ -33,6 +33,7 @@ from contextlib import contextmanager
 from urllib.parse import parse_qs, urlparse
 
 import face_search_gui as face_search
+from facesearch import group_analysis
 from facesearch.settings import _load_gui_settings
 from facesearch.database_profiles import _load_db_profiles, _default_profile
 from facesearch.card_text_filter import (
@@ -53,9 +54,13 @@ MAX_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
 QUERY_TTL_SECONDS = 30 * 60
 MAX_QUERY_SESSIONS = 100
+GROUP_ANALYSIS_TTL_SECONDS = 30 * 60
+MAX_GROUP_ANALYSIS_JOBS = 100
 
 QUERY_SESSIONS: dict[str, dict] = {}
 QUERY_SESSIONS_LOCK = threading.RLock()
+GROUP_ANALYSIS_JOBS: dict[str, dict] = {}
+GROUP_ANALYSIS_JOBS_LOCK = threading.RLock()
 API_SEMAPHORE = threading.BoundedSemaphore(4)
 
 PROFILE: dict = {}
@@ -66,6 +71,7 @@ DEFAULT_TOP_K = 24
 DEFAULT_MIN_SIMILARITY = 43.0
 DEFAULT_USE_LOCAL_CROPS = True
 DEFAULT_THEME = "dark"
+DEFAULT_GROUP_ANALYSIS_OPTIONS = dict(group_analysis.DEFAULTS)
 CREATE_CROPS_ON_HTML = False
 CROP_REPAIR_WORKERS = 4
 CROP_REPAIR_AUTO_WORKERS = False
@@ -581,6 +587,7 @@ def _initialize_runtime() -> None:
     global PROFILE, PROFILE_NAME, BACKEND, FACE_APP
     global DEFAULT_TOP_K, DEFAULT_MIN_SIMILARITY
     global DEFAULT_USE_LOCAL_CROPS, DEFAULT_THEME, CREATE_CROPS_ON_HTML
+    global DEFAULT_GROUP_ANALYSIS_OPTIONS
     global CROP_REPAIR_WORKERS, CROP_REPAIR_AUTO_WORKERS
     global _INDEX_ACTIVE_SIGNATURE, _INDEX_RELOAD_STATE, _INDEX_RELOAD_MESSAGE
 
@@ -599,6 +606,14 @@ def _initialize_runtime() -> None:
     )
     DEFAULT_USE_LOCAL_CROPS = bool(gui_settings.get("use_local_crops", True))
     DEFAULT_THEME = "dark" if str(gui_settings.get("theme") or "").lower() == "dark" else "light"
+    DEFAULT_GROUP_ANALYSIS_OPTIONS = group_analysis.normalize_options({
+        "min_similarity": gui_settings.get("group_min_similarity", 43.0),
+        "candidates_per_face": gui_settings.get("group_candidates_per_face", 5),
+        "friend_weight": gui_settings.get("group_friend_weight", 8.0),
+        "common_friend_weight": gui_settings.get("group_common_friend_weight", 2.0),
+        "city_weight": gui_settings.get("group_city_weight", 1.5),
+        "check_vk_friends": gui_settings.get("group_check_vk_friends", True),
+    })
     CREATE_CROPS_ON_HTML = bool(gui_settings.get("create_crops_on_html", False))
     try:
         CROP_REPAIR_WORKERS = max(1, min(32, int(gui_settings.get("workers", 4))))
@@ -764,6 +779,27 @@ def _decode_image(data_url: str):
     if height <= 0 or width <= 0 or width * height > MAX_IMAGE_PIXELS:
         raise ValueError("Разрешение изображения слишком велико.")
     return image
+
+
+def _prune_group_analysis_jobs() -> None:
+    now = time.monotonic()
+    with GROUP_ANALYSIS_JOBS_LOCK:
+        expired = [
+            job_id for job_id, job in GROUP_ANALYSIS_JOBS.items()
+            if now - job.get("created", now) > GROUP_ANALYSIS_TTL_SECONDS
+            and job.get("state") not in ("queued", "running")
+        ]
+        for job_id in expired:
+            GROUP_ANALYSIS_JOBS.pop(job_id, None)
+        while len(GROUP_ANALYSIS_JOBS) > MAX_GROUP_ANALYSIS_JOBS:
+            finished = [
+                job_id for job_id, job in GROUP_ANALYSIS_JOBS.items()
+                if job.get("state") not in ("queued", "running")
+            ]
+            if not finished:
+                break
+            oldest = min(finished, key=lambda job_id: GROUP_ANALYSIS_JOBS[job_id].get("created", 0))
+            GROUP_ANALYSIS_JOBS.pop(oldest, None)
 
 
 def _prune_sessions() -> None:
@@ -2462,6 +2498,18 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 "__CREATE_CROPS_ON_HTML__", "true" if CREATE_CROPS_ON_HTML else "false"
             ).replace(
                 "__DEFAULT_THEME__", DEFAULT_THEME
+            ).replace(
+                "__GROUP_MIN_SIMILARITY__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["min_similarity"])
+            ).replace(
+                "__GROUP_CANDIDATES_PER_FACE__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["candidates_per_face"])
+            ).replace(
+                "__GROUP_FRIEND_WEIGHT__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["friend_weight"])
+            ).replace(
+                "__GROUP_COMMON_FRIEND_WEIGHT__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["common_friend_weight"])
+            ).replace(
+                "__GROUP_CITY_WEIGHT__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["city_weight"])
+            ).replace(
+                "__GROUP_CHECK_VK_FRIENDS__", "checked" if DEFAULT_GROUP_ANALYSIS_OPTIONS["check_vk_friends"] else ""
             )
             self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             return
@@ -2475,6 +2523,34 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             query = parse_qs(urlparse(self.path).query)
             use_crop = query.get("crop", ["1"])[0] != "0"
             self._serve_face_image(path, use_crop=use_crop)
+            return
+        if path == "/api/group-analysis/status":
+            query = parse_qs(urlparse(self.path).query)
+            job_id = str(query.get("job_id", [""])[0] or "")
+            query_id = str(query.get("query_id", [""])[0] or "")
+            if not job_id or len(job_id) > 128:
+                self._json(400, {"error": "Не указан идентификатор задачи анализа."})
+                return
+            with GROUP_ANALYSIS_JOBS_LOCK:
+                job = GROUP_ANALYSIS_JOBS.get(job_id)
+                if job is None or not secrets.compare_digest(str(job.get("query_id") or ""), query_id):
+                    job = None
+                else:
+                    payload = {
+                        "ok": True,
+                        "job_id": job_id,
+                        "state": job.get("state"),
+                        "progress": int(job.get("progress") or 0),
+                        "message": str(job.get("message") or ""),
+                    }
+                    if job.get("state") == "done":
+                        payload["result"] = job.get("result")
+                    if job.get("state") == "error":
+                        payload["error"] = str(job.get("error") or "Ошибка группового анализа.")
+            if job is None:
+                self._json(404, {"error": "Задача анализа не найдена или сессия не совпадает."})
+                return
+            self._json(200, payload)
             return
         if path == "/api/status":
             payload = _index_status_payload()
@@ -2491,7 +2567,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/api/detect", "/api/search", "/api/load-image"):
+        if path not in ("/api/detect", "/api/search", "/api/load-image", "/api/group-analysis/start"):
             self._json(404, {"error": "API-метод не найден."})
             return
         if not API_SEMAPHORE.acquire(timeout=15):
@@ -2505,6 +2581,9 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 return
             except ValueError as exc:
                 self._json(400, {"error": str(exc)})
+                return
+            if path == "/api/group-analysis/start":
+                self._start_group_analysis(data)
                 return
             if path == "/api/load-image":
                 try:
@@ -2523,6 +2602,169 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             self._json(500, {"error": message[:1000]})
         finally:
             API_SEMAPHORE.release()
+
+    def _start_group_analysis(self, data: dict):
+        """Запускает анализ в отдельном потоке; HTTP-запрос сразу возвращает job_id."""
+        token = str(data.get("query_id") or "")
+        if not token or len(token) > 128:
+            raise ValueError("Сессия запроса не найдена. Загрузите изображение ещё раз.")
+        with QUERY_SESSIONS_LOCK:
+            query = QUERY_SESSIONS.get(token)
+            if query is None or time.monotonic() - query["created"] > QUERY_TTL_SECONDS:
+                QUERY_SESSIONS.pop(token, None)
+                raise ValueError("Сессия истекла. Определите лица на фотографии повторно.")
+            embeddings = [embedding.copy() for embedding in query.get("embeddings", [])]
+        if len(embeddings) < 2:
+            raise ValueError("Для группового анализа нужно обнаружить не менее двух лиц.")
+
+        options = group_analysis.normalize_options(data.get("options"))
+        with GROUP_ANALYSIS_JOBS_LOCK:
+            for existing_id, job in GROUP_ANALYSIS_JOBS.items():
+                if (
+                    job.get("query_id") == token
+                    and job.get("state") in ("queued", "running")
+                ):
+                    self._json(409, {
+                        "error": "Для этой фотографии групповой анализ уже выполняется.",
+                        "job_id": existing_id,
+                    })
+                    return
+            job_id = secrets.token_urlsafe(18)
+            GROUP_ANALYSIS_JOBS[job_id] = {
+                "created": time.monotonic(),
+                "query_id": token,
+                "state": "queued",
+                "progress": 0,
+                "message": "Задача поставлена в очередь.",
+                "result": None,
+                "error": "",
+            }
+        _prune_group_analysis_jobs()
+
+        def update_job(progress, message, state=None):
+            with GROUP_ANALYSIS_JOBS_LOCK:
+                job = GROUP_ANALYSIS_JOBS.get(job_id)
+                if job is None:
+                    return
+                job["progress"] = max(0, min(100, int(progress)))
+                job["message"] = str(message or "")
+                if state:
+                    job["state"] = state
+
+        def worker():
+            update_job(1, "Подготовка поисковых кандидатов…", "running")
+            connection = None
+            try:
+                candidate_count = int(options["candidates_per_face"])
+                search_top_k = min(100, max(candidate_count * 5, candidate_count + 5))
+                candidates_by_face = []
+                connection = _open_connection()
+                for face_index, embedding in enumerate(embeddings):
+                    update_job(
+                        5 + int(25 * face_index / max(1, len(embeddings))),
+                        "Поиск кандидатов для лица " + str(face_index + 1)
+                        + " / " + str(len(embeddings)) + "…",
+                    )
+                    with _INDEX_USE_LOCK.read_lock():
+                        candidates = face_search.search_embedding(
+                            connection,
+                            embedding,
+                            top_k=search_top_k,
+                            min_similarity=float(options["min_similarity"]) / 100.0,
+                            backend=BACKEND,
+                        )
+                    face_candidates = []
+                    for candidate in candidates:
+                        try:
+                            score = max(0.0, min(100.0, float(candidate.get("score") or 0.0) * 100.0))
+                            face_id = int(candidate.get("face_id") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        raw_meta = {}
+                        try:
+                            raw_value = json.loads(str(candidate.get("raw_json") or ""))
+                            if isinstance(raw_value, dict):
+                                raw_meta = raw_value
+                        except (TypeError, ValueError):
+                            pass
+                        vk_id = candidate.get("vk_user_id")
+                        try:
+                            vk_id = int(vk_id) if vk_id is not None and int(vk_id) > 0 else None
+                        except (TypeError, ValueError):
+                            vk_id = None
+                        profile_url = str(
+                            candidate.get("profile_url")
+                            or raw_meta.get("url_source")
+                            or ""
+                        ).strip()
+                        if not profile_url and vk_id:
+                            profile_url = "https://vk.com/id" + str(vk_id)
+                        full_name = " ".join(
+                            part for part in (
+                                str(candidate.get("first_name") or "").strip(),
+                                str(candidate.get("last_name") or "").strip(),
+                            ) if part
+                        ).strip()
+                        if not full_name:
+                            full_name = str(
+                                candidate.get("screen_name")
+                                or candidate.get("domain")
+                                or profile_url
+                                or ("Профиль #" + str(face_id))
+                            ).strip()
+                        face_candidates.append({
+                            "face_id": face_id,
+                            "name": full_name,
+                            "profile_url": profile_url,
+                            "source_url": str(candidate.get("source_url") or ""),
+                            "city": str(candidate.get("city_title") or "").strip(),
+                            "similarity": score,
+                            "vk_user_id": vk_id,
+                        })
+                    candidates_by_face.append(face_candidates)
+                    update_job(
+                        5 + int(25 * (face_index + 1) / max(1, len(embeddings))),
+                        "Поиск кандидатов завершён для лица "
+                        + str(face_index + 1) + " / " + str(len(embeddings)),
+                    )
+                connection.close()
+                connection = None
+
+                def progress_callback(percent, message):
+                    update_job(30 + int(max(0, min(100, int(percent))) * 0.7), message)
+
+                result = group_analysis.analyze_group(
+                    candidates_by_face,
+                    options,
+                    APP_DIR,
+                    progress=progress_callback,
+                )
+                update_job(100, "Групповой анализ завершён.", "done")
+                with GROUP_ANALYSIS_JOBS_LOCK:
+                    job = GROUP_ANALYSIS_JOBS.get(job_id)
+                    if job is not None:
+                        job["result"] = result
+            except Exception as exc:
+                message = str(exc).strip() or exc.__class__.__name__
+                print("[HTTP][GROUP-ANALYSIS][ERROR] " + message, flush=True)
+                update_job(100, "Анализ завершился с ошибкой.", "error")
+                with GROUP_ANALYSIS_JOBS_LOCK:
+                    job = GROUP_ANALYSIS_JOBS.get(job_id)
+                    if job is not None:
+                        job["error"] = message[:1000]
+            finally:
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except Exception:
+                        pass
+
+        threading.Thread(
+            target=worker,
+            name="FaceSearch-GroupAnalysis-" + job_id[:8],
+            daemon=True,
+        ).start()
+        self._json(202, {"ok": True, "job_id": job_id, "state": "queued"})
 
     def _detect(self, data: dict):
         image = _decode_image(data.get("image", ""))
