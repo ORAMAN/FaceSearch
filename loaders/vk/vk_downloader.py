@@ -33,6 +33,7 @@ _REPOSITORY_ROOT = str(APP_DIR.parent.parent)
 if _REPOSITORY_ROOT not in sys.path:
     sys.path.insert(0, _REPOSITORY_ROOT)
 from facesearch.config import AUTO_WORKERS_DEFAULT
+from facesearch.settings import load_module_settings, save_module_settings
 from facesearch.processing.telemetry import AdaptiveWorkerController, _gpu_telemetry_worker
 VK_TOKEN_FILE = APP_DIR / "vk_token.txt"
 # VKHost-style OAuth implicit flow: app 8101047, friends + photos + status + offline.
@@ -44,7 +45,8 @@ VK_AUTH_URL = (
 )
 LOG_FILE = APP_DIR / "log.txt"
 DEFAULT_OUTPUT_DIR = APP_DIR / "vk_downloads"
-APP_SETTINGS_PATH = APP_DIR / "vk_settings.json"
+APP_SETTINGS_PATH = APP_DIR / "vk_settings.xml"
+LEGACY_APP_SETTINGS_PATH = APP_SETTINGS_PATH.with_suffix(".json")
 DEFAULT_FACESEARCH_DIR = Path(r"C:\FaceSearch")
 _META_RESOLUTION = "_url_resolution"
 _META_VERSION = "_resolution_version"
@@ -1051,21 +1053,66 @@ def search_vk_cities(query: str, country_id: int, session: requests.Session) -> 
     return [item for item in items if isinstance(item, dict)]
 
 
+def _default_vk_gui_settings() -> dict:
+    return {
+        "output_dir": str(DEFAULT_OUTPUT_DIR),
+        "facesearch_dir": str(DEFAULT_FACESEARCH_DIR),
+        "auto_import": True,
+        "create_crop_files": True,
+        "build_index_after": False,
+        "delete_processed_files": False,
+        "start_id": "",
+        "source_mode": "counter",
+        "specific_ids": "",
+        "friend_depth": 0,
+        "search_query": "",
+        "search_city": "",
+        "search_city_name": "",
+        "search_country": "",
+        "search_sex": 0,
+        "search_age_from": "",
+        "search_age_to": "",
+        "search_online": False,
+        "search_has_photo": False,
+        "search_offset": 0,
+        "workers": 8,
+        "auto_workers": AUTO_WORKERS_DEFAULT,
+        "download_albums": False,
+        "all_albums": False,
+        "system_albums": {str(album_id): True for album_id, _label in SYSTEM_ALBUM_OPTIONS},
+        "download_tagged_photos": False,
+        "album_photo_limit": 0,
+        "theme": "dark",
+        "geometry": "1440x900",
+        "maximized": True,
+    }
+
+
+def _load_vk_gui_settings() -> dict:
+    return load_module_settings(
+        APP_SETTINGS_PATH,
+        "vk_downloader",
+        _default_vk_gui_settings(),
+        window_keys={"theme", "geometry", "maximized"},
+        legacy_json_paths=(LEGACY_APP_SETTINGS_PATH,),
+    )
+
+
+def _save_vk_gui_settings(values: dict) -> None:
+    save_module_settings(
+        APP_SETTINGS_PATH,
+        "vk_downloader",
+        values,
+        window_keys={"theme", "geometry", "maximized"},
+    )
+
+
 def _persist_search_offset(offset: int) -> None:
-    """Сохраняет смещение поиска атомарно, в том числе при закрытии окна во время работы."""
+    """Сохраняет смещение поиска в XML, не затирая остальные параметры формы."""
     try:
-        settings = {}
-        if APP_SETTINGS_PATH.is_file():
-            try:
-                loaded = json.loads(APP_SETTINGS_PATH.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    settings = loaded
-            except (OSError, ValueError, TypeError):
-                settings = {}
+        settings = _load_vk_gui_settings()
         settings["search_offset"] = max(0, int(offset))
-        temp_path = APP_SETTINGS_PATH.with_suffix(".offset.tmp")
-        temp_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp_path.replace(APP_SETTINGS_PATH)
+        _save_vk_gui_settings(settings)
     except Exception as exc:
         print(f"[WARN] Не удалось сохранить смещение поиска VK: {exc}")
 
@@ -4281,6 +4328,9 @@ def main():
 
     root = tk.Tk()
     root.title("VK — загрузчик изображений")
+    initial_gui_settings = _load_vk_gui_settings()
+    theme_state = {"value": initial_gui_settings.get("theme", "dark")}
+    last_normal_geometry = {"value": str(initial_gui_settings.get("geometry") or "1440x900")}
 
     # Палитры согласованы с веб-интерфейсом server_http.py.
     # Тёмная тема использует его графитовый фон и синий акцент; светлая — ту же
@@ -4309,7 +4359,6 @@ def main():
             "danger_active": "#613B42", "danger_pressed": "#542F37", "danger_disabled": "#332E32",
         },
     }
-    theme_state = {"value": "dark"}
     palette = dict(theme_palettes[theme_state["value"]])
     style = ttk.Style(root)
     try:
@@ -4454,28 +4503,35 @@ def main():
     def toggle_theme():
         apply_theme("dark" if theme_state["value"] == "light" else "light", persist=True)
 
-    # На Windows открываем сразу в развёрнутом состоянии; оставляем рамку окна и панель задач.
-    root.geometry("1440x900")
+    # Восстанавливаем геометрию из XML; новые установки по умолчанию развёрнуты.
+    saved_geometry = str(initial_gui_settings.get("geometry") or "1440x900")
+    if re.fullmatch(r"\d+x\d+[+-]\d+[+-]\d+", saved_geometry):
+        root.geometry(saved_geometry)
+    else:
+        root.geometry("1440x900")
     root.minsize(960, 720)
+    last_normal_geometry["value"] = root.geometry()
+    requested_maximized = bool(initial_gui_settings.get("maximized", True))
     maximized = False
-    try:
-        root.state("zoomed")
-        maximized = True
-    except tk.TclError:
-        pass
-    if not maximized:
+    if requested_maximized:
         try:
-            root.attributes("-zoomed", True)
+            root.state("zoomed")
             maximized = True
         except tk.TclError:
             pass
-    if not maximized:
-        try:
-            screen_width = root.winfo_screenwidth()
-            screen_height = root.winfo_screenheight()
-            root.geometry(f"{screen_width}x{screen_height}+0+0")
-        except tk.TclError:
-            pass
+        if not maximized:
+            try:
+                root.attributes("-zoomed", True)
+                maximized = True
+            except tk.TclError:
+                pass
+        if not maximized:
+            try:
+                screen_width = root.winfo_screenwidth()
+                screen_height = root.winfo_screenheight()
+                root.geometry(f"{screen_width}x{screen_height}+0+0")
+            except tk.TclError:
+                pass
 
     original_stdout, original_stderr = sys.stdout, sys.stderr
     sys.stdout = QueueStream(events, "log")
@@ -4870,45 +4926,7 @@ def main():
     ttk.Label(auth_frame, textvariable=auth_status_var, wraplength=980).grid(row=3, column=0, sticky="ew", pady=(3, 0))
 
     def load_gui_settings():
-        defaults = {
-            "output_dir": str(DEFAULT_OUTPUT_DIR),
-            "facesearch_dir": str(DEFAULT_FACESEARCH_DIR),
-            "auto_import": True,
-            "create_crop_files": True,
-            "build_index_after": False,
-            "delete_processed_files": False,
-            "start_id": "",
-            "source_mode": "counter",
-            "specific_ids": "",
-            "friend_depth": 0,
-            "search_query": "",
-            "search_city": "",
-            "search_city_name": "",
-            "search_country": "",
-            "search_sex": 0,
-            "search_age_from": "",
-            "search_age_to": "",
-            "search_online": False,
-            "search_has_photo": False,
-            "search_offset": 0,
-            "workers": 8,
-            "auto_workers": AUTO_WORKERS_DEFAULT,
-            "download_albums": False,
-            "all_albums": False,
-            "system_albums": {str(album_id): True for album_id, _label in SYSTEM_ALBUM_OPTIONS},
-            "download_tagged_photos": False,
-            "album_photo_limit": 0,
-            "theme": "dark",
-        }
-        try:
-            if APP_SETTINGS_PATH.is_file():
-                saved = json.loads(APP_SETTINGS_PATH.read_text(encoding="utf-8"))
-                if isinstance(saved, dict):
-                    for key in defaults:
-                        if key in saved:
-                            defaults[key] = saved[key]
-        except Exception as exc:
-            print(f"[WARN] Не удалось прочитать настройки загрузчика: {exc}")
+        defaults = _load_vk_gui_settings()
         output_var.set(str(defaults["output_dir"]))
         facesearch_dir_var.set(str(defaults["facesearch_dir"]))
         auto_import_var.set(bool(defaults["auto_import"]))
@@ -4993,9 +5011,10 @@ def main():
             "theme": theme_state["value"],
         }
         try:
-            temp_path = APP_SETTINGS_PATH.with_suffix(".tmp")
-            temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            temp_path.replace(APP_SETTINGS_PATH)
+            state = root.state()
+            payload["geometry"] = last_normal_geometry["value"] if state in {"zoomed", "maximized"} else root.geometry()
+            payload["maximized"] = state in {"zoomed", "maximized"}
+            _save_vk_gui_settings(payload)
         except Exception as exc:
             print(f"[WARN] Не удалось сохранить настройки загрузчика: {exc}")
 
@@ -5964,11 +5983,34 @@ def main():
         except tk.TclError:
             pass
 
+    window_settings_save_after_id = {"value": None}
+
+    def on_root_configure(event=None):
+        if event is not None and event.widget is not root:
+            return
+        try:
+            if root.state() == "normal":
+                last_normal_geometry["value"] = root.geometry()
+            if window_settings_save_after_id["value"] is not None:
+                root.after_cancel(window_settings_save_after_id["value"])
+            window_settings_save_after_id["value"] = root.after(400, save_gui_settings)
+        except tk.TclError:
+            window_settings_save_after_id["value"] = None
+
+    root.bind("<Configure>", on_root_configure, add="+")
+
     def on_close():
         if running["value"]:
             if not messagebox.askyesno("Выход", "Задание ещё выполняется. Запросить остановку и закрыть окно?", parent=root):
                 return
             STOP_REQUESTED.set()
+        try:
+            if window_settings_save_after_id["value"] is not None:
+                root.after_cancel(window_settings_save_after_id["value"])
+                window_settings_save_after_id["value"] = None
+            save_gui_settings()
+        except Exception:
+            pass
         window_closing.set()
         sys.stdout = original_stdout
         sys.stderr = original_stderr
