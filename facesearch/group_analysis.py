@@ -222,19 +222,21 @@ def _prepare_candidates(
             current.append(candidate)
             if len(current) >= limit:
                 break
-        if not current:
-            current = [{
-                "profile_key": "unmatched:" + str(face_index),
-                "face_index": face_index,
-                "candidate_rank": 0,
-                "face_id": 0,
-                "name": "Нет совпадения выше порога",
-                "profile_url": "",
-                "city": "",
-                "similarity": 0.0,
-                "vk_user_id": None,
-                "unmatched": True,
-            }]
+        # Вариант «не сопоставлено» доступен всегда: если один профиль
+        # подходит сразу нескольким лицам, алгоритм может оставить одно лицо
+        # без кандидата вместо того, чтобы назначить один профиль дважды.
+        current.append({
+            "profile_key": "unmatched:" + str(face_index),
+            "face_index": face_index,
+            "candidate_rank": 0,
+            "face_id": 0,
+            "name": "Нет совпадения выше порога",
+            "profile_url": "",
+            "city": "",
+            "similarity": 0.0,
+            "vk_user_id": None,
+            "unmatched": True,
+        })
         result.append(current)
     return result
 
@@ -476,7 +478,7 @@ def analyze_group(
 
     progress(5, "Подготовка кандидатов для каждого лица…")
     prepared = _prepare_candidates(candidates_by_face, options)
-    totals = [len(items) for items in prepared]
+    totals = [sum(1 for item in items if not item.get("unmatched")) for items in prepared]
     progress(25, "Кандидаты подготовлены: " + ", ".join(str(n) for n in totals) + " на лицо.")
 
     friend_ids, friend_status = _load_friend_sets(
