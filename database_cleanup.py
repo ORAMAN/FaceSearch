@@ -901,6 +901,9 @@ class ProfileSearchTab(ttk.Frame):
         self._detail_prev_button = None
         self._detail_next_button = None
         self._detail_nav_label = None
+        self._busy_widget_states = []
+        self._busy_menu_states = []
+        self._busy_indicator_active = False
         self._build_ui()
         # Поиск не запускается автоматически: пользователь сам вводит запрос
         # и нажимает «Найти», чтобы не блокировать выбор профиля на больших БД.
@@ -917,7 +920,23 @@ class ProfileSearchTab(ttk.Frame):
         outer = ttk.Frame(self, padding=10)
         outer.pack(fill="both", expand=True)
 
-        controls = ttk.Frame(outer)
+        # Контрастная полоса заметно показывает, что запрос ещё выполняется.
+        self.busy_message_var = tk.StringVar(value="Выполняется операция…")
+        self.busy_frame = ttk.Frame(outer, style="Busy.TFrame", padding=(12, 8))
+        self.busy_message = ttk.Label(
+            self.busy_frame, textvariable=self.busy_message_var, style="Busy.TLabel"
+        )
+        self.busy_message.pack(side="left", fill="x", expand=True)
+        self.busy_progress = ttk.Progressbar(
+            self.busy_frame, mode="indeterminate", length=260,
+            style="Busy.Horizontal.TProgressbar",
+        )
+        self.busy_progress.pack(side="right", padx=(12, 0))
+        self.busy_frame.pack(fill="x", pady=(0, 7))
+        self.busy_frame.pack_forget()
+
+        self.controls_frame = ttk.Frame(outer)
+        controls = self.controls_frame
         controls.pack(fill="x", pady=(0, 7))
         ttk.Label(controls, text="Профиль БД:").pack(side="left", padx=(0, 5))
         self.profile_combo = ttk.Combobox(
@@ -934,7 +953,8 @@ class ProfileSearchTab(ttk.Frame):
         _attach_text_context_menu(self.query_entry)
         self.search_button = ttk.Button(controls, text="Найти", command=self.start_search)
         self.search_button.pack(side="left", padx=4)
-        ttk.Button(controls, text="✕ Очистить", command=self.clear_query).pack(side="left", padx=4)
+        self.clear_query_button = ttk.Button(controls, text="✕ Очистить", command=self.clear_query)
+        self.clear_query_button.pack(side="left", padx=4)
 
         note = ttk.Label(
             outer,
@@ -986,9 +1006,12 @@ class ProfileSearchTab(ttk.Frame):
 
         actions = ttk.Frame(outer)
         actions.pack(fill="x", pady=(8, 4))
-        ttk.Button(actions, text="Выделить страницу", command=self.select_page).pack(side="left", padx=(0, 5))
-        ttk.Button(actions, text="Снять выделение страницы", command=self.deselect_page).pack(side="left", padx=5)
-        ttk.Button(actions, text="Открыть профиль в браузере", command=self.open_selected_profile).pack(side="left", padx=5)
+        self.select_page_button = ttk.Button(actions, text="Выделить страницу", command=self.select_page)
+        self.select_page_button.pack(side="left", padx=(0, 5))
+        self.deselect_page_button = ttk.Button(actions, text="Снять выделение страницы", command=self.deselect_page)
+        self.deselect_page_button.pack(side="left", padx=5)
+        self.open_profile_button = ttk.Button(actions, text="Открыть профиль в браузере", command=self.open_selected_profile)
+        self.open_profile_button.pack(side="left", padx=5)
         self.delete_selected_button = ttk.Button(
             actions, text="Удалить выбранные", command=self.confirm_delete_selected
         )
@@ -1006,9 +1029,19 @@ class ProfileSearchTab(ttk.Frame):
         ttk.Label(paging, textvariable=self.page_var).pack(side="left", padx=10)
         self.next_button = ttk.Button(paging, text="Вперёд ▶", command=lambda: self.change_page(1), state="disabled")
         self.next_button.pack(side="left")
-        ttk.Label(outer, textvariable=self.status_var).pack(fill="x", pady=(8, 0))
+        self.status_label = ttk.Label(outer, textvariable=self.status_var, style="Status.TLabel", wraplength=1400)
+        self.status_label.pack(fill="x", pady=(8, 0))
+
+        self._busy_controls = [
+            self.profile_combo, self.query_entry, self.search_button, self.clear_query_button,
+            self.select_page_button, self.deselect_page_button, self.open_profile_button,
+            self.delete_selected_button, self.delete_all_button, self.prev_button, self.next_button,
+        ]
+        self._busy_tree = self.tree
 
     def _profile_tree_context_menu(self, event):
+        if self._busy:
+            return "break"
         row = self.tree.identify_row(event.y)
         if row and row not in self.tree.selection():
             self.tree.selection_set(row)
@@ -1018,6 +1051,8 @@ class ProfileSearchTab(ttk.Frame):
         return "break"
 
     def _profile_tree_keyboard_menu(self, event=None):
+        if self._busy:
+            return "break"
         row = self.tree.focus()
         if not row:
             selection = self.tree.selection()
@@ -1093,14 +1128,79 @@ class ProfileSearchTab(ttk.Frame):
             pass
         self.copy_selected_rows()
 
-    def _set_busy(self, busy: bool):
-        self._busy = busy
-        state = "disabled" if busy else "normal"
-        for widget in (self.search_button, self.delete_selected_button, self.delete_all_button, self.prev_button, self.next_button):
-            widget.configure(state=state)
-        self.profile_combo.configure(state="disabled" if busy else "readonly")
-        self.query_entry.configure(state=state)
-        if not busy:
+    def _set_busy(self, busy: bool, message: str | None = None):
+        if busy:
+            if self._busy:
+                if message:
+                    self.status_var.set(message)
+                    self.busy_message_var.set(message)
+                return
+            self._busy = True
+            if message:
+                self.status_var.set(message)
+            self.busy_message_var.set(self.status_var.get() or "Выполняется операция…")
+            try:
+                self.busy_frame.pack(fill="x", pady=(0, 7), before=self.controls_frame)
+            except tk.TclError:
+                self.busy_frame.pack(fill="x", pady=(0, 7))
+            self.busy_progress.start(12)
+            self._busy_indicator_active = True
+
+            self._busy_widget_states = []
+            for widget in self._busy_controls:
+                try:
+                    old_state = widget.cget("state")
+                    self._busy_widget_states.append((widget, old_state))
+                    widget.configure(state="disabled")
+                except (tk.TclError, AttributeError):
+                    pass
+            try:
+                self._busy_tree.state(["disabled"])
+            except tk.TclError:
+                pass
+
+            self._busy_menu_states = []
+            try:
+                end_index = self.tree_menu.index("end")
+                if end_index is not None:
+                    for index in range(end_index + 1):
+                        try:
+                            if self.tree_menu.type(index) == "command":
+                                old_state = self.tree_menu.entrycget(index, "state")
+                                self._busy_menu_states.append((index, old_state))
+                                self.tree_menu.entryconfigure(index, state="disabled")
+                        except tk.TclError:
+                            pass
+            except tk.TclError:
+                pass
+        else:
+            self._busy = False
+            if self._busy_indicator_active:
+                try:
+                    self.busy_progress.stop()
+                except tk.TclError:
+                    pass
+                self._busy_indicator_active = False
+            try:
+                self.busy_frame.pack_forget()
+            except tk.TclError:
+                pass
+            for widget, old_state in self._busy_widget_states:
+                try:
+                    widget.configure(state=old_state)
+                except (tk.TclError, AttributeError):
+                    pass
+            self._busy_widget_states.clear()
+            try:
+                self._busy_tree.state(["!disabled"])
+            except tk.TclError:
+                pass
+            for index, old_state in self._busy_menu_states:
+                try:
+                    self.tree_menu.entryconfigure(index, state=old_state)
+                except tk.TclError:
+                    pass
+            self._busy_menu_states.clear()
             self._refresh_paging_buttons()
         self._refresh_detail_navigation()
 
@@ -1189,8 +1289,7 @@ class ProfileSearchTab(ttk.Frame):
         self.selected_ids.clear()
         self.current_page = 0
         profile_name = self.profile_var.get()
-        self._set_busy(True)
-        self.status_var.set("Поиск профилей в выбранной базе…")
+        self._set_busy(True, "⏳ Поиск профилей в базе данных. Чтение совпадений…")
         threading.Thread(target=self._search_worker, args=(profile_name, query, 0), daemon=True).start()
 
     def _search_worker(self, profile_name: str, query: str, offset: int):
@@ -1255,9 +1354,9 @@ class ProfileSearchTab(ttk.Frame):
         new_page = max(0, min(max_page, self.current_page + delta))
         if new_page == self.current_page:
             return
-        self._set_busy(True)
         profile_name = self.profile_var.get()
         query = self.last_query or ""
+        self._set_busy(True, f"⏳ Загрузка страницы {new_page + 1} результатов поиска…")
         threading.Thread(
             target=self._page_worker,
             args=(profile_name, query, new_page * PAGE_SIZE),
@@ -1300,8 +1399,7 @@ class ProfileSearchTab(ttk.Frame):
         pid = int(self.tree.item(selection[0], "values")[0])
         profile_name = self.profile_var.get()
         query = self.last_query if self.last_profile_name == profile_name else ""
-        self._set_busy(True)
-        self.status_var.set(f"Чтение подробностей профиля ID {pid}…")
+        self._set_busy(True, f"⏳ Загрузка окна профиля ID {pid}. Чтение данных и фотографий…")
         threading.Thread(
             target=self._details_worker, args=(profile_name, pid, query or ""), daemon=True
         ).start()
@@ -1375,8 +1473,7 @@ class ProfileSearchTab(ttk.Frame):
             return
         profile_name = self._detail_profile_name
         query = self._detail_query
-        self._set_busy(True)
-        self.status_var.set(f"Переход к профилю ID {target}…")
+        self._set_busy(True, f"⏳ Загрузка профиля ID {target}…")
         threading.Thread(
             target=self._details_worker,
             args=(profile_name, target, query),
@@ -1571,6 +1668,8 @@ class ProfileSearchTab(ttk.Frame):
 
     def _open_large_preview(self, parent, image_item, profile_name=None):
         """Открывает изображение в отдельном окне; сетевые данные загружаются в фоне."""
+        if self._busy:
+            return
         win = tk.Toplevel(parent)
         win.title(f"FaceSearch — просмотр изображения {image_item.get('id', '')}")
         win.geometry("1000x760")
@@ -2180,6 +2279,10 @@ class CleanupSuite(tk.Tk):
         style.configure("TLabel", background=p["panel"], foreground=p["text"])
         style.configure("Header.TLabel", background=p["app"], foreground=p["text"], font=("Segoe UI", 15, "bold"))
         style.configure("Muted.TLabel", background=p["app"], foreground=p["muted"], font=("Segoe UI", 9))
+        style.configure("Status.TLabel", background=p["panel"], foreground=p["accent"], font=("Segoe UI", 10, "bold"))
+        style.configure("Busy.TFrame", background=p["accent"], bordercolor=p["accent"], relief="solid", borderwidth=1)
+        style.configure("Busy.TLabel", background=p["accent"], foreground="#FFFFFF", font=("Segoe UI", 10, "bold"))
+        style.configure("Busy.Horizontal.TProgressbar", troughcolor=p["panel"], background="#FFFFFF", bordercolor=p["accent"], lightcolor="#FFFFFF", darkcolor="#FFFFFF", thickness=10)
         style.configure("TCheckbutton", background=p["panel"], foreground=p["text"], padding=3)
         style.map("TCheckbutton", background=[("active", p["panel"])], foreground=[("disabled", p["disabled"])])
         style.configure("TRadiobutton", background=p["panel"], foreground=p["text"], padding=3)
