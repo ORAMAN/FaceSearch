@@ -1069,6 +1069,8 @@ class ProfileSearchTab(ttk.Frame):
         return "break"
 
     def _profile_tree_shortcuts(self, event):
+        if self._busy:
+            return "break"
         if not (event.state & 0x4):
             return None
         if event.keycode == 67:
