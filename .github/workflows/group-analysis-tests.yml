@@ -23,5 +23,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Compile modified Python modules
+        run: >-
+          python -m py_compile
+          face_search_gui.py
+          server_http.py
+          facesearch/group_analysis.py
+          facesearch/settings.py
+          loaders/vk/vk_downloader.py
+      - name: Check browser JavaScript syntax
+        run: node --check group_analysis_ui.js
       - name: Run group analysis tests
         run: python -m unittest discover -s tests -p "test_group_analysis.py" -v
