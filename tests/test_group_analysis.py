@@ -101,6 +101,7 @@ class GroupAnalysisTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as app_dir:
             result = analyze_group(candidates, options, app_dir)
 
+        self.assertGreaterEqual(len(result["combinations"]), 1)
         for combination in result["combinations"]:
             keys = [
                 p["profile_key"] for p in combination["profiles"]
