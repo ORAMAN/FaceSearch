@@ -866,10 +866,17 @@ class ProfileSearchTab(ttk.Frame):
         super().__init__(master, padding=10)
         self.profiles, active = load_profiles()
         self.profile_by_name = {str(p["name"]): p for p in self.profiles}
-        self.profile_var = tk.StringVar(
-            value=active if active in self.profile_by_name else str(self.profiles[0]["name"])
+        settings = getattr(self.winfo_toplevel(), "_saved_settings", {})
+        saved_profile = str(settings.get("database_profile") or "")
+        profile_value = (
+            saved_profile if saved_profile in self.profile_by_name
+            else active if active in self.profile_by_name
+            else str(self.profiles[0]["name"])
         )
-        self.query_var = tk.StringVar(value="")
+        self.profile_var = tk.StringVar(value=profile_value)
+        self.query_var = tk.StringVar(value=str(settings.get("query") or ""))
+        self.profile_var.trace_add("write", self._schedule_settings_save)
+        self.query_var.trace_add("write", self._schedule_settings_save)
         self.status_var = tk.StringVar(
             value="Введите часть значения и нажмите «Найти». Поиск охватывает все поля профиля и связанные изображения."
         )
@@ -884,9 +891,27 @@ class ProfileSearchTab(ttk.Frame):
         self.total_matches = 0
         self.last_query: str | None = None
         self.last_profile_name: str | None = None
+        self._details_window = None
+        self._details_body = None
+        self._detail_profile_id = None
+        self._detail_profile_name = None
+        self._detail_query = ""
+        self._detail_prev_pid = None
+        self._detail_next_pid = None
+        self._detail_prev_button = None
+        self._detail_next_button = None
+        self._detail_nav_label = None
         self._build_ui()
         # Поиск не запускается автоматически: пользователь сам вводит запрос
         # и нажимает «Найти», чтобы не блокировать выбор профиля на больших БД.
+
+    def _schedule_settings_save(self, *_args):
+        try:
+            root = self.winfo_toplevel()
+            if hasattr(root, "schedule_settings_save"):
+                root.schedule_settings_save()
+        except tk.TclError:
+            pass
 
     def _build_ui(self):
         outer = ttk.Frame(self, padding=10)
@@ -909,7 +934,7 @@ class ProfileSearchTab(ttk.Frame):
         _attach_text_context_menu(self.query_entry)
         self.search_button = ttk.Button(controls, text="Найти", command=self.start_search)
         self.search_button.pack(side="left", padx=4)
-        ttk.Button(controls, text="Очистить поиск", command=self.clear_query).pack(side="left", padx=4)
+        ttk.Button(controls, text="✕ Очистить", command=self.clear_query).pack(side="left", padx=4)
 
         note = ttk.Label(
             outer,
@@ -1077,6 +1102,7 @@ class ProfileSearchTab(ttk.Frame):
         self.query_entry.configure(state=state)
         if not busy:
             self._refresh_paging_buttons()
+        self._refresh_detail_navigation()
 
     def _refresh_paging_buttons(self):
         if self._busy:
@@ -1088,6 +1114,17 @@ class ProfileSearchTab(ttk.Frame):
             state="normal" if self.total_matches > 0 and bool((self.last_query or "").strip()) and self.last_query == self.query_var.get().strip() and self.last_profile_name == self.profile_var.get() else "disabled"
         )
         self.delete_selected_button.configure(state="normal" if self.selected_ids else "disabled")
+
+    def _refresh_detail_navigation(self):
+        if self._detail_prev_button is None or self._detail_next_button is None:
+            return
+        state = "disabled" if self._busy else "normal"
+        self._detail_prev_button.configure(
+            state=state if self._detail_prev_pid is not None else "disabled"
+        )
+        self._detail_next_button.configure(
+            state=state if self._detail_next_pid is not None else "disabled"
+        )
 
     def _on_profile_changed(self, _event=None):
         # Сбрасываем старые результаты, чтобы нельзя было принять их за выборку
@@ -1262,18 +1299,25 @@ class ProfileSearchTab(ttk.Frame):
             return
         pid = int(self.tree.item(selection[0], "values")[0])
         profile_name = self.profile_var.get()
+        query = self.last_query if self.last_profile_name == profile_name else ""
         self._set_busy(True)
         self.status_var.set(f"Чтение подробностей профиля ID {pid}…")
-        threading.Thread(target=self._details_worker, args=(profile_name, pid), daemon=True).start()
+        threading.Thread(
+            target=self._details_worker, args=(profile_name, pid, query or ""), daemon=True
+        ).start()
 
-    def _details_worker(self, profile_name: str, pid: int):
+    def _details_worker(self, profile_name: str, pid: int, query: str = ""):
         conn = None
         try:
             conn, _backend = open_database(self.profile_by_name[profile_name])
             pcols = get_columns(conn, "profiles")
+            icols = get_columns(conn, "images")
             row = conn.execute("SELECT * FROM profiles WHERE id = ?", (pid,)).fetchone()
+            profile_data = []
+            image_data = []
+            error = ""
             if row is None:
-                result = (pid, [], [], "Профиль уже отсутствует в базе.")
+                error = "Профиль уже отсутствует в базе."
             else:
                 # Для драйверов DB-API порядок SELECT * соответствует порядку метаданных таблицы.
                 profile_data = list(zip(pcols, row))
@@ -1287,7 +1331,31 @@ class ProfileSearchTab(ttk.Frame):
                 img_rows = conn.execute(image_sql, (pid,)).fetchall()
                 images_cols = ["id", "filename", "source_type", "source_url", "url_image", "path", "source_key"]
                 image_data = [list(zip(images_cols, values)) for values in img_rows]
-                result = (pid, profile_data, image_data, "")
+
+            prev_pid = next_pid = None
+            if not error and query:
+                try:
+                    where_sql, params = _make_filter(conn, query, set(pcols), set(icols))
+                    def find_neighbor(operator: str, ordering: str):
+                        if conn.backend == DB_TYPE_MSSQL:
+                            sql = (
+                                f"SELECT TOP 1 p.id FROM profiles p WHERE ({where_sql}) "
+                                f"AND p.id {operator} ? ORDER BY p.id {ordering}"
+                            )
+                        else:
+                            sql = (
+                                f"SELECT p.id FROM profiles p WHERE ({where_sql}) "
+                                f"AND p.id {operator} ? ORDER BY p.id {ordering} LIMIT 1"
+                            )
+                        found = conn.execute(sql, tuple(params) + (pid,)).fetchone()
+                        return int(found[0]) if found else None
+                    prev_pid = find_neighbor("<", "DESC")
+                    next_pid = find_neighbor(">", "ASC")
+                except Exception:
+                    # Подробности остаются доступны, даже если нельзя вычислить соседей.
+                    prev_pid = next_pid = None
+
+            result = (pid, profile_data, image_data, error, profile_name, query, prev_pid, next_pid)
             self.after(0, lambda data=result: self._show_details_window(data))
         except Exception as exc:
             self.after(0, lambda err=str(exc): self._show_error("Ошибка чтения профиля", err))
@@ -1299,14 +1367,61 @@ class ProfileSearchTab(ttk.Frame):
                     pass
             self.after(0, lambda: self._set_busy(False))
 
+    def _navigate_details(self, direction: int):
+        if self._busy or self._details_window is None:
+            return
+        target = self._detail_prev_pid if direction < 0 else self._detail_next_pid
+        if target is None or self._detail_profile_name not in self.profile_by_name:
+            return
+        profile_name = self._detail_profile_name
+        query = self._detail_query
+        self._set_busy(True)
+        self.status_var.set(f"Переход к профилю ID {target}…")
+        threading.Thread(
+            target=self._details_worker,
+            args=(profile_name, target, query),
+            daemon=True,
+        ).start()
+
     def _show_details_window(self, data):
-        pid, profile_data, image_data, error = data
-        win = tk.Toplevel(self)
+        pid, profile_data, image_data, error, profile_name, query, prev_pid, next_pid = data
+        win = self._details_window
+        if win is None or not win.winfo_exists():
+            win = tk.Toplevel(self)
+            self._details_window = win
+            win.geometry("1180x760")
+            win.minsize(760, 500)
+
+            navigation = ttk.Frame(win, padding=(10, 10, 10, 0))
+            navigation.pack(fill="x")
+            self._detail_prev_button = ttk.Button(
+                navigation, text="◀ Назад", command=lambda: self._navigate_details(-1)
+            )
+            self._detail_prev_button.pack(side="left")
+            self._detail_nav_label = ttk.Label(navigation, text="", anchor="center")
+            self._detail_nav_label.pack(side="left", fill="x", expand=True, padx=10)
+            self._detail_next_button = ttk.Button(
+                navigation, text="Вперёд ▶", command=lambda: self._navigate_details(1)
+            )
+            self._detail_next_button.pack(side="right")
+            self._details_body = ttk.Frame(win)
+            self._details_body.pack(fill="both", expand=True)
+            win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_details_window(w))
+        else:
+            for child in self._details_body.winfo_children():
+                child.destroy()
+
         win.title(f"FaceSearch — подробности профиля ID {pid}")
-        win.geometry("1180x760")
-        win.minsize(760, 500)
-        outer = ttk.Frame(win, padding=10)
+        self._detail_profile_id = int(pid)
+        self._detail_profile_name = profile_name
+        self._detail_query = query or ""
+        self._detail_prev_pid = prev_pid
+        self._detail_next_pid = next_pid
+        self._detail_nav_label.configure(text=f"Профиль ID {pid} · навигация по результатам поиска")
+        self._refresh_detail_navigation()
+        outer = ttk.Frame(self._details_body, padding=10)
         outer.pack(fill="both", expand=True)
+        win.lift()
         panes = ttk.Panedwindow(outer, orient="horizontal")
         panes.pack(fill="both", expand=True)
 
@@ -1356,7 +1471,7 @@ class ProfileSearchTab(ttk.Frame):
         gallery_canvas.bind("<Configure>", lambda e: gallery_canvas.itemconfigure(gallery_window, width=e.width))
 
         try:
-            preview_crop_base = profile_crop_dir(self.profile_by_name[self.profile_var.get()])
+            preview_crop_base = profile_crop_dir(self.profile_by_name[profile_name])
         except Exception:
             preview_crop_base = (PROJECT_DIR / "face_images").resolve()
 
@@ -1421,7 +1536,11 @@ class ProfileSearchTab(ttk.Frame):
                             thumb = ImageTk.PhotoImage(image.copy(), master=parent)
                             parent._preview_images.append(thumb)
                             label.configure(image=thumb, text="", compound="center")
-                            label.bind("<Button-1>", lambda _event, item=dict(item): self._open_large_preview(parent, item))
+                            label.bind(
+                                "<Button-1>",
+                                lambda _event, item=dict(item), db_name=profile_name:
+                                    self._open_large_preview(parent, item, db_name),
+                            )
                             label.configure(cursor="hand2")
                             label.image = thumb
                             label._original_size = original_size
@@ -1438,7 +1557,19 @@ class ProfileSearchTab(ttk.Frame):
         except Exception:
             pass
 
-    def _open_large_preview(self, parent, image_item):
+    def _close_details_window(self, win):
+        if self._details_window is win:
+            self._details_window = None
+            self._details_body = None
+            self._detail_prev_button = None
+            self._detail_next_button = None
+            self._detail_nav_label = None
+        try:
+            win.destroy()
+        except tk.TclError:
+            pass
+
+    def _open_large_preview(self, parent, image_item, profile_name=None):
         """Открывает изображение в отдельном окне; сетевые данные загружаются в фоне."""
         win = tk.Toplevel(parent)
         win.title(f"FaceSearch — просмотр изображения {image_item.get('id', '')}")
@@ -1455,7 +1586,7 @@ class ProfileSearchTab(ttk.Frame):
         # preview_crop_base внутри метода должен вычисляться заново:
         # локальная переменная из метода, открывшего галерею, сюда не передаётся.
         try:
-            profile = self.profile_by_name.get(self.profile_var.get())
+            profile = self.profile_by_name.get(profile_name or self._detail_profile_name or self.profile_var.get())
             preview_crop_base = profile_crop_dir(profile) if profile else (PROJECT_DIR / "face_images").resolve()
         except Exception:
             preview_crop_base = (PROJECT_DIR / "face_images").resolve()
@@ -1930,15 +2061,26 @@ class CleanupSuite(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("FaceSearch — инструменты очистки базы")
-        self.geometry("1500x820")
         self.minsize(1120, 640)
-        self.theme_state = {"value": "dark"}
+        self._settings_after_id = None
+        self._saved_settings = {}
         try:
-            saved = json.loads(self.SETTINGS_PATH.read_text(encoding="utf-8"))
-            if saved.get("theme") in self.PALETTES:
-                self.theme_state["value"] = saved["theme"]
+            loaded = json.loads(self.SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                self._saved_settings = loaded
         except (OSError, ValueError, TypeError):
             pass
+
+        saved_theme = self._saved_settings.get("theme")
+        self.theme_state = {"value": saved_theme if saved_theme in self.PALETTES else "dark"}
+        saved_geometry = self._saved_settings.get("geometry")
+        if isinstance(saved_geometry, str) and re.fullmatch(r"\d+x\d+[+-]\d+[+-]\d+", saved_geometry):
+            self.geometry(saved_geometry)
+            self._last_normal_geometry = saved_geometry
+        else:
+            self.geometry("1500x820")
+            self._last_normal_geometry = self.geometry()
+        self._restore_maximized = bool(self._saved_settings.get("maximized", False))
         self.palette = dict(self.PALETTES[self.theme_state["value"]])
         self.style = ttk.Style(self)
         try:
@@ -1967,6 +2109,65 @@ class CleanupSuite(tk.Tk):
         footer.pack(fill="x")
         ttk.Label(footer, text="Перед массовым удалением сделайте резервную копию БД. После удаления лиц перестройте FAISS.", style="Muted.TLabel").pack(side="left")
         self.apply_theme(self.theme_state["value"], persist=False)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Configure>", self._on_configure, add="+")
+        self.after(180, self._restore_window_state)
+
+    def _restore_window_state(self):
+        if self._restore_maximized:
+            try:
+                self.state("zoomed")
+            except tk.TclError:
+                pass
+        self.schedule_settings_save()
+
+    def _on_configure(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+        try:
+            if self.state() == "normal":
+                self._last_normal_geometry = self.geometry()
+        except tk.TclError:
+            pass
+        self.schedule_settings_save()
+
+    def schedule_settings_save(self):
+        try:
+            if self._settings_after_id is not None:
+                self.after_cancel(self._settings_after_id)
+            self._settings_after_id = self.after(350, self._save_settings)
+        except tk.TclError:
+            self._settings_after_id = None
+
+    def _save_settings(self):
+        self._settings_after_id = None
+        try:
+            state = self.state()
+            maximized = state in {"zoomed", "maximized"}
+            geometry = self.geometry() if state == "normal" else self._last_normal_geometry
+            profile_tab = getattr(self, "profile_tab", None)
+            saved = {
+                "theme": self.theme_state["value"],
+                "geometry": str(geometry or "1500x820"),
+                "maximized": maximized,
+                "query": profile_tab.query_var.get() if profile_tab is not None else str(self._saved_settings.get("query") or ""),
+                "database_profile": profile_tab.profile_var.get() if profile_tab is not None else str(self._saved_settings.get("database_profile") or ""),
+            }
+            temporary = self.SETTINGS_PATH.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(self.SETTINGS_PATH)
+            self._saved_settings = saved
+        except (OSError, tk.TclError, AttributeError, TypeError):
+            pass
+
+    def _on_close(self):
+        try:
+            if self._settings_after_id is not None:
+                self.after_cancel(self._settings_after_id)
+                self._settings_after_id = None
+            self._save_settings()
+        finally:
+            self.destroy()
 
     def _configure_theme_styles(self):
         p = self.palette
@@ -2034,10 +2235,7 @@ class CleanupSuite(tk.Tk):
         recolor(self)
         self._update_theme_button()
         if persist:
-            try:
-                self.SETTINGS_PATH.write_text(json.dumps({"theme": selected}, ensure_ascii=False, indent=2), encoding="utf-8")
-            except OSError:
-                pass
+            self._save_settings()
 
 
 if __name__ == '__main__':
