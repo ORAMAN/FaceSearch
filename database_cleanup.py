@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sqlite3
+import io
 import sys
 import threading
 import time
@@ -1302,12 +1303,23 @@ class ProfileSearchTab(ttk.Frame):
         pid, profile_data, image_data, error = data
         win = tk.Toplevel(self)
         win.title(f"FaceSearch — подробности профиля ID {pid}")
-        win.geometry("1050x700")
-        win.minsize(700, 450)
-        frame = ttk.Frame(win, padding=10)
-        frame.pack(fill="both", expand=True)
-        text = tk.Text(frame, wrap="word", undo=False)
-        scroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
+        win.geometry("1180x760")
+        win.minsize(760, 500)
+        outer = ttk.Frame(win, padding=10)
+        outer.pack(fill="both", expand=True)
+        panes = ttk.Panedwindow(outer, orient="horizontal")
+        panes.pack(fill="both", expand=True)
+
+        details_frame = ttk.Frame(panes)
+        gallery_frame = ttk.Frame(panes, padding=(8, 0, 0, 0))
+        panes.add(details_frame, weight=3)
+        panes.add(gallery_frame, weight=2)
+
+        ttk.Label(details_frame, text="Данные профиля и фотографий", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        text_frame = ttk.Frame(details_frame)
+        text_frame.pack(fill="both", expand=True)
+        text = tk.Text(text_frame, wrap="word", undo=False)
+        scroll = ttk.Scrollbar(text_frame, orient="vertical", command=text.yview)
         text.configure(yscrollcommand=scroll.set)
         text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
@@ -1330,6 +1342,166 @@ class ProfileSearchTab(ttk.Frame):
         text.configure(state="disabled")
         _attach_text_context_menu(text, readonly=True)
         text.bind("<Control-KeyPress>", lambda event: "break" if event.state & 0x4 and event.keycode in (65, 86, 88) else None, add="+")
+
+        ttk.Label(gallery_frame, text=f"Быстрый просмотр · {len(image_data)} фото", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        ttk.Label(gallery_frame, text="Нажмите на миниатюру, чтобы открыть увеличенный просмотр.", wraplength=300).pack(anchor="w", pady=(0, 6))
+        gallery_canvas = tk.Canvas(gallery_frame, highlightthickness=0, width=340)
+        gallery_scroll = ttk.Scrollbar(gallery_frame, orient="vertical", command=gallery_canvas.yview)
+        gallery_inner = ttk.Frame(gallery_canvas)
+        gallery_window = gallery_canvas.create_window((0, 0), window=gallery_inner, anchor="nw")
+        gallery_canvas.configure(yscrollcommand=gallery_scroll.set)
+        gallery_canvas.pack(side="left", fill="both", expand=True)
+        gallery_scroll.pack(side="right", fill="y")
+        gallery_inner.bind("<Configure>", lambda _e: gallery_canvas.configure(scrollregion=gallery_canvas.bbox("all")))
+        gallery_canvas.bind("<Configure>", lambda e: gallery_canvas.itemconfigure(gallery_window, width=e.width))
+
+        win._preview_images = []
+        for index, image_data_item in enumerate(image_data, 1):
+            image_values = dict(image_data_item)
+            card = ttk.Frame(gallery_inner, padding=6)
+            card.pack(fill="x", pady=4)
+            filename = str(image_values.get("filename") or f"Изображение {index}")
+            ttk.Label(card, text=f"{index}. {filename}", wraplength=300).pack(anchor="w")
+            preview_label = ttk.Label(card, text="Загрузка миниатюры…", anchor="center")
+            preview_label.pack(fill="x", pady=(4, 2))
+            ttk.Label(card, text=f"Image ID: {image_values.get('id', '—')}").pack(anchor="w")
+            preview_label.configure(cursor="hand2")
+
+            def load_preview(item=dict(image_values), label=preview_label, num=index, parent=win):
+                try:
+                    from PIL import Image, ImageTk
+                    raw_path = str(item.get("path") or "").strip()
+                    source_url = str(item.get("url_image") or "").strip()
+                    original_url = str(item.get("source_url") or "").strip()
+                    image = None
+                    candidates = []
+                    if raw_path:
+                        candidate = Path(raw_path).expanduser()
+                        if not candidate.is_absolute():
+                            candidate = PROJECT_DIR / candidate
+                        candidates.append(candidate)
+                        if item.get("path"):
+                            candidates.append(PROJECT_DIR / "face_images" / str(item["path"]))
+                    for candidate in candidates:
+                        try:
+                            if candidate.is_file():
+                                image = Image.open(candidate)
+                                image.load()
+                                break
+                        except Exception:
+                            continue
+                    if image is None:
+                        for url in (source_url, original_url):
+                            if not url.lower().startswith(("http://", "https://")):
+                                continue
+                            try:
+                                request = Request(url, headers={"User-Agent": "FaceSearch/1.0"})
+                                with urlopen(request, timeout=8) as response:
+                                    payload = response.read(12 * 1024 * 1024 + 1)
+                                if len(payload) > 12 * 1024 * 1024:
+                                    continue
+                                image = Image.open(io.BytesIO(payload))
+                                image.load()
+                                break
+                            except Exception:
+                                continue
+                    if image is None:
+                        raise OSError("Файл недоступен и загрузить изображение по URL не удалось.")
+                    image = image.convert("RGB")
+                    original_size = image.size
+                    image.thumbnail((300, 190), Image.Resampling.LANCZOS)
+                    def show_thumb():
+                        try:
+                            thumb = ImageTk.PhotoImage(image.copy(), master=parent)
+                            parent._preview_images.append(thumb)
+                            label.configure(image=thumb, text="", compound="center")
+                            label.bind("<Button-1>", lambda _event, item=dict(item): self._open_large_preview(parent, item))
+                            label.configure(cursor="hand2")
+                            label.image = thumb
+                            label._original_size = original_size
+                        except tk.TclError:
+                            pass
+                    parent.after(0, show_thumb)
+                except Exception as exc:
+                    parent.after(0, lambda e=str(exc): label.configure(text=f"Предпросмотр недоступен\n{e[:120]}", wraplength=300))
+
+            threading.Thread(target=load_preview, daemon=True, name=f"ProfilePreview-{pid}-{index}").start()
+
+        try:
+            self.winfo_toplevel().apply_theme(self.winfo_toplevel().theme_state["value"], persist=False)
+        except Exception:
+            pass
+
+    def _open_large_preview(self, parent, image_item):
+        """Открывает изображение в отдельном окне; сетевые данные загружаются в фоне."""
+        win = tk.Toplevel(parent)
+        win.title(f"FaceSearch — просмотр изображения {image_item.get('id', '')}")
+        win.geometry("1000x760")
+        win.minsize(480, 360)
+        body = ttk.Frame(win, padding=8)
+        body.pack(fill="both", expand=True)
+        image_label = ttk.Label(body, text="Загрузка изображения…", anchor="center")
+        image_label.pack(fill="both", expand=True)
+        caption = ttk.Label(body, text=str(image_item.get("filename") or image_item.get("url_image") or "Изображение"), wraplength=900)
+        caption.pack(fill="x", pady=(6, 0))
+        win._full_preview_images = []
+
+        def worker():
+            try:
+                from PIL import Image, ImageTk
+                image = None
+                raw_path = str(image_item.get("path") or "").strip()
+                candidates = []
+                if raw_path:
+                    path = Path(raw_path).expanduser()
+                    if not path.is_absolute():
+                        path = PROJECT_DIR / path
+                    candidates.append(path)
+                    candidates.append(PROJECT_DIR / "face_images" / raw_path)
+                for path in candidates:
+                    try:
+                        if path.is_file():
+                            image = Image.open(path)
+                            image.load()
+                            break
+                    except Exception:
+                        continue
+                if image is None:
+                    for url in (str(image_item.get("url_image") or ""), str(image_item.get("source_url") or "")):
+                        if not url.lower().startswith(("http://", "https://")):
+                            continue
+                        try:
+                            request = Request(url, headers={"User-Agent": "FaceSearch/1.0"})
+                            with urlopen(request, timeout=10) as response:
+                                payload = response.read(20 * 1024 * 1024 + 1)
+                            if len(payload) > 20 * 1024 * 1024:
+                                continue
+                            image = Image.open(io.BytesIO(payload))
+                            image.load()
+                            break
+                        except Exception:
+                            continue
+                if image is None:
+                    raise OSError("Не удалось прочитать локальный файл или загрузить изображение.")
+                original_size = image.size
+                image = image.convert("RGB")
+                image.thumbnail((1500, 1100), Image.Resampling.LANCZOS)
+                def show():
+                    try:
+                        photo = ImageTk.PhotoImage(image, master=win)
+                        win._full_preview_images.append(photo)
+                        image_label.configure(image=photo, text="")
+                        caption.configure(text=f"{image_item.get('filename') or 'Изображение'} · исходный размер {original_size[0]} × {original_size[1]}")
+                    except tk.TclError:
+                        pass
+                win.after(0, show)
+            except Exception as exc:
+                win.after(0, lambda e=str(exc): image_label.configure(text=f"Предпросмотр недоступен:\n{e}", wraplength=700))
+        threading.Thread(target=worker, daemon=True, name="FullImagePreview").start()
+        try:
+            self.winfo_toplevel().apply_theme(self.winfo_toplevel().theme_state["value"], persist=False)
+        except Exception:
+            pass
 
     def confirm_delete_selected(self):
         if self._busy:
@@ -1720,26 +1892,137 @@ class RemoteCleanupTab(ttk.Frame):
 
 
 class CleanupSuite(tk.Tk):
+    """Главное окно и единая дневная/ночная тема, как в загрузчике VK."""
+    SETTINGS_PATH = APP_DIR / "database_cleanup_settings.json"
+
+    PALETTES = {
+        "light": {
+            "app": "#F4F5F7", "panel": "#FFFFFF", "field": "#FFFFFF",
+            "text": "#202124", "muted": "#62666B", "border": "#C8CFD8",
+            "accent": "#1479C9", "accent_active": "#0F6DB6",
+            "button": "#E5E7EB", "button_active": "#D1D5DB",
+            "selection": "#D6E8F8", "disabled": "#8A9098",
+        },
+        "dark": {
+            "app": "#151515", "panel": "#242424", "field": "#1C1C1C",
+            "text": "#EEEEEE", "muted": "#AAAAAA", "border": "#383838",
+            "accent": "#167AC6", "accent_active": "#1989DC",
+            "button": "#333333", "button_active": "#444444",
+            "selection": "#244A68", "disabled": "#777777",
+        },
+    }
+
     def __init__(self):
         super().__init__()
-        self.title('FaceSearch — инструменты очистки базы')
-        self.geometry('1500x820')
+        self.title("FaceSearch — инструменты очистки базы")
+        self.geometry("1500x820")
         self.minsize(1120, 640)
-        header = ttk.Frame(self, padding=(10, 8, 10, 4)); header.pack(fill='x')
-        ttk.Label(header, text='FaceSearch · Инструменты очистки', font=('Segoe UI', 13, 'bold')).pack(side='left')
-        ttk.Label(header, text='Профили · локальные файлы · сетевые URL', foreground='#64748b').pack(side='left', padx=14)
+        self.theme_state = {"value": "dark"}
+        try:
+            saved = json.loads(self.SETTINGS_PATH.read_text(encoding="utf-8"))
+            if saved.get("theme") in self.PALETTES:
+                self.theme_state["value"] = saved["theme"]
+        except (OSError, ValueError, TypeError):
+            pass
+        self.palette = dict(self.PALETTES[self.theme_state["value"]])
+        self.style = ttk.Style(self)
+        try:
+            self.style.theme_use("clam")
+        except tk.TclError:
+            pass
+        self._configure_theme_styles()
+
+        header = ttk.Frame(self, padding=(10, 8, 10, 4), style="App.TFrame")
+        header.pack(fill="x")
+        ttk.Label(header, text="FaceSearch · Инструменты очистки", style="Header.TLabel").pack(side="left")
+        ttk.Label(header, text="Профили · локальные файлы · сетевые URL", style="Muted.TLabel").pack(side="left", padx=14)
+        self.theme_button = ttk.Button(header, command=self.toggle_theme, style="Accent.TButton")
+        self.theme_button.pack(side="right")
+        self._update_theme_button()
+
         notebook = ttk.Notebook(self)
-        notebook.pack(fill='both', expand=True, padx=8, pady=(0, 8))
+        notebook.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.profile_tab = ProfileSearchTab(notebook)
         self.local_tab = LocalCleanupTab(notebook)
         self.remote_tab = RemoteCleanupTab(notebook)
-        notebook.add(self.profile_tab, text='  Профили и связанные данные  ')
-        notebook.add(self.local_tab, text='  Отсутствующие локальные файлы  ')
-        notebook.add(self.remote_tab, text='  Недоступные URL  ')
-        footer = ttk.Frame(self, padding=(10, 0, 10, 8)); footer.pack(fill='x')
-        ttk.Label(footer, text='Перед массовым удалением сделайте резервную копию БД. После удаления лиц перестройте FAISS.', foreground='#9a3412').pack(side='left')
-        # Первая вкладка должна открываться с активным полем поиска и выбором БД.
-        # Поиск запускается кнопкой «Найти», а не автоматически при старте.
+        notebook.add(self.profile_tab, text="  Профили и связанные данные  ")
+        notebook.add(self.local_tab, text="  Отсутствующие локальные файлы  ")
+        notebook.add(self.remote_tab, text="  Недоступные URL  ")
+        footer = ttk.Frame(self, padding=(10, 0, 10, 8), style="App.TFrame")
+        footer.pack(fill="x")
+        ttk.Label(footer, text="Перед массовым удалением сделайте резервную копию БД. После удаления лиц перестройте FAISS.", style="Muted.TLabel").pack(side="left")
+        self.apply_theme(self.theme_state["value"], persist=False)
+
+    def _configure_theme_styles(self):
+        p = self.palette
+        style = self.style
+        style.configure(".", font=("Segoe UI", 10), foreground=p["text"], background=p["panel"])
+        style.configure("TFrame", background=p["panel"])
+        style.configure("App.TFrame", background=p["app"])
+        style.configure("TLabelframe", background=p["panel"], bordercolor=p["border"], lightcolor=p["border"], darkcolor=p["border"])
+        style.configure("TLabelframe.Label", background=p["panel"], foreground=p["accent"], font=("Segoe UI", 10, "bold"))
+        style.configure("TLabel", background=p["panel"], foreground=p["text"])
+        style.configure("Header.TLabel", background=p["app"], foreground=p["text"], font=("Segoe UI", 15, "bold"))
+        style.configure("Muted.TLabel", background=p["app"], foreground=p["muted"], font=("Segoe UI", 9))
+        style.configure("TCheckbutton", background=p["panel"], foreground=p["text"], padding=3)
+        style.map("TCheckbutton", background=[("active", p["panel"])], foreground=[("disabled", p["disabled"])])
+        style.configure("TRadiobutton", background=p["panel"], foreground=p["text"], padding=3)
+        style.map("TRadiobutton", background=[("active", p["panel"])])
+        style.configure("TEntry", fieldbackground=p["field"], foreground=p["text"], insertcolor=p["text"], bordercolor=p["border"], padding=5)
+        style.configure("TCombobox", fieldbackground=p["field"], foreground=p["text"], background=p["button"], arrowcolor=p["text"], bordercolor=p["border"])
+        style.map("TCombobox", fieldbackground=[("readonly", p["field"])], foreground=[("disabled", p["disabled"])])
+        style.configure("TButton", background=p["button"], foreground=p["text"], bordercolor=p["border"], padding=(10, 6), relief="flat")
+        style.map("TButton", background=[("pressed", p["button_active"]), ("active", p["button_active"]), ("disabled", p["panel"])], foreground=[("disabled", p["disabled"])])
+        style.configure("Accent.TButton", background=p["accent"], foreground="#FFFFFF", bordercolor=p["accent"], padding=(12, 7), font=("Segoe UI", 10, "bold"))
+        style.map("Accent.TButton", background=[("pressed", p["accent_active"]), ("active", p["accent_active"])], foreground=[("!disabled", "#FFFFFF")])
+        style.configure("TNotebook", background=p["app"], bordercolor=p["border"])
+        style.configure("TNotebook.Tab", background=p["button"], foreground=p["text"], padding=(12, 7))
+        style.map("TNotebook.Tab", background=[("selected", p["panel"]), ("active", p["button_active"])], foreground=[("selected", p["accent"])])
+        style.configure("Treeview", background=p["field"], fieldbackground=p["field"], foreground=p["text"], rowheight=25, bordercolor=p["border"])
+        style.configure("Treeview.Heading", background=p["button"], foreground=p["text"], font=("Segoe UI", 9, "bold"), relief="flat")
+        style.map("Treeview", background=[("selected", p["selection"])], foreground=[("selected", p["text"])])
+        style.map("Treeview.Heading", background=[("active", p["button_active"])])
+        style.configure("TScrollbar", background=p["button"], troughcolor=p["app"], bordercolor=p["app"], arrowcolor=p["text"])
+
+    def _update_theme_button(self):
+        self.theme_button.configure(text="☀ Дневная тема" if self.theme_state["value"] == "dark" else "☾ Ночная тема")
+
+    def toggle_theme(self):
+        self.apply_theme("light" if self.theme_state["value"] == "dark" else "dark", persist=True)
+
+    def apply_theme(self, theme_name, persist=False):
+        selected = theme_name if theme_name in self.PALETTES else "dark"
+        self.theme_state["value"] = selected
+        self.palette.clear()
+        self.palette.update(self.PALETTES[selected])
+        self.configure(bg=self.palette["app"])
+        self._configure_theme_styles()
+
+        def recolor(widget):
+            try:
+                if isinstance(widget, tk.Toplevel):
+                    widget.configure(bg=self.palette["app"])
+                elif isinstance(widget, tk.Canvas):
+                    widget.configure(bg=self.palette["field"], highlightbackground=self.palette["border"])
+                elif isinstance(widget, tk.Text):
+                    widget.configure(bg=self.palette["field"], fg=self.palette["text"], insertbackground=self.palette["text"], selectbackground=self.palette["selection"], highlightbackground=self.palette["border"], highlightcolor=self.palette["accent"])
+                elif isinstance(widget, tk.Entry):
+                    widget.configure(bg=self.palette["field"], fg=self.palette["text"], insertbackground=self.palette["text"], selectbackground=self.palette["selection"], highlightbackground=self.palette["border"])
+                elif isinstance(widget, (tk.Frame, tk.LabelFrame)):
+                    widget.configure(bg=self.palette["panel"])
+                elif isinstance(widget, (tk.Label, tk.Button, tk.Checkbutton, tk.Radiobutton, tk.Menubutton)):
+                    widget.configure(bg=self.palette["panel"], fg=self.palette["text"], activebackground=self.palette["button_active"], activeforeground=self.palette["text"], disabledforeground=self.palette["disabled"])
+                for child in widget.winfo_children():
+                    recolor(child)
+            except (tk.TclError, AttributeError):
+                pass
+        recolor(self)
+        self._update_theme_button()
+        if persist:
+            try:
+                self.SETTINGS_PATH.write_text(json.dumps({"theme": selected}, ensure_ascii=False, indent=2), encoding="utf-8")
+            except OSError:
+                pass
 
 
 if __name__ == '__main__':
