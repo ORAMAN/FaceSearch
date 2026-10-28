@@ -31,16 +31,109 @@ def _xml_float(value: Any, default: float) -> float:
 
 
 def _coerce_module_setting(value: Any, default: Any) -> Any:
-    """Преобразует значение из XML в тип, заданный значением по умолчанию."""
+    """Преобразует значение в тип, заданный значением по умолчанию."""
     if isinstance(default, bool):
         return _xml_bool(value, default)
     if isinstance(default, int) and not isinstance(default, bool):
         return _xml_int(value, default)
     if isinstance(default, float):
         return _xml_float(value, default)
+    if isinstance(default, dict):
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                return dict(default)
+        if not isinstance(value, dict):
+            return dict(default)
+        result = dict(default)
+        for key, item in value.items():
+            if key in default:
+                result[key] = _coerce_module_setting(item, default[key])
+            else:
+                result[key] = item
+        return result
+    if isinstance(default, (list, tuple)):
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                return type(default)()
+        if not isinstance(value, (list, tuple)):
+            return type(default)()
+        converted = list(value)
+        if default:
+            converted = [
+                _coerce_module_setting(item, default[min(i, len(default) - 1)])
+                for i, item in enumerate(converted)
+            ]
+        return tuple(converted) if isinstance(default, tuple) else converted
     if isinstance(default, str):
         return "" if value is None else str(value)
     return default if value is None else value
+
+
+def _write_module_xml_value(node: ET.Element, value: Any) -> None:
+    """Записывает простые и составные значения в типизированный XML-узел."""
+    if isinstance(value, dict):
+        node.set("type", "dict")
+        for key, item_value in value.items():
+            child = ET.SubElement(node, "item", {"key": str(key)})
+            _write_module_xml_value(child, item_value)
+    elif isinstance(value, (list, tuple)):
+        node.set("type", "list")
+        for item_value in value:
+            child = ET.SubElement(node, "item")
+            _write_module_xml_value(child, item_value)
+    elif isinstance(value, bool):
+        node.set("type", "bool")
+        node.text = "true" if value else "false"
+    elif isinstance(value, int):
+        node.set("type", "int")
+        node.text = str(value)
+    elif isinstance(value, float):
+        node.set("type", "float")
+        node.text = repr(value)
+    elif value is None:
+        node.set("type", "none")
+        node.text = ""
+    else:
+        node.set("type", "str")
+        node.text = str(value)
+
+
+def _read_module_xml_value(node: ET.Element, default: Any) -> Any:
+    """Читает типизированный XML-узел и поддерживает поля из раннего XML-формата."""
+    kind = node.get("type", "")
+    children = list(node)
+    if kind == "dict" or isinstance(default, dict):
+        if children:
+            parsed = {}
+            for child in children:
+                key = child.get("key") or child.tag
+                expected = default.get(key) if isinstance(default, dict) else None
+                parsed[key] = _read_module_xml_value(child, expected)
+            return _coerce_module_setting(parsed, default)
+        if node.text:
+            return _coerce_module_setting(node.text, default)
+        return dict(default) if isinstance(default, dict) else {}
+    if kind == "list" or isinstance(default, (list, tuple)):
+        if children:
+            parsed = [_read_module_xml_value(child, None) for child in children]
+            return _coerce_module_setting(parsed, default)
+        if node.text:
+            return _coerce_module_setting(node.text, default)
+        return type(default)() if isinstance(default, (list, tuple)) else []
+    raw = node.text or ""
+    if kind == "bool":
+        return _xml_bool(raw, bool(default) if isinstance(default, bool) else False)
+    if kind == "int":
+        return _xml_int(raw, int(default) if isinstance(default, int) and not isinstance(default, bool) else 0)
+    if kind == "float":
+        return _xml_float(raw, float(default) if isinstance(default, float) else 0.0)
+    if kind == "none":
+        return None
+    return _coerce_module_setting(raw, default)
 
 
 def save_module_settings(
@@ -59,13 +152,8 @@ def save_module_settings(
     form = ET.SubElement(root, "form")
     for key, value in settings.items():
         parent = window if key in window_keys else form
-        if isinstance(value, bool):
-            text = "true" if value else "false"
-        elif value is None:
-            text = ""
-        else:
-            text = str(value)
-        ET.SubElement(parent, str(key)).text = text
+        node = ET.SubElement(parent, str(key))
+        _write_module_xml_value(node, value)
 
     tree = ET.ElementTree(root)
     try:
@@ -106,7 +194,7 @@ def load_module_settings(
                         continue
                     for item in list(node):
                         if item.tag in defaults:
-                            stored[item.tag] = item.text
+                            stored[item.tag] = _read_module_xml_value(item, defaults[item.tag])
                 loaded_xml = True
         except (ET.ParseError, OSError, ValueError):
             loaded_xml = False
