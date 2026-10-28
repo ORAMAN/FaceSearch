@@ -379,6 +379,7 @@ FaceSearch/
 - `settings.xml` — настройки главного окна и параметры интерфейса;
 - `database_profiles.json` — список профилей БД (общий файл, используется GUI и утилитами);
 - `utilities/database_cleanup_settings.json` — индивидуальные настройки окна очистки;
+- `utilities/database_migration_settings.json` — тема, размер/положение окна и параметры формы миграции;
 - `utilities/temp/` — временный файл сопоставления при миграции, автоматически удаляется после завершения;
 - `indexes/` — индексы FAISS;
 - `face_images/` или заданные в профилях каталоги — CROP-файлы;

@@ -26,6 +26,7 @@ from tkinter import ttk, filedialog, messagebox
 SCRIPT_DIR = Path(__file__).resolve().parent
 APP_DIR = SCRIPT_DIR.parent  # корень проекта FaceSearch
 TEMP_DIR = SCRIPT_DIR / "temp"
+SETTINGS_PATH = SCRIPT_DIR / "database_migration_settings.json"
 # Профили БД общие для основного приложения и утилит, поэтому остаются в корне проекта.
 PROFILE_FILE = APP_DIR / "database_profiles.json"
 BATCH_IMAGES = 250       # не превышаем лимиты параметров SQL Server / SQLite
@@ -793,22 +794,90 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
 
 
 class DatabaseMigrationWindow:
+    PALETTES = {
+        "light": {
+            "app": "#F4F5F7", "panel": "#FFFFFF", "field": "#FFFFFF",
+            "text": "#202124", "muted": "#62666B", "border": "#C8CFD8",
+            "accent": "#1479C9", "accent_active": "#0F6DB6",
+            "button": "#E5E7EB", "button_active": "#D1D5DB",
+            "selection": "#D6E8F8", "disabled": "#8A9098",
+        },
+        "dark": {
+            "app": "#151515", "panel": "#242424", "field": "#1C1C1C",
+            "text": "#EEEEEE", "muted": "#AAAAAA", "border": "#383838",
+            "accent": "#167AC6", "accent_active": "#1989DC",
+            "button": "#333333", "button_active": "#444444",
+            "selection": "#244A68", "disabled": "#777777",
+        },
+    }
+    SETTINGS_FILE = SETTINGS_PATH
+
     def __init__(self, master: tk.Misc | None = None):
         self.root = tk.Toplevel(master) if master is not None else tk.Tk()
         self.root.title("Миграция и слияние баз данных — Face Search")
-        self.root.geometry("940x790")
+        self._settings_after_id = None
+        self._saved_settings = {}
+        legacy_settings_path = APP_DIR / "database_migration_settings.json"
+        if not self.SETTINGS_FILE.exists() and legacy_settings_path.is_file():
+            try:
+                legacy_settings_path.replace(self.SETTINGS_FILE)
+            except OSError:
+                pass
+        settings_to_read = self.SETTINGS_FILE
+        if not settings_to_read.is_file() and legacy_settings_path.is_file():
+            settings_to_read = legacy_settings_path
+        try:
+            loaded = json.loads(settings_to_read.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                self._saved_settings = loaded
+        except (OSError, ValueError, TypeError):
+            pass
+
+        saved_geometry = self._saved_settings.get("geometry")
+        if isinstance(saved_geometry, str) and re.fullmatch(r"\d+x\d+[+-]\d+[+-]\d+", saved_geometry):
+            self.root.geometry(saved_geometry)
+            self._last_normal_geometry = saved_geometry
+        else:
+            self.root.geometry("940x790")
+            self._last_normal_geometry = self.root.geometry()
         self.root.minsize(850, 700)
+        self._restore_maximized = bool(self._saved_settings.get("maximized", False))
+        saved_theme = self._saved_settings.get("theme")
+        self.theme_state = {"value": saved_theme if saved_theme in self.PALETTES else "dark"}
+        self.palette = dict(self.PALETTES[self.theme_state["value"]])
+        self.style = ttk.Style(self.root)
+        try:
+            self.style.theme_use("clam")
+        except tk.TclError:
+            pass
+        self._configure_theme_styles()
+        self.root.configure(bg=self.palette["app"])
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
         self.events: queue.Queue = queue.Queue()
         self.running = False
         self.profiles, self.active_name = _load_profiles_light()
         self.profile_by_label = {_profile_description(p): p for p in self.profiles}
         self._build_ui()
+        self._restore_form_settings()
+        self.apply_theme(self.theme_state["value"], persist=False)
         self._on_destination_mode_changed()
         self._on_db_type_changed()
+        self._attach_settings_traces()
+        self.root.bind("<Configure>", self._on_configure, add="+")
         self.root.after(100, self._poll_events)
+        self.root.after(180, self._restore_window_state)
 
     def _build_ui(self):
+        header = ttk.Frame(self.root, padding=(12, 8, 12, 4), style="App.TFrame")
+        header.pack(fill="x")
+        ttk.Label(
+            header, text="FaceSearch · Миграция и слияние баз данных",
+            style="Header.TLabel",
+        ).pack(side="left")
+        self.theme_button = ttk.Button(header, command=self.toggle_theme)
+        self.theme_button.pack(side="right")
+
         main = ttk.Frame(self.root, padding=12)
         main.pack(fill="both", expand=True)
         main.columnconfigure(1, weight=1)
@@ -857,7 +926,7 @@ class DatabaseMigrationWindow:
         ttk.Label(self.new_frame, text="Тип БД:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
         type_combo = ttk.Combobox(self.new_frame, textvariable=self.db_type_var, values=list(DB_LABELS), state="readonly", width=28)
         type_combo.grid(row=1, column=1, sticky="w", pady=4)
-        type_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_db_type_changed())
+        type_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_db_type_changed(reset_port=True))
 
         self.sqlite_fields = ttk.Frame(self.new_frame)
         self.sqlite_fields.grid(row=2, column=0, columnspan=4, sticky="ew")
@@ -889,7 +958,7 @@ class DatabaseMigrationWindow:
 
         action_frame = ttk.Frame(main)
         action_frame.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(2, 6))
-        self.start_button = ttk.Button(action_frame, text="Начать миграцию", command=self._start_migration)
+        self.start_button = ttk.Button(action_frame, text="Начать миграцию", command=self._start_migration, style="Accent.TButton")
         self.start_button.pack(side="left")
         self.progress = ttk.Progressbar(action_frame, mode="determinate", maximum=100, value=0)
         self.progress.pack(side="left", fill="x", expand=True, padx=(12, 0))
@@ -903,7 +972,7 @@ class DatabaseMigrationWindow:
         self.log_text.configure(yscrollcommand=scrollbar.set)
         self.log_text.grid(row=8, column=0, columnspan=3, sticky="nsew")
         scrollbar.grid(row=8, column=3, sticky="ns")
-        ttk.Label(main, text="После миграции FAISS-индекс исходного профиля не меняется. У назначения будет отдельный индекс.", foreground="#555555", wraplength=880).grid(row=9, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Label(main, text="После миграции FAISS-индекс исходного профиля не меняется. У назначения будет отдельный индекс.", wraplength=880, style="Muted.TLabel").grid(row=9, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
     def _browse_sqlite(self):
         chosen = filedialog.asksaveasfilename(
@@ -925,7 +994,7 @@ class DatabaseMigrationWindow:
             self.new_frame.grid()
         self._on_db_type_changed()
 
-    def _on_db_type_changed(self):
+    def _on_db_type_changed(self, reset_port: bool = False):
         backend = DB_LABELS.get(self.db_type_var.get(), "sqlite")
         if backend == "sqlite":
             self.sqlite_fields.grid()
@@ -933,7 +1002,8 @@ class DatabaseMigrationWindow:
         else:
             self.server_fields.grid()
             self.sqlite_fields.grid_remove()
-            self.port_var.set(str(DEFAULT_PORTS.get(backend, "")))
+            if reset_port or not self.port_var.get().strip():
+                self.port_var.set(str(DEFAULT_PORTS.get(backend, "")))
 
     def _set_progress(self, percent: float, message: str, indeterminate: bool = False):
         mode = str(self.progress.cget("mode"))
@@ -1107,11 +1177,202 @@ class DatabaseMigrationWindow:
         except tk.TclError:
             pass
 
+    def _restore_form_settings(self):
+        saved = self._saved_settings
+        source_values = tuple(self.source_combo.cget("values"))
+        target_values = tuple(self.target_combo.cget("values"))
+        if saved.get("source_profile") in source_values:
+            self.source_var.set(saved["source_profile"])
+        if saved.get("destination_mode") in {"existing", "new"}:
+            self.mode_var.set(saved["destination_mode"])
+        if saved.get("target_profile") in target_values:
+            self.target_var.set(saved["target_profile"])
+
+        restore_vars = {
+            "new_name": self.new_name_var,
+            "db_type": self.db_type_var,
+            "sqlite_path": self.path_var,
+            "host": self.host_var,
+            "port": self.port_var,
+            "database": self.database_var,
+            "user": self.user_var,
+            "driver": self.driver_var,
+        }
+        for key, variable in restore_vars.items():
+            if key in saved and saved[key] is not None:
+                value = str(saved[key])
+                if key == "db_type" and value not in DB_LABELS:
+                    continue
+                variable.set(value)
+        if "save_profile" in saved:
+            self.save_profile_var.set(bool(saved["save_profile"]))
+        if "rebuild_index" in saved:
+            self.rebuild_index_var.set(bool(saved["rebuild_index"]))
+
+    def _attach_settings_traces(self):
+        variables = (
+            self.source_var, self.mode_var, self.target_var, self.new_name_var,
+            self.db_type_var, self.path_var, self.host_var, self.port_var,
+            self.database_var, self.user_var, self.driver_var,
+            self.save_profile_var, self.rebuild_index_var,
+        )
+        for variable in variables:
+            try:
+                variable.trace_add("write", lambda *_args: self.schedule_settings_save())
+            except (tk.TclError, AttributeError):
+                pass
+
+    def _restore_window_state(self):
+        if self._restore_maximized:
+            try:
+                self.root.state("zoomed")
+            except tk.TclError:
+                pass
+        self.schedule_settings_save()
+
+    def _on_configure(self, event=None):
+        if event is not None and event.widget is not self.root:
+            return
+        try:
+            if self.root.state() == "normal":
+                self._last_normal_geometry = self.root.geometry()
+        except tk.TclError:
+            pass
+        self.schedule_settings_save()
+
+    def schedule_settings_save(self):
+        try:
+            if self._settings_after_id is not None:
+                self.root.after_cancel(self._settings_after_id)
+            self._settings_after_id = self.root.after(350, self._save_settings)
+        except tk.TclError:
+            self._settings_after_id = None
+
+    def _save_settings(self):
+        self._settings_after_id = None
+        try:
+            state = self.root.state()
+            maximized = state in {"zoomed", "maximized"}
+            geometry = self.root.geometry() if state == "normal" else self._last_normal_geometry
+            saved = {
+                "theme": self.theme_state["value"],
+                "geometry": str(geometry or "940x790"),
+                "maximized": maximized,
+                "source_profile": self.source_var.get(),
+                "destination_mode": self.mode_var.get(),
+                "target_profile": self.target_var.get(),
+                "new_name": self.new_name_var.get(),
+                "db_type": self.db_type_var.get(),
+                "sqlite_path": self.path_var.get(),
+                "host": self.host_var.get(),
+                "port": self.port_var.get(),
+                "database": self.database_var.get(),
+                "user": self.user_var.get(),
+                "driver": self.driver_var.get(),
+                "save_profile": bool(self.save_profile_var.get()),
+                "rebuild_index": bool(self.rebuild_index_var.get()),
+            }
+            # Пароль не записывается на диск: файл настроек остаётся обычным JSON.
+            self.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.SETTINGS_FILE.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(self.SETTINGS_FILE)
+            self._saved_settings = saved
+        except (OSError, tk.TclError, AttributeError, TypeError, ValueError):
+            pass
+
+    def _configure_theme_styles(self):
+        p = self.palette
+        style = self.style
+        style.configure(".", font=("Segoe UI", 10), foreground=p["text"], background=p["panel"])
+        style.configure("TFrame", background=p["panel"])
+        style.configure("App.TFrame", background=p["app"])
+        style.configure("TLabelframe", background=p["panel"], bordercolor=p["border"], lightcolor=p["border"], darkcolor=p["border"])
+        style.configure("TLabelframe.Label", background=p["panel"], foreground=p["accent"], font=("Segoe UI", 10, "bold"))
+        style.configure("TLabel", background=p["panel"], foreground=p["text"])
+        style.configure("Header.TLabel", background=p["app"], foreground=p["text"], font=("Segoe UI", 15, "bold"))
+        style.configure("Muted.TLabel", background=p["panel"], foreground=p["muted"], font=("Segoe UI", 9))
+        style.configure("Status.TLabel", background=p["panel"], foreground=p["accent"], font=("Segoe UI", 10, "bold"))
+        style.configure("TCheckbutton", background=p["panel"], foreground=p["text"], padding=3)
+        style.map("TCheckbutton", background=[("active", p["panel"])], foreground=[("disabled", p["disabled"])])
+        style.configure("TRadiobutton", background=p["panel"], foreground=p["text"], padding=3)
+        style.map("TRadiobutton", background=[("active", p["panel"])])
+        style.configure("TEntry", fieldbackground=p["field"], foreground=p["text"], insertcolor=p["text"], bordercolor=p["border"], padding=5)
+        style.configure("TCombobox", fieldbackground=p["field"], foreground=p["text"], background=p["button"], arrowcolor=p["text"], bordercolor=p["border"])
+        style.map("TCombobox", fieldbackground=[("readonly", p["field"])], foreground=[("disabled", p["disabled"])])
+        style.configure("TButton", background=p["button"], foreground=p["text"], bordercolor=p["border"], padding=(10, 6), relief="flat")
+        style.map("TButton", background=[("pressed", p["button_active"]), ("active", p["button_active"]), ("disabled", p["panel"])], foreground=[("disabled", p["disabled"])])
+        style.configure("Accent.TButton", background=p["accent"], foreground="#FFFFFF", bordercolor=p["accent"], padding=(12, 7), font=("Segoe UI", 10, "bold"))
+        style.map("Accent.TButton", background=[("pressed", p["accent_active"]), ("active", p["accent_active"])], foreground=[("!disabled", "#FFFFFF")])
+        style.configure("Horizontal.TProgressbar", troughcolor=p["field"], background=p["accent"], bordercolor=p["border"], lightcolor=p["accent"], darkcolor=p["accent"])
+        style.configure("TScrollbar", background=p["button"], troughcolor=p["app"], bordercolor=p["app"], arrowcolor=p["text"])
+
+    def _update_theme_button(self):
+        self.theme_button.configure(text="☀ Дневная тема" if self.theme_state["value"] == "dark" else "☾ Ночная тема")
+
+    def toggle_theme(self):
+        self.apply_theme("light" if self.theme_state["value"] == "dark" else "dark", persist=True)
+
+    def apply_theme(self, theme_name, persist=False):
+        selected = theme_name if theme_name in self.PALETTES else "dark"
+        self.theme_state["value"] = selected
+        self.palette.clear()
+        self.palette.update(self.PALETTES[selected])
+        try:
+            self.root.configure(bg=self.palette["app"])
+        except tk.TclError:
+            pass
+        self._configure_theme_styles()
+
+        def recolor(widget):
+            try:
+                if widget is self.root or isinstance(widget, tk.Toplevel):
+                    widget.configure(bg=self.palette["app"])
+                elif isinstance(widget, tk.Text):
+                    widget.configure(
+                        bg=self.palette["field"], fg=self.palette["text"],
+                        insertbackground=self.palette["text"],
+                        selectbackground=self.palette["selection"],
+                        highlightbackground=self.palette["border"],
+                        highlightcolor=self.palette["accent"],
+                    )
+                elif isinstance(widget, tk.Entry):
+                    widget.configure(
+                        bg=self.palette["field"], fg=self.palette["text"],
+                        insertbackground=self.palette["text"],
+                        selectbackground=self.palette["selection"],
+                        highlightbackground=self.palette["border"],
+                    )
+                elif isinstance(widget, (tk.Frame, tk.LabelFrame)):
+                    widget.configure(bg=self.palette["panel"])
+                elif isinstance(widget, (tk.Label, tk.Button, tk.Checkbutton, tk.Radiobutton, tk.Menubutton)):
+                    widget.configure(
+                        bg=self.palette["panel"], fg=self.palette["text"],
+                        activebackground=self.palette["button_active"],
+                        activeforeground=self.palette["text"],
+                        disabledforeground=self.palette["disabled"],
+                    )
+                for child in widget.winfo_children():
+                    recolor(child)
+            except (tk.TclError, AttributeError):
+                pass
+
+        recolor(self.root)
+        self._update_theme_button()
+        if persist:
+            self._save_settings()
+
     def _on_close(self):
         if self.running:
             messagebox.showwarning("Миграция выполняется", "Не закрывайте окно до завершения переноса.", parent=self.root)
             return
-        self.root.destroy()
+        try:
+            if self._settings_after_id is not None:
+                self.root.after_cancel(self._settings_after_id)
+                self._settings_after_id = None
+            self._save_settings()
+        finally:
+            self.root.destroy()
 
 
 def main():
