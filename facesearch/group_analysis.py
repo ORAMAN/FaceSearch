@@ -9,12 +9,8 @@ from __future__ import annotations
 import json
 import math
 import re
-import socket
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
@@ -59,32 +55,6 @@ def normalize_options(options: dict[str, Any] | None) -> dict[str, Any]:
     return result
 
 
-def load_vk_token(app_dir: str | Path) -> str:
-    """Читает токен VK из стандартных мест установки FaceSearch."""
-    root = Path(app_dir)
-    paths = (
-        root / "loaders" / "vk" / "vk_token.txt",
-        root / "vk_token.txt",
-    )
-    for path in paths:
-        try:
-            if not path.is_file():
-                continue
-            text = path.read_text(encoding="utf-8-sig").strip()
-        except (OSError, UnicodeError):
-            continue
-        for line in text.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" in line and line.split("=", 1)[0].strip().lower() in ("token", "access_token"):
-                line = line.split("=", 1)[1].strip()
-            # Не выводим токен и не принимаем JSON/config вместо токена.
-            if len(line) >= 20 and not any(char.isspace() for char in line):
-                return line
-    return ""
-
-
 def vk_user_id(candidate: dict[str, Any]) -> int | None:
     """Возвращает числовой VK ID только для профиля, который можно проверить через API."""
     try:
@@ -111,61 +81,165 @@ def vk_user_id(candidate: dict[str, Any]) -> int | None:
     return None
 
 
-def _request_vk_friends(user_id: int, token: str) -> tuple[set[int], str]:
-    """Получает до 5000 доступных ID друзей. Подробные данные профилей не запрашиваются."""
-    global _VK_LAST_REQUEST_AT
+def _get_vk_loader():
+    """Возвращает существующий VK-клиент загрузчика вместе с его менеджером токенов."""
+    try:
+        # Не дублируем OAuth, валидацию, хранение или ротацию токенов.
+        # Используется тот же модуль, что и в loaders/vk/vk_downloader.py.
+        from loaders.vk import vk_downloader
+    except Exception as exc:
+        return None, (
+            "Не удалось подключить VK-клиент загрузчика: "
+            + type(exc).__name__ + ". Проверьте зависимости загрузчика VK."
+        )
+    try:
+        token_count = int(vk_downloader.reload_token_cache())
+    except Exception as exc:
+        return None, (
+            "Не удалось загрузить токены через менеджер загрузчика VK: "
+            + str(exc).strip()[:250]
+        )
+    if token_count < 1:
+        return None, (
+            "В loaders/vk/vk_token.txt нет сохранённых рабочих токенов v1 (vk1.a…). "
+            "Добавьте токен в окне загрузчика VK кнопкой «Получить токен через VK ID…» "
+            "или «Добавить токен v1 вручную…», затем повторите анализ."
+        )
+    return vk_downloader, ""
+
+
+def _request_vk_friends(user_id: int, vk_client) -> tuple[set[int], str]:
+    """Получает ID друзей через API-обёртку загрузчика, с его ротацией токенов и повторами."""
     now = time.monotonic()
     with _FRIEND_CACHE_LOCK:
         cached = _FRIEND_CACHE.get(int(user_id))
         if cached and now - cached[0] < FRIEND_CACHE_TTL_SECONDS:
             return set(cached[1]), "cache"
 
-    with _VK_REQUEST_LOCK:
-        delay = FRIEND_REQUEST_INTERVAL_SECONDS - (time.monotonic() - _VK_LAST_REQUEST_AT)
-        if delay > 0:
-            time.sleep(delay)
-        _VK_LAST_REQUEST_AT = time.monotonic()
+    # _vk_get_page использует reload_tokens(), то есть штатный пул токенов v1
+    # загрузчика, ротацию токенов и повтор запросов при временных ошибках VK.
+    try:
+        with vk_client.requests.Session() as session:
+            response = vk_client._vk_get_page(
+                "friends.get",
+                {
+                    "user_id": int(user_id),
+                    "count": int(vk_client.FRIENDS_PAGE_SIZE),
+                    "offset": 0,
+                },
+                session,
+                timeout=25,
+            )
+    except Exception as exc:
+        message = str(exc).strip()
+        # Не включаем access token или параметры запроса в журнал/результат.
+        return set(), "error:" + (message[:220] or type(exc).__name__)
 
-        params = urllib.parse.urlencode({
-            "user_id": int(user_id),
-            "count": 5000,
-            "offset": 0,
-            "access_token": token,
-            "v": "5.199",
-        })
-        request = urllib.request.Request(
-            "https://api.vk.com/method/friends.get?" + params,
-            headers={"User-Agent": "FaceSearch/experimental-group-analysis"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=12) as response:
-                payload = json.loads(response.read(4 * 1024 * 1024 + 1).decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, OSError, UnicodeError, json.JSONDecodeError) as exc:
-            return set(), "error:" + type(exc).__name__
+    if isinstance(response, list):
+        items = response
+    elif isinstance(response, dict):
+        items = response.get("items", []) or []
+    else:
+        items = []
 
-    if not isinstance(payload, dict):
-        return set(), "error:invalid_response"
-    if payload.get("error"):
-        error = payload.get("error") or {}
-        code = error.get("error_code", "?") if isinstance(error, dict) else "?"
-        return set(), "error:vk_" + str(code)
-    response = payload.get("response") or {}
-    items = response.get("items", []) if isinstance(response, dict) else []
     result: set[int] = set()
-    if isinstance(items, list):
-        for item in items:
-            try:
-                friend_id = int(item)
-            except (TypeError, ValueError):
-                continue
-            if friend_id > 0:
-                result.add(friend_id)
+    for item in items:
+        value = item.get("id") if isinstance(item, dict) else item
+        try:
+            friend_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if friend_id > 0:
+            result.add(friend_id)
+
     with _FRIEND_CACHE_LOCK:
         _FRIEND_CACHE[int(user_id)] = (time.monotonic(), set(result), "ok")
         while len(_FRIEND_CACHE) > 2000:
             oldest = min(_FRIEND_CACHE, key=lambda key: _FRIEND_CACHE[key][0])
             _FRIEND_CACHE.pop(oldest, None)
     return result, "ok"
+
+
+def _load_friend_sets(
+    candidates_by_face: list[list[dict[str, Any]]],
+    app_dir: str | Path,
+    enabled: bool,
+    progress: Callable[[int, str], None],
+) -> tuple[dict[int, set[int]], dict[str, Any]]:
+    all_candidates = {
+        item["profile_key"]: item
+        for face_items in candidates_by_face
+        for item in face_items
+        if not item.get("unmatched")
+    }
+    id_to_key: dict[int, str] = {}
+    for key, candidate in all_candidates.items():
+        user_id = candidate.get("vk_user_id")
+        if user_id:
+            id_to_key[int(user_id)] = key
+
+    if not enabled:
+        return {}, {"status": "disabled", "message": "Проверка друзей VK отключена в параметрах."}
+
+    vk_client, loader_error = _get_vk_loader()
+    if vk_client is None:
+        return {}, {"status": "no_token", "message": loader_error}
+
+    user_ids = list(id_to_key)
+    if not user_ids:
+        return {}, {
+            "status": "no_vk_candidates",
+            "message": "Среди выбранных кандидатов нет профилей с числовым VK ID.",
+        }
+    truncated = len(user_ids) > MAX_UNIQUE_FRIEND_LOOKUPS
+    user_ids = user_ids[:MAX_UNIQUE_FRIEND_LOOKUPS]
+    friend_ids: dict[int, set[int]] = {}
+    errors: list[str] = []
+    completed = 0
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="FaceSearch-VKFriends") as pool:
+        futures = {pool.submit(_request_vk_friends, uid, vk_client): uid for uid in user_ids}
+        for future in as_completed(futures):
+            uid = futures[future]
+            try:
+                friends, state = future.result()
+            except Exception:
+                friends, state = set(), "error:worker"
+            if state.startswith("error:"):
+                errors.append(state[6:])
+            else:
+                friend_ids[uid] = friends
+            completed += 1
+            progress(
+                35 + int(35 * completed / max(1, len(user_ids))),
+                "Проверка друзей VK через загрузчик: "
+                + str(completed) + " / " + str(len(user_ids)),
+            )
+
+    # Ошибки не содержат токены, но очищаем известные секретные значения на всякий случай.
+    try:
+        tokens_to_hide = list(getattr(vk_client, "_TOKEN_LIST", []) or [])
+    except Exception:
+        tokens_to_hide = []
+    safe_errors = []
+    for error in errors[:3]:
+        for secret in tokens_to_hide:
+            if secret:
+                error = error.replace(secret, "[токен скрыт]")
+        safe_errors.append(error[:180])
+    friend_status = {
+        "status": "partial" if errors or truncated else "ok",
+        "message": (
+            "Проверка друзей VK через штатный менеджер загрузчика завершена: "
+            + str(len(friend_ids)) + " из " + str(len(user_ids)) + " профилей проверено."
+            + (" Ошибки API: " + "; ".join(safe_errors) + "." if errors else "")
+            + (" Достигнут лимит числа проверяемых профилей." if truncated else "")
+            + " Для каждого профиля использованы доступные первые 5000 друзей."
+        ),
+        "checked_profiles": len(friend_ids),
+        "failed_profiles": len(errors),
+        "truncated": truncated,
+    }
+    return friend_ids, friend_status
 
 
 def _stable_profile_key(candidate: dict[str, Any]) -> str:
