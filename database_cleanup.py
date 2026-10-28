@@ -1355,6 +1355,11 @@ class ProfileSearchTab(ttk.Frame):
         gallery_inner.bind("<Configure>", lambda _e: gallery_canvas.configure(scrollregion=gallery_canvas.bbox("all")))
         gallery_canvas.bind("<Configure>", lambda e: gallery_canvas.itemconfigure(gallery_window, width=e.width))
 
+        try:
+            preview_crop_base = profile_crop_dir(self.profile_by_name[self.profile_var.get()])
+        except Exception:
+            preview_crop_base = (PROJECT_DIR / "face_images").resolve()
+
         win._preview_images = []
         for index, image_data_item in enumerate(image_data, 1):
             image_values = dict(image_data_item)
@@ -1378,6 +1383,7 @@ class ProfileSearchTab(ttk.Frame):
                     if raw_path:
                         candidate = Path(raw_path).expanduser()
                         if not candidate.is_absolute():
+                            candidates.append(preview_crop_base / candidate)
                             candidate = PROJECT_DIR / candidate
                         candidates.append(candidate)
                         if item.get("path"):
@@ -1455,6 +1461,7 @@ class ProfileSearchTab(ttk.Frame):
                 if raw_path:
                     path = Path(raw_path).expanduser()
                     if not path.is_absolute():
+                        candidates.append(preview_crop_base / path)
                         path = PROJECT_DIR / path
                     candidates.append(path)
                     candidates.append(PROJECT_DIR / "face_images" / raw_path)
