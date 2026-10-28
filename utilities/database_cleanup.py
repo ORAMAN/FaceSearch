@@ -2201,7 +2201,7 @@ class RemoteCleanupTab(ttk.Frame):
 
 class CleanupSuite(tk.Tk):
     """Главное окно и единая дневная/ночная тема, как в загрузчике VK."""
-    SETTINGS_PATH = APP_DIR / "database_cleanup_settings.json"
+    SETTINGS_PATH = SCRIPT_DIR / "database_cleanup_settings.json"
 
     PALETTES = {
         "light": {
@@ -2226,8 +2226,19 @@ class CleanupSuite(tk.Tk):
         self.minsize(1120, 640)
         self._settings_after_id = None
         self._saved_settings = {}
+        # Переносим прежний файл настроек из корня проекта рядом с утилитой.
+        legacy_settings_path = APP_DIR / "database_cleanup_settings.json"
+        if not self.SETTINGS_PATH.exists() and legacy_settings_path.is_file():
+            try:
+                legacy_settings_path.replace(self.SETTINGS_PATH)
+            except OSError:
+                # Если переместить файл нельзя, хотя бы прочитаем прежние настройки.
+                pass
+        settings_to_read = self.SETTINGS_PATH
+        if not settings_to_read.is_file() and legacy_settings_path.is_file():
+            settings_to_read = legacy_settings_path
         try:
-            loaded = json.loads(self.SETTINGS_PATH.read_text(encoding="utf-8"))
+            loaded = json.loads(settings_to_read.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 self._saved_settings = loaded
         except (OSError, ValueError, TypeError):

@@ -23,7 +23,10 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-APP_DIR = Path(__file__).resolve().parent.parent  # корень проекта FaceSearch
+SCRIPT_DIR = Path(__file__).resolve().parent
+APP_DIR = SCRIPT_DIR.parent  # корень проекта FaceSearch
+TEMP_DIR = SCRIPT_DIR / "temp"
+# Профили БД общие для основного приложения и утилит, поэтому остаются в корне проекта.
 PROFILE_FILE = APP_DIR / "database_profiles.json"
 BATCH_IMAGES = 250       # не превышаем лимиты параметров SQL Server / SQLite
 BATCH_FACES = 2500
@@ -437,7 +440,10 @@ def migrate_database_data(core, source_profile: dict, target_profile: dict, *, c
 
         src_image_columns = sorted(source_image_cols)
 
-        temp_file = tempfile.NamedTemporaryFile(prefix="face_migration_", suffix=".sqlite", delete=False)
+        TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        temp_file = tempfile.NamedTemporaryFile(
+            prefix="face_migration_", suffix=".sqlite", delete=False, dir=str(TEMP_DIR)
+        )
         mapping_path = Path(temp_file.name)
         temp_file.close()
         temp_map = sqlite3.connect(str(mapping_path))
@@ -838,7 +844,7 @@ class DatabaseMigrationWindow:
 
         self.new_name_var = tk.StringVar(value=f"Миграция — {time.strftime('%Y-%m-%d %H-%M')}")
         self.db_type_var = tk.StringVar(value="SQLite")
-        self.path_var = tk.StringVar(value=str(APP_DIR / "migrated_faces.db"))
+        self.path_var = tk.StringVar(value=str(SCRIPT_DIR / "migrated_faces.db"))
         self.host_var = tk.StringVar(value="localhost")
         self.port_var = tk.StringVar(value="5432")
         self.database_var = tk.StringVar(value="faces_migrated")

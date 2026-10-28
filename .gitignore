@@ -48,6 +48,10 @@ loaders/instagram/downloads/
 loaders/ok/downloads/
 query_cache/
 
+# Служебные настройки и временные данные утилит
+utilities/database_cleanup_settings.json
+utilities/temp/
+
 # Временные и системные файлы Windows
 *.tmp
 Thumbs.db
