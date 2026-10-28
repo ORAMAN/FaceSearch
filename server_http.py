@@ -2500,6 +2500,13 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     event.preventDefault();
     searchSimilar();
   });
+  window.FaceSearchGroupCore={
+    getQueryId:function(){return queryId;},
+    getFaceCount:function(){return faces.length;},
+    isBusy:function(){return busy;},
+    postJson:postJson,
+    setStatus:setStatus
+  };
 })();
 </script>
 <script src="/group-analysis.js"></script>
