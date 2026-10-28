@@ -3,7 +3,14 @@ from __future__ import annotations
 import tempfile
 import unittest
 
-from facesearch.group_analysis import analyze_group, normalize_options, _request_vk_friends
+from unittest.mock import patch
+
+from facesearch.group_analysis import (
+    analyze_group,
+    normalize_options,
+    _load_friend_sets,
+    _request_vk_friends,
+)
 
 
 class GroupAnalysisTests(unittest.TestCase):
@@ -36,6 +43,56 @@ class GroupAnalysisTests(unittest.TestCase):
 
         self.assertEqual(state, "ok")
         self.assertEqual(result, {7001, 7002, 7003})
+        self.assertEqual(FakeVkLoader.calls, [(user_id, 5000)])
+
+
+    def test_friend_sets_use_shared_vk_loader_without_legacy_token_reader(self):
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+        class FakeRequests:
+            @staticmethod
+            def Session():
+                return FakeSession()
+
+        class FakeVkLoader:
+            requests = FakeRequests
+            FRIENDS_PAGE_SIZE = 5000
+            _TOKEN_LIST = []
+            calls = []
+
+            @classmethod
+            def get_user_friend_ids(cls, user_id, session, limit):
+                cls.calls.append((user_id, limit))
+                return {7770001, 7770002}
+
+        user_id = 1999000021
+        candidates = [[{
+            "profile_key": f"vk:{user_id}",
+            "vk_user_id": user_id,
+            "name": "Тестовый профиль",
+            "similarity": 70.0,
+            "city": "",
+        }]]
+        FakeVkLoader.calls.clear()
+
+        with patch(
+            "facesearch.group_analysis._get_vk_loader",
+            return_value=(FakeVkLoader, ""),
+        ):
+            friends, status = _load_friend_sets(
+                candidates,
+                ".",
+                True,
+                lambda percent, message: None,
+            )
+
+        self.assertEqual(friends, {user_id: {7770001, 7770002}})
+        self.assertEqual(status["status"], "ok")
         self.assertEqual(FakeVkLoader.calls, [(user_id, 5000)])
 
     def test_options_are_clamped(self):
