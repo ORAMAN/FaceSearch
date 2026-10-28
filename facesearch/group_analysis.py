@@ -131,41 +131,19 @@ def _request_vk_friends(user_id: int, vk_client) -> tuple[set[int], str]:
         if cached and now - cached[0] < FRIEND_CACHE_TTL_SECONDS:
             return set(cached[1]), "cache"
 
-    # _vk_get_page использует reload_tokens(), то есть штатный пул токенов v1
-    # загрузчика, ротацию токенов и повтор запросов при временных ошибках VK.
+    # Публичный helper загрузчика использует reload_tokens(), штатную ротацию
+    # проверенных токенов v1 и повторы запросов; здесь не реализуем API-вызов повторно.
     try:
         with vk_client.requests.Session() as session:
-            response = vk_client._vk_get_page(
-                "friends.get",
-                {
-                    "user_id": int(user_id),
-                    "count": int(vk_client.FRIENDS_PAGE_SIZE),
-                    "offset": 0,
-                },
+            result = vk_client.get_user_friend_ids(
+                int(user_id),
                 session,
-                timeout=25,
+                limit=int(vk_client.FRIENDS_PAGE_SIZE),
             )
     except Exception as exc:
         message = str(exc).strip()
         # Не включаем access token или параметры запроса в журнал/результат.
         return set(), "error:" + (message[:220] or type(exc).__name__)
-
-    if isinstance(response, list):
-        items = response
-    elif isinstance(response, dict):
-        items = response.get("items", []) or []
-    else:
-        items = []
-
-    result: set[int] = set()
-    for item in items:
-        value = item.get("id") if isinstance(item, dict) else item
-        try:
-            friend_id = int(value)
-        except (TypeError, ValueError):
-            continue
-        if friend_id > 0:
-            result.add(friend_id)
 
     with _FRIEND_CACHE_LOCK:
         _FRIEND_CACHE[int(user_id)] = (time.monotonic(), set(result), "ok")
