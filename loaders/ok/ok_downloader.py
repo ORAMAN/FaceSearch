@@ -26,16 +26,21 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 # Shared visual theme, also available when this script is started directly from loaders/ok.
 _LOADER_SHARED_DIR = str(Path(__file__).resolve().parents[1])
+_REPOSITORY_ROOT = str(Path(__file__).resolve().parents[2])
 if _LOADER_SHARED_DIR not in sys.path:
     sys.path.insert(0, _LOADER_SHARED_DIR)
+if _REPOSITORY_ROOT not in sys.path:
+    sys.path.insert(0, _REPOSITORY_ROOT)
 from ui_theme import ThemeManager, browser_window_args, place_tk_window_half
 from edit_shortcuts import install_edit_shortcuts
+from facesearch.settings import load_module_settings, save_module_settings
 
 
 START_URL = "https://ok.ru"
 OUT_DIR = Path(__file__).resolve().parent / "downloads"
 PROFILE_DIR = Path(__file__).resolve().parent / "browser_profile"
-APP_SETTINGS_PATH = Path(__file__).resolve().with_name("ok_downloader_settings.json")
+APP_SETTINGS_PATH = Path(__file__).resolve().with_name("ok_downloader_settings.xml")
+LEGACY_APP_SETTINGS_PATH = APP_SETTINGS_PATH.with_suffix(".json")
 DEFAULT_FACESEARCH_DIR = Path(r"C:\FaceSearch")
 DEFAULT_SETTINGS_XML = DEFAULT_FACESEARCH_DIR / "settings.xml"
 DEFAULT_DB_PROFILES_JSON = DEFAULT_FACESEARCH_DIR / "database_profiles.json"
@@ -1398,8 +1403,8 @@ class FaceSearchImporter:
                 self.conn = None
 
 
-def load_gui_paths() -> dict[str, str]:
-    """Загружает один каталог FaceSearch, сохраняя совместимость со старой формой."""
+def load_gui_paths() -> dict:
+    """Загружает XML-настройки окна и переносит прежние JSON-настройки при первом запуске."""
     defaults = {
         "facesearch_dir": str(DEFAULT_FACESEARCH_DIR),
         "auto_import": True,
@@ -1409,39 +1414,31 @@ def load_gui_paths() -> dict[str, str]:
         "chrome_exe_path": default_chrome_executable(),
         "delete_processed_files": False,
         "theme": "light",
+        "geometry": "",
+        "maximized": False,
     }
-    try:
-        if APP_SETTINGS_PATH.is_file():
-            data = json.loads(APP_SETTINGS_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                saved_dir = str(data.get("facesearch_dir") or "").strip()
-                if not saved_dir:
-                    # Совместимость с предыдущей версией, где задавались пути к обоим файлам.
-                    old_settings = str(data.get("settings_xml") or "").strip()
-                    old_profiles = str(data.get("profiles_json") or "").strip()
-                    if old_settings and old_profiles:
-                        try:
-                            if Path(old_settings).expanduser().parent.resolve() == Path(old_profiles).expanduser().parent.resolve():
-                                saved_dir = str(Path(old_settings).expanduser().parent)
-                        except OSError:
-                            pass
-                    elif old_settings:
-                        saved_dir = str(Path(old_settings).expanduser().parent)
-                if saved_dir:
-                    defaults["facesearch_dir"] = saved_dir
-                defaults["auto_import"] = bool(data.get("auto_import", True))
-                defaults["create_crop_files"] = bool(data.get("create_crop_files", True))
-                defaults["build_index_after"] = bool(data.get("build_index_after", False))
-                defaults["browser_profile_dir"] = str(data.get("browser_profile_dir") or defaults["browser_profile_dir"])
-                defaults["chrome_exe_path"] = str(data.get("chrome_exe_path") or defaults["chrome_exe_path"])
-                defaults["delete_processed_files"] = bool(data.get("delete_processed_files", False))
-                defaults["theme"] = (
-                    "dark" if str(data.get("theme") or "light").strip().lower()
-                    in {"dark", "night", "тёмная", "темная"} else "light"
-                )
-    except Exception as exc:
-        print(f"[WARN] Не удалось загрузить настройки окна: {exc}")
-    return defaults
+    # Поддержка старого JSON, где вместо папки FaceSearch могли храниться отдельные пути.
+    if LEGACY_APP_SETTINGS_PATH.is_file():
+        try:
+            legacy = json.loads(LEGACY_APP_SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(legacy, dict) and not str(legacy.get("facesearch_dir") or "").strip():
+                old_settings = str(legacy.get("settings_xml") or "").strip()
+                old_profiles = str(legacy.get("profiles_json") or "").strip()
+                if old_settings and old_profiles:
+                    try:
+                        if Path(old_settings).expanduser().parent.resolve() == Path(old_profiles).expanduser().parent.resolve():
+                            defaults["facesearch_dir"] = str(Path(old_settings).expanduser().parent)
+                    except OSError:
+                        pass
+                elif old_settings:
+                    defaults["facesearch_dir"] = str(Path(old_settings).expanduser().parent)
+        except (OSError, ValueError, TypeError):
+            pass
+    return load_module_settings(
+        APP_SETTINGS_PATH, "ok_downloader", defaults,
+        window_keys={"theme", "geometry", "maximized"},
+        legacy_json_paths=(LEGACY_APP_SETTINGS_PATH,),
+    )
 
 
 def save_gui_paths(
@@ -1453,6 +1450,8 @@ def save_gui_paths(
     chrome_exe_path: str = "",
     delete_processed_files: bool = False,
     theme: str = "light",
+    geometry: str = "",
+    maximized: bool = False,
 ) -> None:
     payload = {
         "facesearch_dir": str(facesearch_dir or "").strip(),
@@ -1464,10 +1463,13 @@ def save_gui_paths(
         "delete_processed_files": bool(delete_processed_files),
         "theme": "dark" if str(theme or "light").strip().lower()
         in {"dark", "night", "тёмная", "темная"} else "light",
+        "geometry": str(geometry or ""),
+        "maximized": bool(maximized),
     }
-    tmp = APP_SETTINGS_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(APP_SETTINGS_PATH)
+    save_module_settings(
+        APP_SETTINGS_PATH, "ok_downloader", payload,
+        window_keys={"theme", "geometry", "maximized"},
+    )
 
 
 def config_paths_from_directory(facesearch_dir: str | Path) -> tuple[Path, Path]:
@@ -2508,11 +2510,18 @@ def main():
     root.title("OK.ru — загрузчик фотографий и импорт FaceSearch")
     initial_paths = load_gui_paths()
     theme_manager = ThemeManager(root, initial_paths.get("theme", "light"), accent_variant="ok")
-    # На Windows форма занимает левую половину рабочего стола; Chrome запускается справа.
-    if not place_tk_window_half(root, "left", min_width=620, min_height=480):
+    # При первом запуске форма занимает левую половину рабочего стола; далее восстанавливается геометрия.
+    saved_geometry = str(initial_paths.get("geometry") or "").strip()
+    if re.fullmatch(r"\d+x\d+[+-]\d+[+-]\d+", saved_geometry):
+        root.geometry(saved_geometry)
+        root.minsize(830, 690)
+    elif not place_tk_window_half(root, "left", min_width=620, min_height=480):
         root.geometry("950x750")
         root.minsize(830, 690)
     root.resizable(True, True)
+    last_normal_geometry = {"value": saved_geometry or root.geometry()}
+    if bool(initial_paths.get("maximized", False)):
+        root.after(180, lambda: root.state("zoomed"))
 
     frame = ttk.Frame(root, padding=12, style="App.TFrame")
     frame.pack(fill="both", expand=True)
@@ -2580,6 +2589,8 @@ def main():
                 chrome_exe_path_var.get(),
                 delete_processed_files_var.get(),
                 theme_manager.current,
+                geometry=(last_normal_geometry["value"] if root.state() in {"zoomed", "maximized"} else root.geometry()),
+                maximized=root.state() in {"zoomed", "maximized"},
             )
         except Exception as exc:
             print(f"[WARN] Не удалось сохранить настройки формы: {exc}")
@@ -2873,10 +2884,32 @@ def main():
     if auto_import_var.get():
         check_configuration(show_dialog=False)
 
+    settings_save_after_id = {"value": None}
+
+    def on_root_configure(event=None):
+        if event is not None and event.widget is not root:
+            return
+        try:
+            if root.state() == "normal":
+                last_normal_geometry["value"] = root.geometry()
+            if settings_save_after_id["value"] is not None:
+                root.after_cancel(settings_save_after_id["value"])
+            settings_save_after_id["value"] = root.after(400, persist_settings)
+        except tk.TclError:
+            settings_save_after_id["value"] = None
+
     def on_close():
+        try:
+            if settings_save_after_id["value"] is not None:
+                root.after_cancel(settings_save_after_id["value"])
+                settings_save_after_id["value"] = None
+            persist_settings()
+        except (tk.TclError, Exception):
+            pass
         commands.put(("quit",))
         root.destroy()
 
+    root.bind("<Configure>", on_root_configure, add="+")
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
 

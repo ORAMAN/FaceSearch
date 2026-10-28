@@ -32,16 +32,21 @@ except ImportError:
 
 # Shared visual theme, also available when this script is started directly from loaders/instagram.
 _LOADER_SHARED_DIR = str(Path(__file__).resolve().parents[1])
+_REPOSITORY_ROOT = str(Path(__file__).resolve().parents[2])
 if _LOADER_SHARED_DIR not in sys.path:
     sys.path.insert(0, _LOADER_SHARED_DIR)
+if _REPOSITORY_ROOT not in sys.path:
+    sys.path.insert(0, _REPOSITORY_ROOT)
 from ui_theme import ThemeManager, browser_window_args, place_tk_window_half
 from edit_shortcuts import install_edit_shortcuts
+from facesearch.settings import load_module_settings, save_module_settings
 
 
 BASE_URL = "https://www.instagram.com/"
 OUT_DIR = Path(__file__).resolve().parent / "downloads"
 PROFILE_DIR = Path(__file__).resolve().parent / "browser_profile"
-APP_SETTINGS_PATH = Path(__file__).resolve().with_name("instagram_downloader_settings.json")
+APP_SETTINGS_PATH = Path(__file__).resolve().with_name("instagram_downloader_settings.xml")
+LEGACY_APP_SETTINGS_PATH = APP_SETTINGS_PATH.with_suffix(".json")
 DEFAULT_FACESEARCH_DIR = Path(r"C:\FaceSearch")
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"}
 
@@ -1420,21 +1425,21 @@ def load_settings() -> dict:
         "chrome_exe_path": default_chrome_executable(),
         "fullsize": True,
         "theme": "light",
+        "geometry": "",
+        "maximized": False,
     }
-    try:
-        if APP_SETTINGS_PATH.is_file():
-            data = json.loads(APP_SETTINGS_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                defaults.update({k: data[k] for k in defaults if k in data})
-    except Exception as exc:
-        print(f"[WARN] Не удалось прочитать настройки окна: {exc}")
-    return defaults
+    return load_module_settings(
+        APP_SETTINGS_PATH, "instagram_downloader", defaults,
+        window_keys={"theme", "geometry", "maximized"},
+        legacy_json_paths=(LEGACY_APP_SETTINGS_PATH,),
+    )
 
 
 def save_settings(values: dict) -> None:
-    tmp = APP_SETTINGS_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(values, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(APP_SETTINGS_PATH)
+    save_module_settings(
+        APP_SETTINGS_PATH, "instagram_downloader", values,
+        window_keys={"theme", "geometry", "maximized"},
+    )
 
 
 def launch_browser_context(playwright, profile_directory: str, chrome_executable: str):
@@ -2009,10 +2014,17 @@ def main():
     install_edit_shortcuts(root)
     root.title("Instagram — загрузчик изображений и импорт FaceSearch")
     theme_manager = ThemeManager(root, saved.get("theme", "light"), accent_variant="instagram")
-    # На Windows форма занимает левую половину рабочего стола; Chrome запускается справа.
-    if not place_tk_window_half(root, "left", min_width=620, min_height=480):
+    # При первом запуске форма занимает левую половину рабочего стола; далее восстанавливается геометрия.
+    saved_geometry = str(saved.get("geometry") or "").strip()
+    if re.fullmatch(r"\d+x\d+[+-]\d+[+-]\d+", saved_geometry):
+        root.geometry(saved_geometry)
+        root.minsize(850, 700)
+    elif not place_tk_window_half(root, "left", min_width=620, min_height=480):
         root.geometry("980x790")
         root.minsize(850, 700)
+    last_normal_geometry = {"value": saved_geometry or root.geometry()}
+    if bool(saved.get("maximized", False)):
+        root.after(180, lambda: root.state("zoomed"))
     root.columnconfigure(0, weight=1)
     root.rowconfigure(0, weight=1)
     frame = ttk.Frame(root, padding=12, style="App.TFrame")
@@ -2100,6 +2112,8 @@ def main():
             "chrome_exe_path": chrome_exe_path_var.get().strip(),
             "fullsize": fullsize_var.get(),
             "theme": theme_manager.current,
+            "geometry": (last_normal_geometry["value"] if root.state() in {"zoomed", "maximized"} else root.geometry()),
+            "maximized": root.state() in {"zoomed", "maximized"},
         })
 
     def set_status(message: str):
@@ -2397,10 +2411,31 @@ def main():
             set_status(f"Ошибка браузера: {exc}")
 
     def on_close():
-        persist_settings()
+        try:
+            if settings_save_after_id["value"] is not None:
+                root.after_cancel(settings_save_after_id["value"])
+                settings_save_after_id["value"] = None
+            persist_settings()
+        except (tk.TclError, Exception):
+            pass
         commands.put(("quit",))
         root.destroy()
 
+    settings_save_after_id = {"value": None}
+
+    def on_root_configure(event=None):
+        if event is not None and event.widget is not root:
+            return
+        try:
+            if root.state() == "normal":
+                last_normal_geometry["value"] = root.geometry()
+            if settings_save_after_id["value"] is not None:
+                root.after_cancel(settings_save_after_id["value"])
+            settings_save_after_id["value"] = root.after(400, persist_settings)
+        except tk.TclError:
+            settings_save_after_id["value"] = None
+
+    root.bind("<Configure>", on_root_configure, add="+")
     root.protocol("WM_DELETE_WINDOW", on_close)
     theme_manager.apply(saved.get("theme", "light"), recolor=True)
 
