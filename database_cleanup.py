@@ -1330,10 +1330,6 @@ class ProfileSearchTab(ttk.Frame):
         text.configure(state="disabled")
         _attach_text_context_menu(text, readonly=True)
         text.bind("<Control-KeyPress>", lambda event: "break" if event.state & 0x4 and event.keycode in (65, 86, 88) else None, add="+")
-        detail_menu = tk.Menu(text, tearoff=False)
-        detail_menu.add_command(label="Копировать", command=lambda: _copy_text_selection(text), accelerator="Ctrl+C")
-        detail_menu.add_command(label="Копировать всё", command=lambda: _clipboard_copy(text, text.get("1.0", "end-1c")))
-        # Контекстное меню общего обработчика содержит «Копировать всё».
 
     def confirm_delete_selected(self):
         if self._busy:
