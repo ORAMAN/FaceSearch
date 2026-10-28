@@ -34,6 +34,8 @@ _FRIEND_CACHE: dict[int, tuple[float, set[int], str]] = {}
 _FRIEND_CACHE_LOCK = threading.RLock()
 _VK_REQUEST_LOCK = threading.Lock()
 _VK_LAST_REQUEST_AT = 0.0
+_VK_LOADER_CACHE_LOCK = threading.RLock()
+_VK_TOKEN_FILE_SIGNATURE: tuple[int, int] | None = None
 
 
 def normalize_options(options: dict[str, Any] | None) -> dict[str, Any]:
@@ -82,18 +84,32 @@ def vk_user_id(candidate: dict[str, Any]) -> int | None:
 
 
 def _get_vk_loader():
-    """Возвращает существующий VK-клиент загрузчика вместе с его менеджером токенов."""
+    """Возвращает штатный VK-клиент и синхронизирует кэш токенов с файлом загрузчика."""
+    global _VK_TOKEN_FILE_SIGNATURE
     try:
         # Не дублируем OAuth, валидацию, хранение или ротацию токенов.
-        # Используется тот же модуль, что и в loaders/vk/vk_downloader.py.
         from loaders.vk import vk_downloader
     except Exception as exc:
         return None, (
             "Не удалось подключить VK-клиент загрузчика: "
             + type(exc).__name__ + ". Проверьте зависимости загрузчика VK."
         )
+
     try:
-        token_count = int(vk_downloader.reload_token_cache())
+        token_path = Path(vk_downloader.VK_TOKEN_FILE)
+        stat = token_path.stat()
+        signature = (int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        signature = None
+
+    try:
+        with _VK_LOADER_CACHE_LOCK:
+            cached_tokens = list(getattr(vk_downloader, "_TOKEN_LIST", []) or [])
+            if signature != _VK_TOKEN_FILE_SIGNATURE or not cached_tokens:
+                token_count = int(vk_downloader.reload_token_cache())
+                _VK_TOKEN_FILE_SIGNATURE = signature
+            else:
+                token_count = len(cached_tokens)
     except Exception as exc:
         return None, (
             "Не удалось загрузить токены через менеджер загрузчика VK: "
@@ -106,7 +122,6 @@ def _get_vk_loader():
             "или «Добавить токен v1 вручную…», затем повторите анализ."
         )
     return vk_downloader, ""
-
 
 def _request_vk_friends(user_id: int, vk_client) -> tuple[set[int], str]:
     """Получает ID друзей через API-обёртку загрузчика, с его ротацией токенов и повторами."""
