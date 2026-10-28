@@ -802,6 +802,8 @@ def _attach_text_context_menu(widget, *, readonly: bool = False):
         return "break"
 
     menu.add_command(label="Копировать", command=copy, accelerator="Ctrl+C")
+    if isinstance(widget, tk.Text):
+        menu.add_command(label="Копировать всё", command=lambda: _clipboard_copy(widget, widget.get("1.0", "end-1c")))
     menu.add_command(label="Вырезать", command=cut, accelerator="Ctrl+X", state="disabled" if readonly else "normal")
     menu.add_command(label="Вставить", command=paste, accelerator="Ctrl+V", state="disabled" if readonly else "normal")
     menu.add_separator()
@@ -1331,7 +1333,7 @@ class ProfileSearchTab(ttk.Frame):
         detail_menu = tk.Menu(text, tearoff=False)
         detail_menu.add_command(label="Копировать", command=lambda: _copy_text_selection(text), accelerator="Ctrl+C")
         detail_menu.add_command(label="Копировать всё", command=lambda: _clipboard_copy(text, text.get("1.0", "end-1c")))
-        text.bind("<Button-3>", lambda event: _popup_menu(detail_menu, event), add="+")
+        # Контекстное меню общего обработчика содержит «Копировать всё».
 
     def confirm_delete_selected(self):
         if self._busy:
