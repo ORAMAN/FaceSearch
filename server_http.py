@@ -1285,7 +1285,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   <section class="group-options" aria-label="Параметры группового анализа">
     <details>
       <summary>Параметры анализа связей группы — только для текущего сеанса</summary>
-      <div class="group-options-note">Эти изменения не записываются в settings.xml. Постоянные значения задаются в окне FaceSearch → «Параметры группового анализа».</div>
+      <div class="group-options-note">Эти изменения не записываются в settings.xml. Постоянные значения задаются в окне FaceSearch → «Параметры группового анализа». Токены добавляются только через загрузчик VK; на этой странице их вводить не нужно.</div>
       <div class="group-options-grid">
         <div class="field">
           <label for="group-min-similarity">Минимальное сходство, %</label>
@@ -1309,7 +1309,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
         </div>
         <div class="field toggle-field">
           <label class="toggle-label" for="group-check-vk-friends"><input id="group-check-vk-friends" type="checkbox" __GROUP_CHECK_VK_FRIENDS__> Проверять друзей VK</label>
-          <span class="hint">Требуется токен VK.</span>
+          <span class="hint">Используются токены, настроенные в загрузчике VK.</span>
         </div>
       </div>
     </details>
