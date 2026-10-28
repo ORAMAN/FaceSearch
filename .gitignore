@@ -49,9 +49,9 @@ loaders/ok/downloads/
 query_cache/
 
 # Служебные настройки и временные данные утилит
-utilities/database_cleanup_settings.json
+utilities/database_cleanup_settings.xml
 utilities/temp/
-utilities/database_migration_settings.json
+utilities/database_migration_settings.xml
 
 # Временные и системные файлы Windows
 *.tmp

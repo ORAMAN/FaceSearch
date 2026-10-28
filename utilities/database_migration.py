@@ -27,7 +27,11 @@ from tkinter import ttk, filedialog, messagebox
 SCRIPT_DIR = Path(__file__).resolve().parent
 APP_DIR = SCRIPT_DIR.parent  # корень проекта FaceSearch
 TEMP_DIR = SCRIPT_DIR / "temp"
-SETTINGS_PATH = SCRIPT_DIR / "database_migration_settings.json"
+SETTINGS_PATH = SCRIPT_DIR / "database_migration_settings.xml"
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
+from facesearch.settings import load_module_settings, save_module_settings
+
 # Профили БД общие для основного приложения и утилит, поэтому остаются в корне проекта.
 PROFILE_FILE = APP_DIR / "database_profiles.json"
 BATCH_IMAGES = 250       # не превышаем лимиты параметров SQL Server / SQLite
@@ -817,22 +821,34 @@ class DatabaseMigrationWindow:
         self.root = tk.Toplevel(master) if master is not None else tk.Tk()
         self.root.title("Миграция и слияние баз данных — Face Search")
         self._settings_after_id = None
-        self._saved_settings = {}
-        legacy_settings_path = APP_DIR / "database_migration_settings.json"
-        if not self.SETTINGS_FILE.exists() and legacy_settings_path.is_file():
-            try:
-                legacy_settings_path.replace(self.SETTINGS_FILE)
-            except OSError:
-                pass
-        settings_to_read = self.SETTINGS_FILE
-        if not settings_to_read.is_file() and legacy_settings_path.is_file():
-            settings_to_read = legacy_settings_path
-        try:
-            loaded = json.loads(settings_to_read.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                self._saved_settings = loaded
-        except (OSError, ValueError, TypeError):
-            pass
+        self._settings_defaults = {
+            "theme": "dark",
+            "geometry": "940x790",
+            "maximized": False,
+            "source_profile": "",
+            "destination_mode": "existing",
+            "target_profile": "",
+            "new_name": f"Миграция — {time.strftime('%Y-%m-%d %H-%M')}",
+            "db_type": "SQLite",
+            "sqlite_path": str(SCRIPT_DIR / "migrated_faces.db"),
+            "host": "localhost",
+            "port": "5432",
+            "database": "faces_migrated",
+            "user": "",
+            "driver": "",
+            "save_profile": True,
+            "rebuild_index": True,
+        }
+        self._saved_settings = load_module_settings(
+            self.SETTINGS_FILE,
+            "database_migration",
+            self._settings_defaults,
+            window_keys={"theme", "geometry", "maximized"},
+            legacy_json_paths=(
+                SCRIPT_DIR / "database_migration_settings.json",
+                APP_DIR / "database_migration_settings.json",
+            ),
+        )
 
         saved_geometry = self._saved_settings.get("geometry")
         if isinstance(saved_geometry, str) and re.fullmatch(r"\d+x\d+[+-]\d+[+-]\d+", saved_geometry):
@@ -1273,11 +1289,13 @@ class DatabaseMigrationWindow:
                 "save_profile": bool(self.save_profile_var.get()),
                 "rebuild_index": bool(self.rebuild_index_var.get()),
             }
-            # Пароль не записывается на диск: файл настроек остаётся обычным JSON.
-            self.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.SETTINGS_FILE.with_suffix(".json.tmp")
-            temporary.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
-            temporary.replace(self.SETTINGS_FILE)
+            # Пароль не записывается на диск; XML хранит только настройки интерфейса и формы.
+            save_module_settings(
+                self.SETTINGS_FILE,
+                "database_migration",
+                saved,
+                window_keys={"theme", "geometry", "maximized"},
+            )
             self._saved_settings = saved
         except (OSError, tk.TclError, AttributeError, TypeError, ValueError):
             pass

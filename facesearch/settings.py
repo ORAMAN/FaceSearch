@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """Чтение и сохранение пользовательских настроек GUI (settings.xml)."""
 from __future__ import annotations
+import json
 import xml.etree.ElementTree as ET
-from typing import Any
+from pathlib import Path
+from typing import Any, Iterable
 from .config import (
     APP_DIR, SETTINGS_FILE, LOCAL_DEFAULT_WORKERS, LOCAL_MAX_WORKERS,
     AUTO_WORKERS_DEFAULT, DEFAULT_TOP_K, DEFAULT_SCAN_BATCH_SIZE, MAX_SCAN_BATCH_SIZE,
@@ -26,6 +28,128 @@ def _xml_float(value: Any, default: float) -> float:
         return float(str(value).strip())
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_module_setting(value: Any, default: Any) -> Any:
+    """Преобразует значение из XML в тип, заданный значением по умолчанию."""
+    if isinstance(default, bool):
+        return _xml_bool(value, default)
+    if isinstance(default, int) and not isinstance(default, bool):
+        return _xml_int(value, default)
+    if isinstance(default, float):
+        return _xml_float(value, default)
+    if isinstance(default, str):
+        return "" if value is None else str(value)
+    return default if value is None else value
+
+
+def save_module_settings(
+    path: str | Path,
+    module_name: str,
+    settings: dict[str, Any],
+    *,
+    window_keys: set[str] | frozenset[str] = frozenset({"geometry", "maximized", "theme"}),
+) -> None:
+    """Сохраняет настройки утилиты в общем XML-формате FaceSearch."""
+    settings_path = Path(path)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    root = ET.Element("settings", {"version": "1", "module": str(module_name)})
+
+    window = ET.SubElement(root, "window")
+    form = ET.SubElement(root, "form")
+    for key, value in settings.items():
+        parent = window if key in window_keys else form
+        if isinstance(value, bool):
+            text = "true" if value else "false"
+        elif value is None:
+            text = ""
+        else:
+            text = str(value)
+        ET.SubElement(parent, str(key)).text = text
+
+    tree = ET.ElementTree(root)
+    try:
+        ET.indent(tree, space="    ")
+    except AttributeError:
+        pass
+    temporary = settings_path.with_suffix(".tmp")
+    tree.write(temporary, encoding="utf-8", xml_declaration=True)
+    temporary.replace(settings_path)
+
+
+def load_module_settings(
+    path: str | Path,
+    module_name: str,
+    defaults: dict[str, Any],
+    *,
+    window_keys: set[str] | frozenset[str] = frozenset({"geometry", "maximized", "theme"}),
+    legacy_json_paths: Iterable[str | Path] = (),
+) -> dict[str, Any]:
+    """Загружает XML-настройки утилиты и однократно мигрирует прежние JSON-файлы."""
+    settings_path = Path(path)
+    legacy_paths = []
+    for item in legacy_json_paths:
+        candidate = Path(item)
+        if candidate != settings_path and candidate not in legacy_paths:
+            legacy_paths.append(candidate)
+
+    stored: dict[str, Any] = {}
+    loaded_xml = False
+    if settings_path.is_file():
+        try:
+            root = ET.parse(settings_path).getroot()
+            root_module = root.get("module")
+            if root.tag == "settings" and root_module in (None, str(module_name)):
+                for section_name in ("window", "form"):
+                    node = root.find(section_name)
+                    if node is None:
+                        continue
+                    for item in list(node):
+                        if item.tag in defaults:
+                            stored[item.tag] = item.text
+                loaded_xml = True
+        except (ET.ParseError, OSError, ValueError):
+            loaded_xml = False
+
+    legacy_source: Path | None = None
+    if not loaded_xml:
+        for candidate in legacy_paths:
+            if not candidate.is_file():
+                continue
+            try:
+                payload = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                continue
+            if isinstance(payload, dict):
+                stored = {key: value for key, value in payload.items() if key in defaults}
+                legacy_source = candidate
+                break
+
+    result = dict(defaults)
+    for key, default in defaults.items():
+        if key in stored:
+            result[key] = _coerce_module_setting(stored[key], default)
+
+    # JSON удаляется только после успешного создания XML; при ошибке исходник остаётся.
+    if legacy_source is not None:
+        try:
+            save_module_settings(settings_path, module_name, result, window_keys=window_keys)
+        except OSError:
+            return result
+        for candidate in legacy_paths:
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
+    elif loaded_xml:
+        # При валидном XML удаляем устаревшие копии от предыдущих версий утилит.
+        for candidate in legacy_paths:
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    return result
 
 
 # Новые установки по умолчанию сохраняют прежний вид интерфейса (все группы раскрыты).

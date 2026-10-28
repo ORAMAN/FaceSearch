@@ -45,6 +45,7 @@ try:
         DB_DEFAULT_PORTS,
     )
     from facesearch.database.connection import DatabaseConnection
+    from facesearch.settings import load_module_settings, save_module_settings
 except Exception as exc:
     raise SystemExit(
         "Не удалось импортировать конфигурацию FaceSearch.\n"
@@ -2201,7 +2202,7 @@ class RemoteCleanupTab(ttk.Frame):
 
 class CleanupSuite(tk.Tk):
     """Главное окно и единая дневная/ночная тема, как в загрузчике VK."""
-    SETTINGS_PATH = SCRIPT_DIR / "database_cleanup_settings.json"
+    SETTINGS_PATH = SCRIPT_DIR / "database_cleanup_settings.xml"
 
     PALETTES = {
         "light": {
@@ -2225,24 +2226,23 @@ class CleanupSuite(tk.Tk):
         self.title("FaceSearch — инструменты очистки базы")
         self.minsize(1120, 640)
         self._settings_after_id = None
-        self._saved_settings = {}
-        # Переносим прежний файл настроек из корня проекта рядом с утилитой.
-        legacy_settings_path = APP_DIR / "database_cleanup_settings.json"
-        if not self.SETTINGS_PATH.exists() and legacy_settings_path.is_file():
-            try:
-                legacy_settings_path.replace(self.SETTINGS_PATH)
-            except OSError:
-                # Если переместить файл нельзя, хотя бы прочитаем прежние настройки.
-                pass
-        settings_to_read = self.SETTINGS_PATH
-        if not settings_to_read.is_file() and legacy_settings_path.is_file():
-            settings_to_read = legacy_settings_path
-        try:
-            loaded = json.loads(settings_to_read.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                self._saved_settings = loaded
-        except (OSError, ValueError, TypeError):
-            pass
+        self._settings_defaults = {
+            "theme": "dark",
+            "geometry": "1500x820",
+            "maximized": False,
+            "query": "",
+            "database_profile": "",
+        }
+        self._saved_settings = load_module_settings(
+            self.SETTINGS_PATH,
+            "database_cleanup",
+            self._settings_defaults,
+            window_keys={"theme", "geometry", "maximized"},
+            legacy_json_paths=(
+                SCRIPT_DIR / "database_cleanup_settings.json",
+                APP_DIR / "database_cleanup_settings.json",
+            ),
+        )
 
         saved_theme = self._saved_settings.get("theme")
         self.theme_state = {"value": saved_theme if saved_theme in self.PALETTES else "dark"}
@@ -2327,9 +2327,12 @@ class CleanupSuite(tk.Tk):
                 "query": profile_tab.query_var.get() if profile_tab is not None else str(self._saved_settings.get("query") or ""),
                 "database_profile": profile_tab.profile_var.get() if profile_tab is not None else str(self._saved_settings.get("database_profile") or ""),
             }
-            temporary = self.SETTINGS_PATH.with_suffix(".json.tmp")
-            temporary.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
-            temporary.replace(self.SETTINGS_PATH)
+            save_module_settings(
+                self.SETTINGS_PATH,
+                "database_cleanup",
+                saved,
+                window_keys={"theme", "geometry", "maximized"},
+            )
             self._saved_settings = saved
         except (OSError, tk.TclError, AttributeError, TypeError):
             pass
