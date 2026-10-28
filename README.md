@@ -380,7 +380,8 @@ FaceSearch/
 - `database_profiles.json` — список профилей БД (общий файл, используется GUI и утилитами);
 - `utilities/database_cleanup_settings.xml` — индивидуальные настройки окна очистки;
 - `utilities/database_migration_settings.xml` — тема, размер/положение окна и параметры формы миграции;
-- при первом запуске прежние JSON-настройки утилит автоматически переносятся в XML и удаляются после успешной конвертации;
+- `loaders/ok/ok_downloader_settings.xml`, `loaders/vk/vk_settings.xml`, `loaders/instagram/instagram_downloader_settings.xml` — настройки окон загрузчиков;
+- при первом запуске прежние JSON-настройки утилит и загрузчиков автоматически переносятся в XML и удаляются только после успешного сохранения;
 - `utilities/temp/` — временный файл сопоставления при миграции, автоматически удаляется после завершения;
 - `indexes/` — индексы FAISS;
 - `face_images/` или заданные в профилях каталоги — CROP-файлы;

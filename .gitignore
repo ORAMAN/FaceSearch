@@ -49,6 +49,9 @@ loaders/ok/downloads/
 query_cache/
 
 # Служебные настройки и временные данные утилит
+loaders/ok/ok_downloader_settings.xml
+loaders/vk/vk_settings.xml
+loaders/instagram/instagram_downloader_settings.xml
 utilities/database_cleanup_settings.xml
 utilities/temp/
 utilities/database_migration_settings.xml
