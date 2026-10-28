@@ -2847,11 +2847,15 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                     APP_DIR,
                     progress=progress_callback,
                 )
-                update_job(100, "Групповой анализ завершён.", "done")
+                # Сначала публикуем результат и только затем помечаем задачу завершённой,
+                # чтобы клиент не успел получить state=done без поля result.
                 with GROUP_ANALYSIS_JOBS_LOCK:
                     job = GROUP_ANALYSIS_JOBS.get(job_id)
                     if job is not None:
                         job["result"] = result
+                        job["progress"] = 100
+                        job["message"] = "Групповой анализ завершён."
+                        job["state"] = "done"
             except Exception as exc:
                 message = str(exc).strip() or exc.__class__.__name__
                 print("[HTTP][GROUP-ANALYSIS][ERROR] " + message, flush=True)
