@@ -46,7 +46,7 @@
 Базовые модульные тесты находятся в `tests/test_group_analysis.py` и запускаются из корня репозитория:
 
 ```powershell
-python -m unittest tests.test_group_analysis -v
+python -m unittest discover -s tests -p "test_group_analysis.py" -v
 ```
 
 Эта экспериментальная ветка не изменяет `main` и не требует изменения схемы основной базы данных.
