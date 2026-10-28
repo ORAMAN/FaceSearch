@@ -56,6 +56,7 @@ QUERY_TTL_SECONDS = 30 * 60
 MAX_QUERY_SESSIONS = 100
 GROUP_ANALYSIS_TTL_SECONDS = 30 * 60
 MAX_GROUP_ANALYSIS_JOBS = 100
+MAX_ACTIVE_GROUP_ANALYSES = 2
 
 QUERY_SESSIONS: dict[str, dict] = {}
 QUERY_SESSIONS_LOCK = threading.RLock()
@@ -2737,6 +2738,18 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                         "job_id": existing_id,
                     })
                     return
+            active_jobs = sum(
+                1 for job in GROUP_ANALYSIS_JOBS.values()
+                if job.get("state") in ("queued", "running")
+            )
+            if active_jobs >= MAX_ACTIVE_GROUP_ANALYSES:
+                self._json(429, {
+                    "error": (
+                        "Уже выполняются две задачи группового анализа. "
+                        "Повторите запуск после завершения одной из них."
+                    )
+                })
+                return
             job_id = secrets.token_urlsafe(18)
             GROUP_ANALYSIS_JOBS[job_id] = {
                 "created": time.monotonic(),
@@ -2764,7 +2777,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             connection = None
             try:
                 candidate_count = int(options["candidates_per_face"])
-                search_top_k = min(100, max(candidate_count * 5, candidate_count + 5))
+                search_top_k = min(100, max(candidate_count * 10, candidate_count + 10))
                 candidates_by_face = []
                 connection = _open_connection()
                 for face_index, embedding in enumerate(embeddings):
