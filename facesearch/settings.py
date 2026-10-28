@@ -2,6 +2,7 @@
 """Чтение и сохранение пользовательских настроек GUI (settings.xml)."""
 from __future__ import annotations
 import json
+import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Iterable
@@ -136,6 +137,9 @@ def _read_module_xml_value(node: ET.Element, default: Any) -> Any:
     return _coerce_module_setting(raw, default)
 
 
+_MODULE_SETTINGS_WRITE_LOCK = threading.RLock()
+
+
 def save_module_settings(
     path: str | Path,
     module_name: str,
@@ -160,9 +164,21 @@ def save_module_settings(
         ET.indent(tree, space="    ")
     except AttributeError:
         pass
-    temporary = settings_path.with_suffix(".tmp")
-    tree.write(temporary, encoding="utf-8", xml_declaration=True)
-    temporary.replace(settings_path)
+
+    # У каждого потока свой временный файл: в VK смещение поиска может
+    # сохраняться из worker-потока одновременно с настройками окна.
+    temporary = settings_path.with_name(
+        f"{settings_path.name}.{threading.get_ident()}.tmp"
+    )
+    with _MODULE_SETTINGS_WRITE_LOCK:
+        try:
+            tree.write(temporary, encoding="utf-8", xml_declaration=True)
+            temporary.replace(settings_path)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def load_module_settings(
