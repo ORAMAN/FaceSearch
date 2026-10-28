@@ -17,6 +17,7 @@ import sqlite3
 import sys
 import threading
 import time
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -723,6 +724,140 @@ def make_scrolled_tree(parent, columns, headings, widths, selectmode='extended')
     return tree
 
 
+
+def _popup_menu(menu, event):
+    try:
+        menu.tk_popup(event.x_root, event.y_root)
+    finally:
+        try:
+            menu.grab_release()
+        except tk.TclError:
+            pass
+    return "break"
+
+
+def _copy_text_selection(widget):
+    try:
+        _clipboard_copy(widget, widget.get("sel.first", "sel.last"))
+    except tk.TclError:
+        pass
+
+
+def _clipboard_copy(widget, value: str):
+    """Копирует строку в системный буфер обмена."""
+    widget.clipboard_clear()
+    widget.clipboard_append(str(value))
+    try:
+        widget.update_idletasks()
+    except tk.TclError:
+        pass
+
+
+def _attach_text_context_menu(widget, *, readonly: bool = False):
+    """Контекстное меню и Ctrl+C/V/X/A для Entry/Text, включая русскую раскладку."""
+    menu = tk.Menu(widget, tearoff=False)
+
+    def copy():
+        try:
+            selected = widget.selection_get()
+        except tk.TclError:
+            return
+        _clipboard_copy(widget, selected)
+
+    def cut():
+        if readonly:
+            copy()
+            return
+        try:
+            selected = widget.selection_get()
+        except tk.TclError:
+            return
+        _clipboard_copy(widget, selected)
+        try:
+            widget.delete("sel.first", "sel.last")
+        except tk.TclError:
+            pass
+
+    def paste():
+        if readonly:
+            return
+        try:
+            value = widget.clipboard_get()
+            if isinstance(widget, tk.Entry):
+                widget.insert(tk.INSERT, value)
+            else:
+                widget.insert(tk.INSERT, value)
+        except tk.TclError:
+            pass
+
+    def select_all():
+        try:
+            if isinstance(widget, tk.Entry):
+                widget.selection_range(0, tk.END)
+                widget.icursor(tk.END)
+            else:
+                widget.tag_add("sel", "1.0", "end-1c")
+        except tk.TclError:
+            pass
+        return "break"
+
+    menu.add_command(label="Копировать", command=copy, accelerator="Ctrl+C")
+    menu.add_command(label="Вырезать", command=cut, accelerator="Ctrl+X", state="disabled" if readonly else "normal")
+    menu.add_command(label="Вставить", command=paste, accelerator="Ctrl+V", state="disabled" if readonly else "normal")
+    menu.add_separator()
+    menu.add_command(label="Выделить всё", command=select_all, accelerator="Ctrl+A")
+
+    def popup(event):
+        try:
+            if isinstance(widget, tk.Entry):
+                index = widget.index(f"@{event.x}")
+                if not widget.selection_present():
+                    widget.icursor(index)
+            elif isinstance(widget, tk.Text):
+                widget.mark_set(tk.INSERT, f"@{event.x},{event.y}")
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except tk.TclError:
+                pass
+        return "break"
+
+    def shortcuts(event):
+        if not (event.state & 0x4):  # Control; keycode проверяет физическую клавишу и не зависит от раскладки
+            return None
+        key = event.keycode
+        if key == 67:  # C
+            copy()
+            return "break"
+        if key == 88:  # X
+            cut()
+            return "break"
+        if key == 86:  # V
+            paste()
+            return "break"
+        if key == 65:  # A
+            return select_all()
+        return None
+
+    widget.bind("<Button-3>", popup, add="+")
+    widget.bind("<Shift-F10>", lambda event: popup(event), add="+")
+    widget.bind("<Control-KeyPress>", shortcuts, add="+")
+
+
+def _profile_url(value: str) -> str:
+    """Возвращает пригодный для браузера HTTP(S)-адрес, не подменяя домен."""
+    url = str(value or "").strip()
+    if not url:
+        return ""
+    if url.startswith("//"):
+        url = "https:" + url
+    elif not re.match(r"^https?://", url, flags=re.IGNORECASE):
+        url = "https://" + url.lstrip("/")
+    parsed = urlparse(url)
+    return url if parsed.scheme in {"http", "https"} and parsed.netloc else ""
+
+
 class ProfileSearchTab(ttk.Frame):
     def __init__(self, master):
         super().__init__(master, padding=10)
@@ -768,6 +903,7 @@ class ProfileSearchTab(ttk.Frame):
         self.query_entry = ttk.Entry(controls, textvariable=self.query_var, width=35)
         self.query_entry.pack(side="left", padx=(0, 5))
         self.query_entry.bind("<Return>", lambda _event: self.start_search())
+        _attach_text_context_menu(self.query_entry)
         self.search_button = ttk.Button(controls, text="Найти", command=self.start_search)
         self.search_button.pack(side="left", padx=4)
         ttk.Button(controls, text="Очистить поиск", command=self.clear_query).pack(side="left", padx=4)
@@ -810,11 +946,21 @@ class ProfileSearchTab(ttk.Frame):
         xscroll.pack(fill="x")
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self.tree.bind("<Double-1>", self.show_details)
+        self.tree.bind("<Button-3>", self._profile_tree_context_menu)
+        self.tree.bind("<Shift-F10>", self._profile_tree_keyboard_menu)
+        self.tree.bind("<Control-KeyPress>", self._profile_tree_shortcuts, add="+")
+
+        self.tree_menu = tk.Menu(self.tree, tearoff=False)
+        self.tree_menu.add_command(label="Открыть профиль во внешнем браузере", command=self.open_selected_profile)
+        self.tree_menu.add_command(label="Копировать URL профиля", command=self.copy_selected_url)
+        self.tree_menu.add_command(label="Копировать выбранные строки", command=self.copy_selected_rows)
+        self.tree_menu.add_command(label="Копировать значение ячейки", command=self.copy_focused_cell)
 
         actions = ttk.Frame(outer)
         actions.pack(fill="x", pady=(8, 4))
         ttk.Button(actions, text="Выделить страницу", command=self.select_page).pack(side="left", padx=(0, 5))
         ttk.Button(actions, text="Снять выделение страницы", command=self.deselect_page).pack(side="left", padx=5)
+        ttk.Button(actions, text="Открыть профиль в браузере", command=self.open_selected_profile).pack(side="left", padx=5)
         self.delete_selected_button = ttk.Button(
             actions, text="Удалить выбранные", command=self.confirm_delete_selected
         )
@@ -833,6 +979,91 @@ class ProfileSearchTab(ttk.Frame):
         self.next_button = ttk.Button(paging, text="Вперёд ▶", command=lambda: self.change_page(1), state="disabled")
         self.next_button.pack(side="left")
         ttk.Label(outer, textvariable=self.status_var).pack(fill="x", pady=(8, 0))
+
+    def _profile_tree_context_menu(self, event):
+        row = self.tree.identify_row(event.y)
+        if row and row not in self.tree.selection():
+            self.tree.selection_set(row)
+            self.tree.focus(row)
+        if row:
+            self.tree_menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    def _profile_tree_keyboard_menu(self, event=None):
+        row = self.tree.focus()
+        if not row:
+            selection = self.tree.selection()
+            row = selection[0] if selection else ""
+        if row:
+            bbox = self.tree.bbox(row)
+            x = self.tree.winfo_rootx() + (bbox[0] if bbox else 20)
+            y = self.tree.winfo_rooty() + (bbox[1] + (bbox[3] if bbox else 20))
+            self.tree_menu.tk_popup(x, y)
+        return "break"
+
+    def _profile_tree_shortcuts(self, event):
+        if not (event.state & 0x4):
+            return None
+        if event.keycode == 67:
+            self.copy_selected_rows()
+            return "break"
+        if event.keycode == 65:
+            self.tree.selection_set(self.tree.get_children())
+            return "break"
+        return None
+
+    def _selected_profile_values(self):
+        selection = self.tree.selection()
+        return self.tree.item(selection[0], "values") if selection else ()
+
+    def open_selected_profile(self):
+        values = self._selected_profile_values()
+        if not values:
+            messagebox.showinfo("Открытие профиля", "Выберите профиль в результатах поиска.", parent=self)
+            return
+        url = _profile_url(values[5] if len(values) > 5 else "")
+        if not url:
+            # Если URL отсутствует, пробуем домен из соседнего столбца.
+            url = _profile_url(values[4] if len(values) > 4 else "")
+        if not url:
+            messagebox.showwarning("Открытие профиля", "У выбранного профиля нет корректного URL или домена.", parent=self)
+            return
+        try:
+            webbrowser.open(url, new=2)
+        except Exception as exc:
+            messagebox.showerror("Открытие профиля", f"Не удалось открыть браузер:\n{exc}", parent=self)
+
+    def copy_selected_url(self):
+        values = self._selected_profile_values()
+        if not values:
+            return
+        _clipboard_copy(self, values[5] if len(values) > 5 else "")
+
+    def copy_selected_rows(self):
+        rows = [self.tree.item(iid, "values") for iid in self.tree.selection()]
+        if not rows:
+            rows = [self._selected_profile_values()]
+        rows = [row for row in rows if row]
+        if rows:
+            _clipboard_copy(self, "\n".join("\t".join(str(v or "") for v in row) for row in rows))
+
+    def copy_focused_cell(self):
+        row = self.tree.focus()
+        if not row:
+            selection = self.tree.selection()
+            row = selection[0] if selection else ""
+        if not row:
+            return
+        column = self.tree.identify_column(self.tree.winfo_pointerx() - self.tree.winfo_rootx())
+        try:
+            index = int(column[1:]) - 1
+            values = self.tree.item(row, "values")
+            if 0 <= index < len(values):
+                _clipboard_copy(self, values[index])
+                return
+        except (ValueError, IndexError):
+            pass
+        self.copy_selected_rows()
 
     def _set_busy(self, busy: bool):
         self._busy = busy
@@ -1095,6 +1326,12 @@ class ProfileSearchTab(ttk.Frame):
                     if value not in (None, ""):
                         text.insert("end", f"{key}: {value}\n")
         text.configure(state="disabled")
+        _attach_text_context_menu(text, readonly=True)
+        text.bind("<Control-KeyPress>", lambda event: "break" if event.state & 0x4 and event.keycode in (65, 86, 88) else None, add="+")
+        detail_menu = tk.Menu(text, tearoff=False)
+        detail_menu.add_command(label="Копировать", command=lambda: _copy_text_selection(text), accelerator="Ctrl+C")
+        detail_menu.add_command(label="Копировать всё", command=lambda: _clipboard_copy(text, text.get("1.0", "end-1c")))
+        text.bind("<Button-3>", lambda event: _popup_menu(detail_menu, event), add="+")
 
     def confirm_delete_selected(self):
         if self._busy:
