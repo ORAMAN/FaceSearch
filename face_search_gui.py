@@ -4920,6 +4920,12 @@ class FaceSearchGUI:
                 "top_k": int(self.topk_var.get()),
                 "min_similarity": float(self.min_similarity_var.get()),
                 "description_filter": str(self.description_filter_var.get()),
+                "group_min_similarity": float(self.gui_settings.get("group_min_similarity", 43.0)),
+                "group_candidates_per_face": int(self.gui_settings.get("group_candidates_per_face", 5)),
+                "group_friend_weight": float(self.gui_settings.get("group_friend_weight", 8.0)),
+                "group_common_friend_weight": float(self.gui_settings.get("group_common_friend_weight", 2.0)),
+                "group_city_weight": float(self.gui_settings.get("group_city_weight", 1.5)),
+                "group_check_vk_friends": bool(self.gui_settings.get("group_check_vk_friends", True)),
                 "collapsible_sections": {
                     key: bool(group.get("expanded", True))
                     for key, group in getattr(self, "_collapsible_groups", {}).items()
@@ -5825,6 +5831,105 @@ class FaceSearchGUI:
         self._render_collapsible_group(key)
         self._schedule_settings_save()
 
+
+    def _open_group_analysis_settings(self):
+        """Открывает постоянные параметры группового анализа, используемые server_http.py."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Настройки группового анализа")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        try:
+            dialog.grab_set()
+        except tk.TclError:
+            pass
+
+        frame = ttk.Frame(dialog, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(
+            frame,
+            text="Параметры по умолчанию для веб-интерфейса server_http.py",
+            style="Section.TLabel",
+            wraplength=430,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+
+        initial = {
+            "group_min_similarity": self.gui_settings.get("group_min_similarity", 43.0),
+            "group_candidates_per_face": self.gui_settings.get("group_candidates_per_face", 5),
+            "group_friend_weight": self.gui_settings.get("group_friend_weight", 8.0),
+            "group_common_friend_weight": self.gui_settings.get("group_common_friend_weight", 2.0),
+            "group_city_weight": self.gui_settings.get("group_city_weight", 1.5),
+            "group_check_vk_friends": self.gui_settings.get("group_check_vk_friends", True),
+        }
+        variables = {
+            "group_min_similarity": tk.DoubleVar(value=float(initial["group_min_similarity"])),
+            "group_candidates_per_face": tk.IntVar(value=int(initial["group_candidates_per_face"])),
+            "group_friend_weight": tk.DoubleVar(value=float(initial["group_friend_weight"])),
+            "group_common_friend_weight": tk.DoubleVar(value=float(initial["group_common_friend_weight"])),
+            "group_city_weight": tk.DoubleVar(value=float(initial["group_city_weight"])),
+            "group_check_vk_friends": tk.BooleanVar(value=bool(initial["group_check_vk_friends"])),
+        }
+        fields = [
+            ("Минимальное сходство кандидата, %", "group_min_similarity", 0, 100, 1),
+            ("Кандидатов на одно лицо", "group_candidates_per_face", 1, 10, 1),
+            ("Вес дружбы между профилями", "group_friend_weight", 0, 20, 0.5),
+            ("Вес общих друзей", "group_common_friend_weight", 0, 10, 0.5),
+            ("Вес совпадения города", "group_city_weight", 0, 10, 0.5),
+        ]
+        for row_index, (label, key, minimum, maximum, step) in enumerate(fields, start=1):
+            ttk.Label(frame, text=label).grid(
+                row=row_index, column=0, sticky="w", padx=(0, 16), pady=4
+            )
+            ttk.Spinbox(
+                frame, from_=minimum, to=maximum, increment=step,
+                textvariable=variables[key], width=10,
+            ).grid(row=row_index, column=1, sticky="e", pady=4)
+
+        ttk.Checkbutton(
+            frame,
+            text="Проверять друзей VK (если доступен токен)",
+            variable=variables["group_check_vk_friends"],
+        ).grid(row=len(fields) + 1, column=0, columnspan=2, sticky="w", pady=(10, 4))
+        ttk.Label(
+            frame,
+            text=(
+                "В браузере эти значения можно временно менять для текущего сеанса. "
+                "Здесь задаются только постоянные значения по умолчанию. "
+                "Весовые коэффициенты — эвристика, а не вероятность правильного совпадения."
+            ),
+            style="Muted.TLabel",
+            wraplength=430,
+            justify="left",
+        ).grid(row=len(fields) + 2, column=0, columnspan=2, sticky="w", pady=(7, 12))
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=len(fields) + 3, column=0, columnspan=2, sticky="e")
+        ttk.Button(buttons, text="Отмена", command=dialog.destroy).pack(side="right", padx=(8, 0))
+
+        def save():
+            try:
+                values = {key: variable.get() for key, variable in variables.items()}
+                values["group_min_similarity"] = max(0.0, min(100.0, float(values["group_min_similarity"])))
+                values["group_candidates_per_face"] = max(1, min(10, int(values["group_candidates_per_face"])))
+                values["group_friend_weight"] = max(0.0, min(20.0, float(values["group_friend_weight"])))
+                values["group_common_friend_weight"] = max(0.0, min(10.0, float(values["group_common_friend_weight"])))
+                values["group_city_weight"] = max(0.0, min(10.0, float(values["group_city_weight"])))
+                values["group_check_vk_friends"] = bool(values["group_check_vk_friends"])
+            except (tk.TclError, TypeError, ValueError) as exc:
+                messagebox.showwarning(
+                    "Параметры группового анализа",
+                    f"Проверьте значения параметров.\n{exc}",
+                    parent=dialog,
+                )
+                return
+            self.gui_settings.update(values)
+            self._schedule_settings_save()
+            self.status_var.set("Параметры группового анализа сохранены в settings.xml.")
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Сохранить", style="Primary.TButton", command=save).pack(side="right")
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.bind("<Return>", lambda _event: save())
+
     def _build_ui(self):
         """Создаёт современную компоновку интерфейса, не меняя обработчики приложения."""
         self.style = ttk.Style(self.root)
@@ -6210,6 +6315,11 @@ class FaceSearchGUI:
             left, text="⌕  Искать выбранное лицо", style="Primary.TButton", command=self.start_search,
         )
         self.search_btn.pack(side="bottom", fill="x", pady=(6, 0))
+        self.group_analysis_settings_btn = ttk.Button(
+            left, text="⚙  Параметры группового анализа",
+            command=self._open_group_analysis_settings,
+        )
+        self.group_analysis_settings_btn.pack(side="bottom", fill="x", pady=(6, 0))
 
         controls = ttk.Frame(left, style="Surface.TFrame")
         controls.pack(side="bottom", fill="x", pady=(0, 8))
