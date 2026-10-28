@@ -904,6 +904,10 @@ class ProfileSearchTab(ttk.Frame):
         self._busy_widget_states = []
         self._busy_menu_states = []
         self._busy_indicator_active = False
+        self._detail_busy_frame = None
+        self._detail_busy_var = None
+        self._detail_busy_progress = None
+        self._detail_busy_indicator_active = False
         self._build_ui()
         # Поиск не запускается автоматически: пользователь сам вводит запрос
         # и нажимает «Найти», чтобы не блокировать выбор профиля на больших БД.
@@ -1134,6 +1138,7 @@ class ProfileSearchTab(ttk.Frame):
                 if message:
                     self.status_var.set(message)
                     self.busy_message_var.set(message)
+                    self._set_detail_busy_indicator(True, message)
                 return
             self._busy = True
             if message:
@@ -1203,6 +1208,37 @@ class ProfileSearchTab(ttk.Frame):
             self._busy_menu_states.clear()
             self._refresh_paging_buttons()
         self._refresh_detail_navigation()
+        self._set_detail_busy_indicator(busy, message or self.status_var.get())
+        try:
+            root = self.winfo_toplevel()
+            if hasattr(root, "set_operation_busy"):
+                root.set_operation_busy(busy)
+        except tk.TclError:
+            pass
+
+    def _set_detail_busy_indicator(self, busy: bool, message: str = ""):
+        frame = self._detail_busy_frame
+        progress = self._detail_busy_progress
+        if frame is None or progress is None:
+            return
+        try:
+            if not frame.winfo_exists():
+                return
+            if busy:
+                if self._detail_busy_var is not None:
+                    self._detail_busy_var.set(message or "Загрузка профиля…")
+                if not frame.winfo_manager():
+                    frame.pack(fill="x", padx=10, pady=(8, 0), before=self._details_body)
+                if not self._detail_busy_indicator_active:
+                    progress.start(12)
+                    self._detail_busy_indicator_active = True
+            else:
+                if self._detail_busy_indicator_active:
+                    progress.stop()
+                    self._detail_busy_indicator_active = False
+                frame.pack_forget()
+        except tk.TclError:
+            self._detail_busy_indicator_active = False
 
     def _refresh_paging_buttons(self):
         if self._busy:
@@ -1501,6 +1537,20 @@ class ProfileSearchTab(ttk.Frame):
                 navigation, text="Вперёд ▶", command=lambda: self._navigate_details(1)
             )
             self._detail_next_button.pack(side="right")
+
+            self._detail_busy_var = tk.StringVar(master=win, value="Загрузка профиля…")
+            self._detail_busy_frame = ttk.Frame(win, style="Busy.TFrame", padding=(12, 6))
+            ttk.Label(
+                self._detail_busy_frame, textvariable=self._detail_busy_var, style="Busy.TLabel"
+            ).pack(side="left", fill="x", expand=True)
+            self._detail_busy_progress = ttk.Progressbar(
+                self._detail_busy_frame, mode="indeterminate", length=220,
+                style="Busy.Horizontal.TProgressbar",
+            )
+            self._detail_busy_progress.pack(side="right", padx=(12, 0))
+            self._detail_busy_frame.pack(fill="x", padx=10, pady=(8, 0))
+            self._detail_busy_frame.pack_forget()
+
             self._details_body = ttk.Frame(win)
             self._details_body.pack(fill="both", expand=True)
             win.protocol("WM_DELETE_WINDOW", lambda w=win: self._close_details_window(w))
@@ -1516,6 +1566,7 @@ class ProfileSearchTab(ttk.Frame):
         self._detail_next_pid = next_pid
         self._detail_nav_label.configure(text=f"Профиль ID {pid} · навигация по результатам поиска")
         self._refresh_detail_navigation()
+        self._set_detail_busy_indicator(self._busy, self.status_var.get())
         outer = ttk.Frame(self._details_body, padding=10)
         outer.pack(fill="both", expand=True)
         win.lift()
@@ -1661,6 +1712,15 @@ class ProfileSearchTab(ttk.Frame):
             self._detail_prev_button = None
             self._detail_next_button = None
             self._detail_nav_label = None
+            if self._detail_busy_indicator_active and self._detail_busy_progress is not None:
+                try:
+                    self._detail_busy_progress.stop()
+                except tk.TclError:
+                    pass
+            self._detail_busy_frame = None
+            self._detail_busy_var = None
+            self._detail_busy_progress = None
+            self._detail_busy_indicator_active = False
         try:
             win.destroy()
         except tk.TclError:
@@ -2196,7 +2256,8 @@ class CleanupSuite(tk.Tk):
         self.theme_button.pack(side="right")
         self._update_theme_button()
 
-        notebook = ttk.Notebook(self)
+        self.notebook = ttk.Notebook(self)
+        notebook = self.notebook
         notebook.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.profile_tab = ProfileSearchTab(notebook)
         self.local_tab = LocalCleanupTab(notebook)
@@ -2267,6 +2328,16 @@ class CleanupSuite(tk.Tk):
             self._save_settings()
         finally:
             self.destroy()
+
+    def set_operation_busy(self, busy: bool):
+        """Блокирует переключение на другие вкладки и тему, пока поиск/загрузка профиля активны."""
+        try:
+            self.theme_button.configure(state="disabled" if busy else "normal")
+            # Текущая вкладка поиска остаётся активной, остальные нельзя запускать параллельно.
+            self.notebook.tab(self.local_tab, state="disabled" if busy else "normal")
+            self.notebook.tab(self.remote_tab, state="disabled" if busy else "normal")
+        except (tk.TclError, AttributeError):
+            pass
 
     def _configure_theme_styles(self):
         p = self.palette
