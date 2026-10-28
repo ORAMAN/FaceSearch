@@ -1,0 +1,27 @@
+name: Experimental group analysis tests
+
+on:
+  push:
+    branches:
+      - experiment/group-face-analysis
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "facesearch/group_analysis.py"
+      - "facesearch/config.py"
+      - "tests/test_group_analysis.py"
+      - ".github/workflows/group-analysis-tests.yml"
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run group analysis tests
+        run: python -m unittest discover -s tests -p "test_group_analysis.py" -v
