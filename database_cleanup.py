@@ -1452,6 +1452,14 @@ class ProfileSearchTab(ttk.Frame):
         caption.pack(fill="x", pady=(6, 0))
         win._full_preview_images = []
 
+        # preview_crop_base внутри метода должен вычисляться заново:
+        # локальная переменная из метода, открывшего галерею, сюда не передаётся.
+        try:
+            profile = self.profile_by_name.get(self.profile_var.get())
+            preview_crop_base = profile_crop_dir(profile) if profile else (PROJECT_DIR / "face_images").resolve()
+        except Exception:
+            preview_crop_base = (PROJECT_DIR / "face_images").resolve()
+
         def worker():
             try:
                 from PIL import Image, ImageTk
