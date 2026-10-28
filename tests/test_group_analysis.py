@@ -3,10 +3,41 @@ from __future__ import annotations
 import tempfile
 import unittest
 
-from facesearch.group_analysis import analyze_group, normalize_options
+from facesearch.group_analysis import analyze_group, normalize_options, _request_vk_friends
 
 
 class GroupAnalysisTests(unittest.TestCase):
+
+    def test_friend_lookup_uses_public_vk_loader_api_helper(self):
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+        class FakeRequests:
+            @staticmethod
+            def Session():
+                return FakeSession()
+
+        class FakeVkLoader:
+            requests = FakeRequests
+            FRIENDS_PAGE_SIZE = 5000
+            calls = []
+
+            @classmethod
+            def get_user_friend_ids(cls, user_id, session, limit):
+                cls.calls.append((user_id, limit))
+                return {7001, 7002, 7003}
+
+        user_id = 987654321
+        result, state = _request_vk_friends(user_id, FakeVkLoader)
+
+        self.assertEqual(state, "ok")
+        self.assertEqual(result, {7001, 7002, 7003})
+        self.assertEqual(FakeVkLoader.calls, [(user_id, 5000)])
+
     def test_options_are_clamped(self):
         options = normalize_options({
             "min_similarity": 150,
