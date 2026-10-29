@@ -2155,10 +2155,32 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     const drawOrder=faces.map(function(face,index){return {face:face,index:index};})
       .sort(function(a,b){return (a.index===selectedFace?1:0)-(b.index===selectedFace?1:0);});
     function markerStyle(face,match){
-      const gender=String((match&&match.gender)||face.gender||"unknown");
-      const confidence=Number(match&&match.genderConfidence!==undefined&&match.genderConfidence!==null
-        ?match.genderConfidence:(face.gender_confidence||0));
-      if(confidence<0.65||gender==="unknown")return {stroke:"#94a3b8",fill:"#475569",gender:"unknown"};
+      function normalizeGender(value){
+        const gender=String(value||"").trim().toLowerCase();
+        if(gender==="female"||gender==="f"||gender==="женский")return "female";
+        if(gender==="male"||gender==="m"||gender==="мужской")return "male";
+        return "unknown";
+      }
+      function readConfidence(value){
+        if(value===undefined||value===null||value==="")return null;
+        const number=Number(value);
+        return Number.isFinite(number)?number:null;
+      }
+
+      // Цвет относится к полу обнаруженного лица на исходном фото.
+      // Имя/совпадение из поиска не должно затирать его значением "unknown".
+      const detectedGender=normalizeGender(face&&face.gender);
+      const matchedGender=normalizeGender(match&&match.gender);
+      const gender=detectedGender!=="unknown"?detectedGender:matchedGender;
+      const detectedConfidence=readConfidence(face&&face.gender_confidence);
+      const matchedConfidence=readConfidence(
+        match&&(match.genderConfidence!==undefined?match.genderConfidence:match.gender_confidence)
+      );
+      const confidence=detectedGender!=="unknown"
+        ?(detectedConfidence!==null?detectedConfidence:matchedConfidence)
+        :(matchedConfidence!==null?matchedConfidence:detectedConfidence);
+      if(gender==="unknown"||(confidence!==null&&confidence<0.65))
+        return {stroke:"#94a3b8",fill:"#475569",gender:"unknown"};
       if(gender==="female")return {stroke:"#f472b6",fill:"#9d174d",gender:"female"};
       if(gender==="male")return {stroke:"#38bdf8",fill:"#075985",gender:"male"};
       return {stroke:"#94a3b8",fill:"#475569",gender:"unknown"};
