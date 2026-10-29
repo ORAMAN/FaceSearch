@@ -617,6 +617,8 @@ def _initialize_runtime() -> None:
         "common_friend_weight": gui_settings.get("group_common_friend_weight", 2.0),
         "city_weight": gui_settings.get("group_city_weight", 1.5),
         "check_vk_friends": gui_settings.get("group_check_vk_friends", True),
+        "check_gender": gui_settings.get("group_check_gender", True),
+        "gender_weight": gui_settings.get("group_gender_weight", 4.0),
     })
     CREATE_CROPS_ON_HTML = bool(gui_settings.get("create_crops_on_html", False))
     try:
@@ -1480,9 +1482,17 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
           <label for="group-city-weight">Вес совпадения города</label>
           <input id="group-city-weight" type="number" min="0" max="10" step="0.5" value="__GROUP_CITY_WEIGHT__">
         </div>
+        <div class="field">
+          <label for="group-gender-weight">Штраф за несовпадение пола</label>
+          <input id="group-gender-weight" type="number" min="0" max="10" step="0.5" value="__GROUP_GENDER_WEIGHT__">
+        </div>
         <div class="field toggle-field">
           <label class="toggle-label" for="group-check-vk-friends"><input id="group-check-vk-friends" type="checkbox" __GROUP_CHECK_VK_FRIENDS__> Проверять друзей VK</label>
           <span class="hint">Используются токены, настроенные в загрузчике VK.</span>
+        </div>
+        <div class="field toggle-field">
+          <label class="toggle-label" for="group-check-gender"><input id="group-check-gender" type="checkbox" __GROUP_CHECK_GENDER__> Учитывать оценку пола лица</label>
+          <span class="hint">Используется модель InsightFace только при уверенной оценке; несовпадение мягко снижает рейтинг кандидата.</span>
         </div>
       </div>
     </details>
@@ -2784,6 +2794,10 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 "__GROUP_CITY_WEIGHT__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["city_weight"])
             ).replace(
                 "__GROUP_CHECK_VK_FRIENDS__", "checked" if DEFAULT_GROUP_ANALYSIS_OPTIONS["check_vk_friends"] else ""
+            ).replace(
+                "__GROUP_CHECK_GENDER__", "checked" if DEFAULT_GROUP_ANALYSIS_OPTIONS["check_gender"] else ""
+            ).replace(
+                "__GROUP_GENDER_WEIGHT__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["gender_weight"])
             )
             self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             return
