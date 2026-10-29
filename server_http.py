@@ -3111,7 +3111,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                             if isinstance(raw_info, dict):
                                 profile_sources.append(raw_info)
                             for profile_source in profile_sources:
-                                for field_name in ("profile_gender", "gender", "sex", "Пол", "пол"):
+                                for field_name in ("sex", "gender", "Пол", "пол", "profile_gender"):
                                     value = profile_source.get(field_name)
                                     if value not in (None, "") and str(value).strip() not in ("", "0"):
                                         profile_sex = value
