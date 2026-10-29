@@ -73,6 +73,27 @@ DEFAULT_MIN_SIMILARITY = 43.0
 DEFAULT_USE_LOCAL_CROPS = True
 DEFAULT_THEME = "dark"
 DEFAULT_GROUP_ANALYSIS_OPTIONS = dict(group_analysis.DEFAULTS)
+
+
+def _saved_group_analysis_options() -> dict:
+    """Read shared group-analysis defaults from the same settings.xml as Tkinter."""
+    try:
+        saved = _load_gui_settings()
+    except Exception:
+        saved = {}
+    if not isinstance(saved, dict):
+        saved = {}
+    return group_analysis.normalize_options({
+        "min_similarity": saved.get("group_min_similarity", DEFAULT_GROUP_ANALYSIS_OPTIONS["min_similarity"]),
+        "candidates_per_face": saved.get("group_candidates_per_face", DEFAULT_GROUP_ANALYSIS_OPTIONS["candidates_per_face"]),
+        "friend_weight": saved.get("group_friend_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["friend_weight"]),
+        "common_friend_weight": saved.get("group_common_friend_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["common_friend_weight"]),
+        "city_weight": saved.get("group_city_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["city_weight"]),
+        "check_vk_friends": saved.get("group_check_vk_friends", DEFAULT_GROUP_ANALYSIS_OPTIONS["check_vk_friends"]),
+        "check_gender": saved.get("group_check_gender", DEFAULT_GROUP_ANALYSIS_OPTIONS["check_gender"]),
+        "gender_weight": saved.get("group_gender_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["gender_weight"]),
+        "profile_gender_weight": saved.get("group_profile_gender_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["profile_gender_weight"]),
+    })
 CREATE_CROPS_ON_HTML = False
 CROP_REPAIR_WORKERS = 4
 CROP_REPAIR_AUTO_WORKERS = False
@@ -2907,6 +2928,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/":
+            group_defaults = _saved_group_analysis_options()
             page = PAGE_TEMPLATE.replace(
                 "__DEFAULT_TOP_K__", str(DEFAULT_TOP_K)
             ).replace(
@@ -2918,23 +2940,23 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             ).replace(
                 "__DEFAULT_THEME__", DEFAULT_THEME
             ).replace(
-                "__GROUP_MIN_SIMILARITY__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["min_similarity"])
+                "__GROUP_MIN_SIMILARITY__", str(group_defaults["min_similarity"])
             ).replace(
-                "__GROUP_CANDIDATES_PER_FACE__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["candidates_per_face"])
+                "__GROUP_CANDIDATES_PER_FACE__", str(group_defaults["candidates_per_face"])
             ).replace(
-                "__GROUP_FRIEND_WEIGHT__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["friend_weight"])
+                "__GROUP_FRIEND_WEIGHT__", str(group_defaults["friend_weight"])
             ).replace(
-                "__GROUP_COMMON_FRIEND_WEIGHT__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["common_friend_weight"])
+                "__GROUP_COMMON_FRIEND_WEIGHT__", str(group_defaults["common_friend_weight"])
             ).replace(
-                "__GROUP_CITY_WEIGHT__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["city_weight"])
+                "__GROUP_CITY_WEIGHT__", str(group_defaults["city_weight"])
             ).replace(
-                "__GROUP_CHECK_VK_FRIENDS__", "checked" if DEFAULT_GROUP_ANALYSIS_OPTIONS["check_vk_friends"] else ""
+                "__GROUP_CHECK_VK_FRIENDS__", "checked" if group_defaults["check_vk_friends"] else ""
             ).replace(
-                "__GROUP_CHECK_GENDER__", "checked" if DEFAULT_GROUP_ANALYSIS_OPTIONS["check_gender"] else ""
+                "__GROUP_CHECK_GENDER__", "checked" if group_defaults["check_gender"] else ""
             ).replace(
-                "__GROUP_GENDER_WEIGHT__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["gender_weight"])
+                "__GROUP_GENDER_WEIGHT__", str(group_defaults["gender_weight"])
             ).replace(
-                "__GROUP_PROFILE_GENDER_WEIGHT__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["profile_gender_weight"])
+                "__GROUP_PROFILE_GENDER_WEIGHT__", str(group_defaults["profile_gender_weight"])
             )
             self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             return
@@ -3051,7 +3073,10 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         if len(embeddings) < 2:
             raise ValueError("Для группового анализа нужно обнаружить не менее двух лиц.")
 
-        options = group_analysis.normalize_options(data.get("options"))
+        raw_options = data.get("options")
+        if not isinstance(raw_options, dict) or not raw_options:
+            raw_options = _saved_group_analysis_options()
+        options = group_analysis.normalize_options(raw_options)
         with GROUP_ANALYSIS_JOBS_LOCK:
             for existing_id, job in GROUP_ANALYSIS_JOBS.items():
                 if (
