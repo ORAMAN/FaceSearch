@@ -374,7 +374,7 @@ def _normalize_gender_prediction(value: Any) -> dict[str, Any]:
         else:
             gender = "unknown"
     try:
-        confidence = max(0.0, min(1.0, float(value.get("confidence", value.get("gender_confidence", 0.0))))
+        confidence = max(0.0, min(1.0, float(value.get("confidence", value.get("gender_confidence", 0.0)))))
     except (TypeError, ValueError):
         confidence = 0.0
     if gender == "unknown" or not math.isfinite(confidence):
