@@ -1007,7 +1007,9 @@ def _classify_candidate_face_gender(candidate: dict) -> dict:
             if image is not None:
                 # CROP может содержать небольшой фон. Берём самый крупный
                 # уверенно обнаруженный face, а не угадываем по данным профиля.
-                found = FACE_APP.get(image)
+                found = face_search._detect_faces_with_padding(
+                    FACE_APP, image, padding_ratio=0.40
+                )
                 if found:
                     height, width = image.shape[:2]
                     def face_size(face):
