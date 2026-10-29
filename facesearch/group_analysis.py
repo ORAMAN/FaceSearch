@@ -435,9 +435,9 @@ def _rank_combinations(
             social_quality,
             int(state["connected_social_pairs"]),
             -int(state["disconnected_social_pairs"]),
-            -float(state["gender_penalty_sum"]),
             int(state["matched_faces"]),
-            float(state["visual_sum"]) + float(state["bonus_sum"]),
+            float(state["visual_sum"]) + float(state["bonus_sum"])
+            - float(state["gender_penalty_sum"]),
         )
 
     states: list[dict[str, Any]] = [{
