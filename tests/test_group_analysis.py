@@ -95,6 +95,95 @@ class GroupAnalysisTests(unittest.TestCase):
         self.assertEqual(status["status"], "ok")
         self.assertEqual(FakeVkLoader.calls, [(user_id, 5000)])
 
+    def test_group_analysis_keeps_anna_when_daryas_stored_elena_face_scores_higher_for_elena(self):
+        # Один и тот же face_id из фотографии в профиле Дарьи подходит Елене
+        # заметно лучше, чем Анне. Анна при этом сама присутствует в индексе.
+        candidates = [
+            [
+                {
+                    "face_id": 1001,
+                    "name": "Елена",
+                    "profile_url": "https://vk.com/elena",
+                    "similarity": 89.0,
+                },
+                {
+                    "face_id": 1002,
+                    "name": "Дарья",
+                    "profile_url": "https://vk.com/darya",
+                    "similarity": 88.0,
+                },
+            ],
+            [
+                {
+                    "face_id": 1002,
+                    "name": "Дарья",
+                    "profile_url": "https://vk.com/darya",
+                    "similarity": 55.0,
+                },
+                {
+                    "face_id": 2001,
+                    "name": "Анна",
+                    "profile_url": "https://vk.com/anna",
+                    "similarity": 83.0,
+                },
+            ],
+        ]
+        options = {
+            "min_similarity": 43.0,
+            "candidates_per_face": 5,
+            "check_vk_friends": False,
+        }
+        with tempfile.TemporaryDirectory() as app_dir:
+            result = analyze_group(candidates, options, app_dir)
+
+        self.assertTrue(result["ok"])
+        best = result["combinations"][0]
+        by_face = {item["face_index"]: item for item in best["profiles"]}
+        self.assertEqual(by_face[0]["name"], "Елена")
+        self.assertEqual(by_face[1]["name"], "Анна")
+        self.assertGreaterEqual(result["cross_face_filtered"], 1)
+
+    def test_group_analysis_leaves_anna_unmatched_when_only_daryas_elena_face_is_found(self):
+        # Если в базе нет Анны, не выдаём Дарью за совпадение для Анны:
+        # обнаруженное лицо из профиля Дарьи гораздо лучше совпадает с Еленой.
+        candidates = [
+            [
+                {
+                    "face_id": 1001,
+                    "name": "Елена",
+                    "profile_url": "https://vk.com/elena",
+                    "similarity": 91.0,
+                },
+                {
+                    "face_id": 1002,
+                    "name": "Дарья",
+                    "profile_url": "https://vk.com/darya",
+                    "similarity": 88.0,
+                },
+            ],
+            [
+                {
+                    "face_id": 1002,
+                    "name": "Дарья",
+                    "profile_url": "https://vk.com/darya",
+                    "similarity": 55.0,
+                },
+            ],
+        ]
+        options = {
+            "min_similarity": 43.0,
+            "candidates_per_face": 5,
+            "check_vk_friends": False,
+        }
+        with tempfile.TemporaryDirectory() as app_dir:
+            result = analyze_group(candidates, options, app_dir)
+
+        best = result["combinations"][0]
+        by_face = {item["face_index"]: item for item in best["profiles"]}
+        self.assertEqual(by_face[0]["name"], "Елена")
+        self.assertTrue(by_face[1]["unmatched"])
+        self.assertGreaterEqual(result["cross_face_filtered"], 1)
+
     def test_options_are_clamped(self):
         options = normalize_options({
             "min_similarity": 150,
