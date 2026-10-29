@@ -3104,6 +3104,20 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                             vk_id = int(vk_id) if vk_id is not None and int(vk_id) > 0 else None
                         except (TypeError, ValueError):
                             vk_id = None
+                        profile_sex = candidate.get("sex")
+                        if profile_sex in (None, "", 0, "0"):
+                            profile_sources = [raw_meta]
+                            raw_info = raw_meta.get("info")
+                            if isinstance(raw_info, dict):
+                                profile_sources.append(raw_info)
+                            for profile_source in profile_sources:
+                                for field_name in ("profile_gender", "gender", "sex", "Пол", "пол"):
+                                    value = profile_source.get(field_name)
+                                    if value not in (None, "") and str(value).strip() not in ("", "0"):
+                                        profile_sex = value
+                                        break
+                                if profile_sex not in (None, "", 0, "0"):
+                                    break
                         profile_url = str(
                             candidate.get("profile_url")
                             or raw_meta.get("url_source")
@@ -3133,7 +3147,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                             "path": str(candidate.get("path") or ""),
                             "similarity": score,
                             "vk_user_id": vk_id,
-                            "profile_sex": candidate.get("sex"),
+                            "profile_sex": profile_sex,
                         })
                     candidates_by_face.append(face_candidates)
                     update_job(
