@@ -13,6 +13,7 @@ from facesearch.group_analysis import (
     _gender_mismatch_penalty,
     _profile_gender_mismatch_penalty,
     _prepare_candidates,
+    _hungarian_maximize,
 )
 
 
@@ -24,12 +25,12 @@ class GroupAnalysisTests(unittest.TestCase):
         candidates = [[
             {
                 "face_id": 101, "profile_id": 501,
-                "profile_url": "", "source_url": "",
+                "profile_url": "https://example.test/profile/501", "source_url": "",
                 "name": "Тот же профиль, лицо 1", "similarity": 96.0,
             },
             {
                 "face_id": 102, "profile_id": 501,
-                "profile_url": "", "source_url": "",
+                "profile_url": "https://example.test/profile/501", "source_url": "",
                 "name": "Тот же профиль, лицо 2", "similarity": 95.0,
             },
             {
@@ -87,6 +88,74 @@ class GroupAnalysisTests(unittest.TestCase):
         selected = [item for item in prepared[0] if not item.get("unmatched")]
         self.assertEqual(len(selected), 1)
         self.assertEqual(selected[0]["vk_user_id"], 123456)
+
+    def test_hungarian_assignment_finds_global_optimum_instead_of_greedy_choice(self):
+        weights = [
+            [10.0, 9.0, 0.0, 0.0],
+            [9.0, 0.0, 0.0, 0.0],
+        ]
+        assignment = _hungarian_maximize(weights)
+        self.assertEqual(len(set(assignment)), 2)
+        self.assertEqual(sum(weights[row][column] for row, column in enumerate(assignment)), 18.0)
+
+    def test_global_assignment_uses_second_best_profile_to_avoid_unmatched_face(self):
+        candidates = [
+            [
+                {
+                    "face_id": 101, "profile_id": 501,
+                    "profile_url": "https://social.example.test/profile/501",
+                    "name": "Общий лучший кандидат", "similarity": 96.0,
+                },
+                {
+                    "face_id": 102, "profile_id": 502,
+                    "profile_url": "https://social.example.test/profile/502",
+                    "name": "Альтернативный кандидат", "similarity": 94.0,
+                },
+            ],
+            [
+                {
+                    "face_id": 201, "profile_id": 501,
+                    "profile_url": "https://social.example.test/profile/501",
+                    "name": "Общий лучший кандидат", "similarity": 95.0,
+                },
+            ],
+        ]
+        result = analyze_group(
+            candidates,
+            {"check_vk_friends": False, "check_gender": False, "candidates_per_face": 5},
+            ".",
+        )
+        best = result["combinations"][0]
+        by_face = {item["face_index"]: item for item in best["profiles"]}
+        self.assertEqual(best["matched_faces"], 2)
+        self.assertEqual(by_face[0]["name"], "Альтернативный кандидат")
+        self.assertEqual(by_face[1]["name"], "Общий лучший кандидат")
+        self.assertFalse(any(item["unmatched"] for item in best["profiles"]))
+
+    def test_all_local_only_candidates_produce_explanatory_unmatched_reason(self):
+        candidates = [
+            [{
+                "face_id": 10, "profile_id": 10, "profile_url": "",
+                "source_url": "https://images.example.test/one.jpg",
+                "name": "Только локальное лицо", "similarity": 98.0,
+            }],
+            [{
+                "face_id": 20, "profile_id": 20,
+                "profile_url": "https://social.example.test/profile/20",
+                "name": "Интернет-профиль", "similarity": 90.0,
+            }],
+        ]
+        result = analyze_group(
+            candidates,
+            {"check_vk_friends": False, "check_gender": False},
+            ".",
+        )
+        unmatched = next(
+            profile for profile in result["combinations"][0]["profiles"]
+            if profile["face_index"] == 0
+        )
+        self.assertTrue(unmatched["unmatched"])
+        self.assertIn("без интернет-профиля", unmatched["unmatched_reason"])
 
     def test_friend_lookup_uses_public_vk_loader_api_helper(self):
         class FakeSession:
