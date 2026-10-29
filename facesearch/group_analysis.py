@@ -26,6 +26,9 @@ DEFAULTS = {
     "check_vk_friends": True,
 }
 MAX_CANDIDATES_PER_FACE = 10
+# Не назначаем одно и то же сохранённое лицо другому человеку на исходном фото,
+# если оно заметно лучше совпадает с другим входным лицом.
+CROSS_FACE_SPECIFICITY_MARGIN = 8.0
 MAX_UNIQUE_FRIEND_LOOKUPS = 80
 FRIEND_CACHE_TTL_SECONDS = 15 * 60
 FRIEND_REQUEST_INTERVAL_SECONDS = 0.30
@@ -257,41 +260,96 @@ def _stable_profile_key(candidate: dict[str, Any]) -> str:
 def _prepare_candidates(
     candidates_by_face: list[list[dict[str, Any]]],
     options: dict[str, Any],
-) -> list[list[dict[str, Any]]]:
-    result: list[list[dict[str, Any]]] = []
+) -> tuple[list[list[dict[str, Any]]], int]:
+    """Готовит кандидатов и отсекает лицо, более уверенно совпавшее с другим лицом группы.
+
+    Важно: сравниваем face_id найденного в БД лица между поисками всех лиц
+    исходной фотографии. Один и тот же снимок Елены, загруженный в профиль Дарьи,
+    не должен автоматически становиться кандидатом на место Анны только потому,
+    что у Анны нет сильного совпадения.
+    """
     limit = int(options["candidates_per_face"])
     minimum = float(options["min_similarity"])
+    raw_by_face: list[list[dict[str, Any]]] = []
+    # face_id -> {индекс лица на исходной фотографии: наилучшее сходство}
+    scores_by_stored_face: dict[int, dict[int, float]] = {}
+
+    # Сначала собираем полные списки, чтобы сравнивать каждый найденный face_id
+    # между лицами группы до ограничения числа кандидатов на лицо.
     for face_index, original in enumerate(candidates_by_face):
-        seen: set[str] = set()
         current: list[dict[str, Any]] = []
-        ordered = sorted(
-            (item for item in original if isinstance(item, dict)),
-            key=lambda item: float(item.get("similarity") or 0.0),
-            reverse=True,
-        )
-        for item in ordered:
+        for item in original:
+            if not isinstance(item, dict):
+                continue
             try:
                 score = float(item.get("similarity") or 0.0)
             except (TypeError, ValueError):
                 continue
-            if score < minimum:
+            if not math.isfinite(score) or score < minimum:
                 continue
+
             candidate = dict(item)
             candidate["similarity"] = round(max(0.0, min(100.0, score)), 2)
             candidate["city"] = str(candidate.get("city") or "").strip()
             candidate["profile_key"] = _stable_profile_key(candidate)
-            if candidate["profile_key"] in seen:
-                continue
-            seen.add(candidate["profile_key"])
             candidate["face_index"] = face_index
-            candidate["candidate_rank"] = len(current) + 1
             candidate["vk_user_id"] = vk_user_id(candidate)
+            try:
+                stored_face_id = int(candidate.get("face_id") or 0)
+            except (TypeError, ValueError):
+                stored_face_id = 0
+
+            if stored_face_id > 0:
+                per_query = scores_by_stored_face.setdefault(stored_face_id, {})
+                per_query[face_index] = max(
+                    per_query.get(face_index, float("-inf")),
+                    float(candidate["similarity"]),
+                )
+            current.append(candidate)
+        raw_by_face.append(current)
+
+    rejected: set[tuple[int, int]] = set()
+    result: list[list[dict[str, Any]]] = []
+    for face_index, original in enumerate(raw_by_face):
+        filtered: list[dict[str, Any]] = []
+        for candidate in original:
+            try:
+                stored_face_id = int(candidate.get("face_id") or 0)
+            except (TypeError, ValueError):
+                stored_face_id = 0
+
+            if stored_face_id > 0:
+                own_score = float(candidate["similarity"])
+                other_scores = [
+                    score
+                    for other_index, score in scores_by_stored_face.get(stored_face_id, {}).items()
+                    if other_index != face_index
+                ]
+                best_other_score = max(other_scores, default=float("-inf"))
+                if best_other_score >= own_score + CROSS_FACE_SPECIFICITY_MARGIN:
+                    rejected.add((face_index, stored_face_id))
+                    continue
+            filtered.append(candidate)
+
+        ordered = sorted(
+            filtered,
+            key=lambda item: float(item.get("similarity") or 0.0),
+            reverse=True,
+        )
+        seen: set[str] = set()
+        current: list[dict[str, Any]] = []
+        for candidate in ordered:
+            key = candidate["profile_key"]
+            if key in seen:
+                continue
+            seen.add(key)
+            candidate["candidate_rank"] = len(current) + 1
             current.append(candidate)
             if len(current) >= limit:
                 break
-        # Вариант «не сопоставлено» доступен всегда: если один профиль
-        # подходит сразу нескольким лицам, алгоритм может оставить одно лицо
-        # без кандидата вместо того, чтобы назначить один профиль дважды.
+
+        # Если подтверждённого профиля нет, оставляем это лицо без сопоставления,
+        # а не подменяем его чужим профилем с более слабым сходством.
         current.append({
             "profile_key": "unmatched:" + str(face_index),
             "face_index": face_index,
@@ -305,8 +363,7 @@ def _prepare_candidates(
             "unmatched": True,
         })
         result.append(current)
-    return result
-
+    return result, len(rejected)
 
 def _pair_relation(a: dict[str, Any], b: dict[str, Any], friend_ids: dict[int, set[int]]) -> dict[str, Any]:
     a_id = a.get("vk_user_id")
@@ -472,7 +529,7 @@ def analyze_group(
         raise ValueError("Для группового анализа нужно обнаружить не менее двух лиц.")
 
     progress(5, "Подготовка кандидатов для каждого лица…")
-    prepared = _prepare_candidates(candidates_by_face, options)
+    prepared, cross_face_filtered = _prepare_candidates(candidates_by_face, options)
     totals = [sum(1 for item in items if not item.get("unmatched")) for items in prepared]
     progress(25, "Кандидаты подготовлены: " + ", ".join(str(n) for n in totals) + " на лицо.")
 
@@ -510,13 +567,21 @@ def analyze_group(
         "options": options,
         "face_count": len(candidates_by_face),
         "candidate_counts": totals,
+        "cross_face_filtered": cross_face_filtered,
         "friend_status": friend_status,
         "combinations": combinations,
         "best_graph": graph,
         "candidates": all_candidates,
         "notice": (
-            "Итоговый рейтинг — эвристическая оценка согласованности вариантов, "
+            (
+                "Отфильтровано слабых назначений: одно и то же сохранённое лицо "
+                "значительно лучше совпадает с другим лицом исходной фотографии ("
+                + str(cross_face_filtered) + "). "
+                if cross_face_filtered else ""
+            )
+            + "Итоговый рейтинг — эвристическая оценка согласованности вариантов, "
             "а не вероятность правильного определения личности. Отсутствие данных о связях "
-            "не трактуется как доказательство отсутствия связи."
+            "не трактуется как доказательство отсутствия связи. Если для лица нет сильного "
+            "совпадения в индексе, оно остаётся без сопоставления вместо подстановки чужого профиля."
         ),
     }
