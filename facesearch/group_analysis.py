@@ -901,15 +901,10 @@ def _rank_combinations(
             candidate_gender = _normalize_gender_prediction(item)
             selected_key = str(item.get("profile_key") or "")
             if unmatched:
-                original_candidates = [
-                    candidate for candidate in candidates_by_face[face_index]
-                    if isinstance(candidate, dict) and not candidate.get("unmatched")
-                ]
-                if original_candidates and not face_candidates:
-                    unmatched_reason = (
-                        "Найдены локальные лица без интернет-профиля; они исключены "
-                        "из оценки связей. Для назначения нужен URL страницы профиля."
-                    )
+                prepared_reason = str(item.get("unmatched_reason") or "").strip()
+                if not face_candidates and "локальн" in prepared_reason.casefold():
+                    # Сохраняем точную причину, заданную при фильтрации локальных записей.
+                    unmatched_reason = prepared_reason
                 elif face_candidates and {
                     str(candidate.get("profile_key") or _stable_profile_key(candidate))
                     for candidate in face_candidates
@@ -920,7 +915,8 @@ def _rank_combinations(
                     )
                 elif not face_candidates:
                     unmatched_reason = (
-                        "В активном индексе нет интернет-профиля выше заданного порога сходства."
+                        prepared_reason
+                        or "В активном индексе нет интернет-профиля выше заданного порога сходства."
                     )
                 else:
                     unmatched_reason = (
