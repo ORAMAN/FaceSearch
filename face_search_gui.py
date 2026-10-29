@@ -8520,6 +8520,7 @@ class FaceSearchGUI:
                 self.status_var.set(
                     "Лица не найдены."
                 )
+                self._update_group_analysis_state()
 
         except Exception as e:
             messagebox.showerror(
@@ -8529,6 +8530,7 @@ class FaceSearchGUI:
             self.status_var.set(
                 "Ошибка определения лиц."
             )
+            self._update_group_analysis_state()
 
     # --------------------------------------------------------
     # Preview
