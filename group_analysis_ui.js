@@ -193,20 +193,21 @@
 
       const meta = document.createElement("div");
       meta.className = "group-profile-meta";
+      const genderLabels = { female: "женский", male: "мужской", unknown: "не определён" };
+      const queryGender = String((profile.query_gender || {}).gender || "unknown");
+      const queryConfidence = Number((profile.query_gender || {}).confidence || 0);
+      const queryGenderText = queryGender === "unknown"
+        ? "исходное лицо: пол не определён"
+        : "исходное лицо: " + (genderLabels[queryGender] || "не определён") + " (" + Math.round(queryConfidence * 100) + "%)";
       if (profile.unmatched) {
-        meta.textContent = String(profile.unmatched_reason || "Нет надёжного совпадения");
+        meta.textContent = String(profile.unmatched_reason || "Нет надёжного совпадения") +
+          (queryGender !== "unknown" ? " · " + queryGenderText : "");
       } else {
-        const genderLabels = { female: "женский", male: "мужской", unknown: "не определён" };
         const candidateGender = String(profile.gender || "unknown");
-        const queryGender = String((profile.query_gender || {}).gender || "unknown");
         const candidateConfidence = Number(profile.gender_confidence || 0);
-        const queryConfidence = Number((profile.query_gender || {}).confidence || 0);
         const candidateGenderText = candidateGender === "unknown"
           ? "модель не определила пол кандидата"
           : "модель: " + (genderLabels[candidateGender] || "не определён") + " (" + Math.round(candidateConfidence * 100) + "%)";
-        const queryGenderText = queryGender === "unknown"
-          ? "исходное лицо не определено"
-          : "исходное лицо: " + (genderLabels[queryGender] || "не определён") + " (" + Math.round(queryConfidence * 100) + "%)";
         const penalty = Number(profile.gender_penalty || 0);
         meta.textContent =
           "Сходство лица: " + Number(profile.similarity || 0).toFixed(2) + "%" +
