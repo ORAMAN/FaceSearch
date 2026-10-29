@@ -864,13 +864,9 @@ def _rank_combinations(
         if len(solutions) >= max(10, min(10, int(limit))):
             break
 
-    solutions.sort(
-        key=lambda item: (
-            item[1]["objective"],
-            tuple(str(profile.get("profile_key") or "") for profile in item[0]),
-        ),
-        reverse=True,
-    )
+    # Стабильное ранжирование при равной оценке: сохраняем исходный порядок,
+    # чтобы полностью эквивалентные варианты не переставлялись произвольно по URL/ID.
+    solutions.sort(key=lambda item: item[1]["objective"], reverse=True)
 
     combinations: list[dict[str, Any]] = []
     pair_count = max(1, face_count * (face_count - 1) / 2)
