@@ -642,9 +642,21 @@ def _rank_combinations(
     profile_column = {key: idx for idx, key in enumerate(global_profile_keys)}
     face_count = len(candidates_by_face)
     unmatched_column_offset = len(global_profile_keys)
-    invalid_weight = -1.0e12
-    match_bonus = 1_000_000.0
-    penalty_multiplier = 1000.0
+    invalid_weight = -1.0e15
+    # Encode the three unary priorities without depending on arbitrary small
+    # weights: (1) matched-face count, (2) gender penalty to 0.001, (3) visual
+    # similarity to 0.01. Scales depend on group size so one priority cannot
+    # be outweighed by the sum of all lower-priority scores.
+    max_penalty_units = int(round((
+        float(options.get("gender_weight", 0.0))
+        + float(options.get("profile_gender_weight", 0.0))
+    ) * 1000.0))
+    visual_span_units = 10000 * face_count
+    gender_scale = visual_span_units + 1
+    match_bonus = (
+        (max_penalty_units * face_count + 1) * gender_scale
+        + visual_span_units + 1
+    )
 
     normalized_genders = [
         _normalize_gender_prediction(value)
@@ -691,8 +703,10 @@ def _rank_combinations(
                     continue
                 penalty = candidate_penalties(face_index, candidate)[0]
                 similarity = float(candidate.get("similarity") or 0.0)
+                penalty_units = int(round(penalty * 1000.0))
+                similarity_units = int(round(max(0.0, min(100.0, similarity)) * 100.0))
                 weights[face_index][profile_column[key]] = (
-                    match_bonus - penalty_multiplier * penalty + similarity
+                    match_bonus - penalty_units * gender_scale + similarity_units
                 )
             weights[face_index][unmatched_column_offset + face_index] = 0.0
 
