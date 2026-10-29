@@ -1308,6 +1308,12 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .group-gender-swatch.unknown{background:#e5e7eb;border-color:#9ca3af}
 .group-gender-swatch.mismatch{background:#dbeafe;border:3px solid #dc2626}
 .group-gender-swatch.unmatched{background:#e5e7eb;border:2px dashed #6b7280}
+.group-relation-swatch{display:inline-block;width:22px;height:0;border-top:3px solid;flex:0 0 auto}
+.group-relation-swatch.education{border-color:#7c3aed;border-top-style:dashed}
+.group-relation-swatch.workplace{border-color:#0891b2;border-top-style:dashed}
+.group-relations-list{display:grid;gap:6px;padding:10px 14px 12px;border-top:1px solid var(--line)}
+.group-relation-item{font-size:12px;line-height:1.45;overflow-wrap:anywhere;padding:8px 10px;border-left:3px solid var(--accent);border-radius:5px;background:var(--panel);color:var(--text)}
+.group-relation-empty{font-size:12px;line-height:1.45;color:var(--muted);padding:8px 0}
 .group-combinations{display:grid;gap:8px;margin-top:14px}
 .group-combination{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;text-align:left;width:100%;min-height:auto;background:var(--secondary);color:var(--button-text);border:1px solid var(--button-line);padding:11px 13px}
 .group-combination[aria-pressed=true]{border-color:var(--accent);box-shadow:inset 3px 0 var(--accent)}
@@ -1506,7 +1512,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   </section>
 
   <section class="group-options" aria-label="Параметры группового анализа">
-    <details>
+    <details open>
       <summary>Параметры анализа связей группы — только для текущего сеанса</summary>
       <div class="group-options-note">Эти изменения не записываются в settings.xml. Постоянные значения задаются в окне FaceSearch → «Параметры группового анализа». Токены добавляются только через загрузчик VK; на этой странице их вводить не нужно.</div>
       <div class="group-options-grid">
@@ -1610,7 +1616,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     <div class="group-panel-header">
       <div>
         <h2>Анализ связей группы</h2>
-        <div class="hint">Поиск согласованного набора профилей с учётом сходства лиц, дружбы и города.</div>
+        <div class="hint">Поиск согласованного набора профилей с учётом сходства лиц, дружбы, города, общих учебных заведений и мест работы.</div>
       </div>
       <button type="button" id="group-analysis-hide" class="secondary">Скрыть</button>
     </div>
@@ -1620,14 +1626,17 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     <div id="group-progress-message" class="group-progress-message">Ожидание запуска анализа.</div>
     <div id="group-analysis-summary"></div>
     <div id="group-graph-wrap" class="group-graph-wrap" hidden>
-      <div class="group-gender-legend" aria-label="Обозначения пола на графе">
+      <div class="group-gender-legend" aria-label="Обозначения связей и пола на графе">
         <span class="group-gender-legend-item"><span class="group-gender-swatch female" aria-hidden="true"></span>Женский класс исходного лица</span>
         <span class="group-gender-legend-item"><span class="group-gender-swatch male" aria-hidden="true"></span>Мужской класс исходного лица</span>
         <span class="group-gender-legend-item"><span class="group-gender-swatch unknown" aria-hidden="true"></span>Пол не определён</span>
         <span class="group-gender-legend-item"><span class="group-gender-swatch mismatch" aria-hidden="true"></span>Пол кандидата не совпадает</span>
         <span class="group-gender-legend-item"><span class="group-gender-swatch unmatched" aria-hidden="true"></span>Пунктир — профиль не назначен</span>
+        <span class="group-gender-legend-item"><span class="group-relation-swatch education" aria-hidden="true"></span>Общее учебное заведение</span>
+        <span class="group-gender-legend-item"><span class="group-relation-swatch workplace" aria-hidden="true"></span>Общая организация / место работы</span>
       </div>
-      <svg id="group-graph" class="group-graph" viewBox="0 0 600 360" role="img" aria-label="Граф связей выбранной комбинации; цвет узла отражает оценку пола исходного лица"></svg>
+      <svg id="group-graph" class="group-graph" viewBox="0 0 600 360" role="img" aria-label="Граф связей выбранной комбинации; линии показывают общие связи, цвет узла — оценку пола исходного лица"></svg>
+      <div id="group-relations-list" class="group-relations-list" aria-live="polite"></div>
     </div>
     <div id="group-profile-list" class="group-profile-list"></div>
     <div id="group-combinations" class="group-combinations"></div>

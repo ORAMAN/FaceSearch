@@ -12,6 +12,7 @@ from facesearch.group_analysis import (
     _request_vk_friends,
     _gender_mismatch_penalty,
     _profile_gender_mismatch_penalty,
+    _pair_bonus,
     _prepare_candidates,
     _hungarian_maximize,
     _pair_relation,
@@ -91,6 +92,47 @@ class GroupAnalysisTests(unittest.TestCase):
         self.assertTrue(relation["same_workplace"])
         self.assertEqual(relation["education_matches"], ["Школа № 12"])
         self.assertEqual(relation["workplace_matches"], ["ООО Ромашка"])
+
+    def test_group_result_exposes_shared_education_and_workplace(self):
+        result = analyze_group(
+            [
+                [{
+                    "face_id": 101, "profile_id": 501,
+                    "profile_url": "https://vk.com/id100", "name": "Иван Первый",
+                    "similarity": 94.0,
+                    "info": {"Школа": "Школа № 12", "Место работы": "ООО Ромашка"},
+                }],
+                [{
+                    "face_id": 202, "profile_id": 601,
+                    "profile_url": "https://ok.ru/profile/200", "name": "Пётр Второй",
+                    "similarity": 92.0,
+                    "metadata": {"school": "Школа 12", "organization": "ООО Ромашка"},
+                }],
+            ],
+            {
+                "min_similarity": 0, "candidates_per_face": 5,
+                "check_vk_friends": False, "check_gender": False,
+                "education_weight": 3.5, "workplace_weight": 4.5,
+            },
+            ".",
+        )
+        combination = result["combinations"][0]
+        profiles = sorted(combination["profiles"], key=lambda item: item["face_index"])
+
+        self.assertEqual(profiles[0]["education"], ["Школа № 12"])
+        self.assertEqual(profiles[0]["workplaces"], ["ООО Ромашка"])
+        self.assertEqual(profiles[1]["education"], ["Школа 12"])
+        self.assertEqual(profiles[1]["workplaces"], ["ООО Ромашка"])
+        self.assertEqual(len(combination["relations"]), 1)
+        relation = combination["relations"][0]
+        self.assertTrue(relation["same_education"])
+        self.assertTrue(relation["same_workplace"])
+        self.assertEqual(relation["education_matches"], ["Школа № 12"])
+        self.assertEqual(relation["workplace_matches"], ["ООО Ромашка"])
+        self.assertEqual(_pair_bonus(relation, {
+            "friend_weight": 8, "common_friend_weight": 2, "city_weight": 1.5,
+            "education_weight": 3.5, "workplace_weight": 4.5,
+        }), 8.0)
 
     def test_candidate_limit_counts_unique_database_profiles_not_face_rows(self):
         # Несколько фотографий/face.id принадлежат одному профилю profiles.id.

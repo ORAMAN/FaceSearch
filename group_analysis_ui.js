@@ -12,6 +12,7 @@
   const summary = document.getElementById("group-analysis-summary");
   const graphWrap = document.getElementById("group-graph-wrap");
   const graph = document.getElementById("group-graph");
+  const relationsList = document.getElementById("group-relations-list");
   const profileList = document.getElementById("group-profile-list");
   const combinationsBox = document.getElementById("group-combinations");
   const notice = document.getElementById("group-analysis-notice");
@@ -51,6 +52,7 @@
     panel.hidden = true;
     summary.replaceChildren();
     graph.replaceChildren();
+    if (relationsList) relationsList.replaceChildren();
     graphWrap.hidden = true;
     profileList.replaceChildren();
     combinationsBox.replaceChildren();
@@ -106,6 +108,7 @@
     const profiles = Array.isArray(combination && combination.profiles) ? combination.profiles : [];
     const relations = Array.isArray(combination && combination.relations) ? combination.relations : [];
     graph.replaceChildren();
+    if (relationsList) relationsList.replaceChildren();
     graphWrap.hidden = !profiles.length;
     if (!profiles.length) return;
 
@@ -135,24 +138,65 @@
       const sameCity = Boolean(edge.same_city) || types.includes("same_city");
       const sameEducation = Boolean(edge.same_education) || types.includes("education");
       const sameWorkplace = Boolean(edge.same_workplace) || types.includes("workplace");
-      const color = friend ? "#16a34a" : (common ? "#8b5cf6" : (sameWorkplace ? "#0891b2" : (sameEducation ? "#7c3aed" : "#d97706")));
-      const dash = friend ? "" : (common ? "6 5" : (sameWorkplace ? "4 3" : (sameEducation ? "8 4" : "2 5")));
-      const line = svgNode("line", {
-        x1: a.x, y1: a.y, x2: b.x, y2: b.y,
-        stroke: color, "stroke-width": friend ? 3 : 2,
-        "stroke-dasharray": dash, opacity: 0.9
-      });
-      const details = [];
-      if (friend) details.push("Есть связь в друзьях VK");
-      if (common) details.push("Общие друзья: " + Number(edge.common_friends || 0));
-      if (sameCity) details.push("Совпадает город");
       const educationMatches = Array.isArray(edge.education_matches) ? edge.education_matches : [];
       const workplaceMatches = Array.isArray(edge.workplace_matches) ? edge.workplace_matches : [];
-      if (sameEducation) details.push("Общее учебное заведение: " + (educationMatches.join(", ") || "совпадение в данных профиля"));
-      if (sameWorkplace) details.push("Общее место работы: " + (workplaceMatches.join(", ") || "совпадение в данных профиля"));
-      line.appendChild(svgNode("title", {}, details.join(" · ")));
-      graph.appendChild(line);
+      const details = [];
+      const styles = [];
+      if (friend) {
+        details.push("Есть связь в друзьях VK");
+        styles.push({ color: "#16a34a", dash: "", width: 3 });
+      }
+      if (common) {
+        details.push("Общие друзья: " + Number(edge.common_friends || 0));
+        styles.push({ color: "#8b5cf6", dash: "6 5", width: 2 });
+      }
+      if (sameCity) {
+        details.push("Совпадает город");
+        styles.push({ color: "#d97706", dash: "2 5", width: 2 });
+      }
+      if (sameEducation) {
+        details.push("Общее учебное заведение: " + (educationMatches.join(", ") || "совпадение в данных профиля"));
+        styles.push({ color: "#7c3aed", dash: "8 4", width: 2 });
+      }
+      if (sameWorkplace) {
+        details.push("Общее место работы: " + (workplaceMatches.join(", ") || "совпадение в данных профиля"));
+        styles.push({ color: "#0891b2", dash: "4 3", width: 2 });
+      }
+      if (!styles.length) return;
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const length = Math.hypot(dx, dy) || 1;
+      styles.forEach(function (style, styleIndex) {
+        const offset = (styleIndex - (styles.length - 1) / 2) * 4;
+        const ox = (-dy / length) * offset;
+        const oy = (dx / length) * offset;
+        const line = svgNode("line", {
+          x1: a.x + ox, y1: a.y + oy, x2: b.x + ox, y2: b.y + oy,
+          stroke: style.color, "stroke-width": style.width,
+          "stroke-dasharray": style.dash, opacity: 0.95
+        });
+        line.appendChild(svgNode("title", {}, details.join(" · ")));
+        graph.appendChild(line);
+      });
+      if (relationsList) {
+        const row = document.createElement("div");
+        row.className = "group-relation-item";
+        const fromFace = Number(a.profile.face_index || 0) + 1;
+        const toFace = Number(b.profile.face_index || 0) + 1;
+        const fromName = String(a.profile.name || "").trim();
+        const toName = String(b.profile.name || "").trim();
+        const fromLabel = "Лицо " + fromFace + (fromName ? " (" + fromName + ")" : "");
+        const toLabel = "Лицо " + toFace + (toName ? " (" + toName + ")" : "");
+        row.textContent = fromLabel + " ↔ " + toLabel + ": " + details.join(" · ");
+        relationsList.appendChild(row);
+      }
     });
+    if (relationsList && !relationsList.childElementCount) {
+      const empty = document.createElement("div");
+      empty.className = "group-relation-empty";
+      empty.textContent = "Не найдено подтверждённых общих связей по доступным данным. Это не доказывает отсутствие связи.";
+      relationsList.appendChild(empty);
+    }
 
     positions.forEach(function (position, index) {
       const profile = position.profile;
@@ -461,6 +505,7 @@
     panel.hidden = false;
     summary.replaceChildren();
     graph.replaceChildren();
+    if (relationsList) relationsList.replaceChildren();
     graphWrap.hidden = true;
     profileList.replaceChildren();
     combinationsBox.replaceChildren();

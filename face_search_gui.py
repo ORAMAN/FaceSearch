@@ -9299,6 +9299,18 @@ class FaceSearchGUI:
 
             graph = tk.Canvas(tab, height=300, background="#202020", highlightthickness=0)
             graph.pack(fill="x", expand=False, pady=(0, 8))
+            relation_legend = ttk.Frame(tab)
+            relation_legend.pack(fill="x", pady=(0, 8))
+            for legend_text, legend_color in (
+                ("━━ Дружба VK", "#16a34a"),
+                ("┄┄ Общие друзья", "#22c55e"),
+                ("┄┄ Город", "#f59e0b"),
+                ("┄┄ Учебное заведение", "#a855f7"),
+                ("┄┄ Организация / место работы", "#0891b2"),
+            ):
+                ttk.Label(
+                    relation_legend, text=legend_text, foreground=legend_color,
+                ).pack(side="left", padx=(0, 10))
             graph.bind(
                 "<Configure>",
                 lambda _event, canvas=graph, combo=combination, indices=list(face_indices):
@@ -9311,7 +9323,7 @@ class FaceSearchGUI:
             table_frame.pack(fill="both", expand=True)
             columns = (
                 "face", "name", "similarity", "query_gender",
-                "candidate_gender", "profile_gender", "confidence", "city", "reason",
+                "candidate_gender", "profile_gender", "confidence", "city", "relations", "reason",
             )
             headings = {
                 "face": "Исходное лицо",
@@ -9322,12 +9334,13 @@ class FaceSearchGUI:
                 "profile_gender": "Пол профиля",
                 "confidence": "Уверенность",
                 "city": "Город",
+                "relations": "Учёба / работа / связи",
                 "reason": "Пояснение",
             }
             widths = {
-                "face": 95, "name": 190, "similarity": 80, "query_gender": 95,
-                "candidate_gender": 100, "profile_gender": 100, "confidence": 105,
-                "city": 100, "reason": 300,
+                "face": 85, "name": 165, "similarity": 70, "query_gender": 85,
+                "candidate_gender": 90, "profile_gender": 90, "confidence": 90,
+                "city": 85, "relations": 270, "reason": 250,
             }
             tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=8)
             for column in columns:
@@ -9345,6 +9358,10 @@ class FaceSearchGUI:
             table_frame.rowconfigure(0, weight=1)
             table_frame.columnconfigure(0, weight=1)
             url_by_row = {}
+            profiles_by_key = {
+                str(item.get("profile_key") or ""): item
+                for item in (combination.get("profiles") or [])
+            }
             for profile in combination.get("profiles") or []:
                 compact_index = int(profile.get("face_index") or 0)
                 actual_face = (
@@ -9356,6 +9373,39 @@ class FaceSearchGUI:
                     str(profile.get("assignment_confidence") or "none"), "не рассчитана"
                 )
                 reason = str(profile.get("confidence_reason") or profile.get("unmatched_reason") or "")
+                relationship_notes = []
+                own_education = [str(value).strip() for value in (profile.get("education") or []) if str(value).strip()]
+                own_workplaces = [str(value).strip() for value in (profile.get("workplaces") or []) if str(value).strip()]
+                if own_education:
+                    relationship_notes.append("Обучение в профиле: " + ", ".join(dict.fromkeys(own_education)))
+                if own_workplaces:
+                    relationship_notes.append("Работа в профиле: " + ", ".join(dict.fromkeys(own_workplaces)))
+                profile_key = str(profile.get("profile_key") or "")
+                for relation in (combination.get("relations") or []):
+                    from_key = str(relation.get("from") or "")
+                    to_key = str(relation.get("to") or "")
+                    if profile_key not in (from_key, to_key):
+                        continue
+                    other_key = to_key if from_key == profile_key else from_key
+                    other = profiles_by_key.get(other_key) or {}
+                    other_compact = int(other.get("face_index") or 0)
+                    other_face = (
+                        face_indices[other_compact] + 1
+                        if 0 <= other_compact < len(face_indices) else other_compact + 1
+                    )
+                    if relation.get("same_education"):
+                        values = [str(value).strip() for value in (relation.get("education_matches") or []) if str(value).strip()]
+                        relationship_notes.append(
+                            "Общее учебное заведение с Лицом " + str(other_face) + ": "
+                            + (", ".join(dict.fromkeys(values)) or "совпадение в данных профиля")
+                        )
+                    if relation.get("same_workplace"):
+                        values = [str(value).strip() for value in (relation.get("workplace_matches") or []) if str(value).strip()]
+                        relationship_notes.append(
+                            "Общая организация с Лицом " + str(other_face) + ": "
+                            + (", ".join(dict.fromkeys(values)) or "совпадение в данных профиля")
+                        )
+                relationships = " · ".join(dict.fromkeys(relationship_notes)) or "—"
                 similarity = (
                     "—" if profile.get("unmatched")
                     else str(round(float(profile.get("similarity") or 0.0), 2)) + "%"
@@ -9369,6 +9419,7 @@ class FaceSearchGUI:
                     gender_labels.get(str(profile.get("profile_gender") or "unknown"), "не определён"),
                     confidence,
                     str(profile.get("city") or ""),
+                    relationships,
                     reason,
                 ))
                 url_by_row[row_id] = str(profile.get("profile_url") or "")
@@ -9422,18 +9473,31 @@ class FaceSearchGUI:
                 end = positions.get(str(relation.get("to") or ""))
                 if not start or not end:
                     continue
+                styles = []
                 if relation.get("friend"):
-                    color, dash, line_width = "#16a34a", (), 2
-                elif int(relation.get("common_friends") or 0) > 0:
-                    color, dash, line_width = "#22c55e", (5, 3), 2
-                elif relation.get("same_city"):
-                    color, dash, line_width = "#f59e0b", (2, 3), 1
-                else:
+                    styles.append(("#16a34a", (), 2))
+                if int(relation.get("common_friends") or 0) > 0:
+                    styles.append(("#22c55e", (5, 3), 2))
+                if relation.get("same_city"):
+                    styles.append(("#f59e0b", (2, 3), 1))
+                if relation.get("same_education"):
+                    styles.append(("#a855f7", (6, 3), 2))
+                if relation.get("same_workplace"):
+                    styles.append(("#0891b2", (2, 4), 2))
+                if not styles:
                     continue
-                canvas.create_line(
-                    start[0], start[1], end[0], end[1],
-                    fill=color, dash=dash, width=line_width,
-                )
+                dx = end[0] - start[0]
+                dy = end[1] - start[1]
+                length = math.hypot(dx, dy) or 1.0
+                for style_index, (color, dash, line_width) in enumerate(styles):
+                    offset = (style_index - (len(styles) - 1) / 2.0) * 4.0
+                    ox = (-dy / length) * offset
+                    oy = (dx / length) * offset
+                    canvas.create_line(
+                        start[0] + ox, start[1] + oy,
+                        end[0] + ox, end[1] + oy,
+                        fill=color, dash=dash, width=line_width,
+                    )
             for index, profile in enumerate(profiles):
                 key = str(profile.get("profile_key") or index)
                 x, y = positions[key]

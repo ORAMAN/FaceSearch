@@ -293,6 +293,8 @@ def _load_gui_settings() -> dict[str, Any]:
         "group_friend_weight": 8.0,
         "group_common_friend_weight": 2.0,
         "group_city_weight": 1.5,
+        "group_education_weight": 2.0,
+        "group_workplace_weight": 2.0,
         "group_check_vk_friends": True,
         "group_gender_weight": 4.0,
         "group_profile_gender_weight": 16.0,
@@ -434,6 +436,12 @@ def _load_gui_settings() -> dict[str, Any]:
             settings["group_city_weight"] = max(0.0, min(10.0, _xml_float(
                 node.findtext("city_weight"), settings["group_city_weight"]
             )))
+            settings["group_education_weight"] = max(0.0, min(10.0, _xml_float(
+                node.findtext("education_weight"), settings["group_education_weight"]
+            )))
+            settings["group_workplace_weight"] = max(0.0, min(10.0, _xml_float(
+                node.findtext("workplace_weight"), settings["group_workplace_weight"]
+            )))
             settings["group_check_vk_friends"] = _xml_bool(
                 node.findtext("check_vk_friends"), settings["group_check_vk_friends"]
             )
@@ -555,6 +563,12 @@ def _save_gui_settings_data(settings: dict[str, Any]) -> None:
     ))
     ET.SubElement(node, "city_weight").text = str(max(
         0.0, min(10.0, _xml_float(settings.get("group_city_weight"), 1.5))
+    ))
+    ET.SubElement(node, "education_weight").text = str(max(
+        0.0, min(10.0, _xml_float(settings.get("group_education_weight"), 2.0))
+    ))
+    ET.SubElement(node, "workplace_weight").text = str(max(
+        0.0, min(10.0, _xml_float(settings.get("group_workplace_weight"), 2.0))
     ))
     ET.SubElement(node, "check_vk_friends").text = (
         "true" if bool(settings.get("group_check_vk_friends", True)) else "false"

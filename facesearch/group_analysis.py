@@ -1405,6 +1405,8 @@ def _rank_combinations(
                 "profile_url": profile_url,
                 "source_url": source_url,
                 "city": city,
+                "education": list(item.get("education") or []),
+                "workplaces": list(item.get("workplaces") or []),
                 "similarity": similarity,
                 "face_id": face_id,
                 "profile_key": profile_key,
