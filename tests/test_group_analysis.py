@@ -316,7 +316,7 @@ class GroupAnalysisTests(unittest.TestCase):
         self.assertEqual(by_face[0]["profile_gender_penalty"], 0.0)
 
         false_match = next(
-            item for item in result["all_candidates"] if item["name"] == "Анастасия"
+            item for item in result["candidates"] if item["name"] == "Анастасия"
         )
         self.assertEqual(false_match["profile_gender"], "female")
         self.assertGreater(
