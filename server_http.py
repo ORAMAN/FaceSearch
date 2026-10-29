@@ -3106,8 +3106,8 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 # изображения без интернет-профиля. Расширяем top-k, пока не наберём
                 # требуемое число уникальных интернет-профилей или пока не закончатся
                 # результаты выше минимального порога сходства.
-                search_top_k = min(500, max(candidate_count * 40, candidate_count + 50))
-                max_search_top_k = min(10000, max(search_top_k, candidate_count * 400))
+                initial_search_top_k = min(500, max(candidate_count * 40, candidate_count + 50))
+                max_search_top_k = min(10000, max(initial_search_top_k, candidate_count * 400))
                 candidates_by_face = []
 
                 def online_profile_count(search_results):
@@ -3155,6 +3155,8 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                         "Поиск кандидатов для лица " + str(face_index + 1)
                         + " / " + str(len(embeddings)) + "…",
                     )
+                    # Расширение предыдущего лица не должно замедлять следующие лица.
+                    search_top_k = initial_search_top_k
                     while True:
                         with _INDEX_USE_LOCK.read_lock():
                             candidates = face_search.search_embedding(
