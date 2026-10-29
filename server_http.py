@@ -3102,11 +3102,52 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             connection = None
             try:
                 candidate_count = int(options["candidates_per_face"])
-                # Поиск возвращает строки лиц из изображений, а не уникальные профили.
-                # Если у одного профиля много одинаковых/похожих фотографий, маленький
-                # top-k может заполниться ими и скрыть профили, важные для анализа связей.
+                # Поиск FAISS сначала возвращает отдельные строки лиц, включая локальные
+                # изображения без интернет-профиля. Расширяем top-k, пока не наберём
+                # требуемое число уникальных интернет-профилей или пока не закончатся
+                # результаты выше минимального порога сходства.
                 search_top_k = min(500, max(candidate_count * 40, candidate_count + 50))
+                max_search_top_k = min(10000, max(search_top_k, candidate_count * 400))
                 candidates_by_face = []
+
+                def online_profile_count(search_results):
+                    unique_profiles = set()
+                    for result in search_results:
+                        raw = {}
+                        try:
+                            decoded = json.loads(str(result.get("raw_json") or ""))
+                            if isinstance(decoded, dict):
+                                raw = decoded
+                        except (TypeError, ValueError):
+                            pass
+                        url = str(result.get("profile_url") or raw.get("url_source") or "").strip()
+                        try:
+                            user_id = int(result.get("vk_user_id") or 0)
+                        except (TypeError, ValueError):
+                            user_id = 0
+                        if user_id > 0:
+                            unique_profiles.add("vk:" + str(user_id))
+                            continue
+                        if not url:
+                            continue
+                        try:
+                            parsed = urlparse(url if "://" in url else "https://" + url)
+                            host = (parsed.hostname or "").strip(".").lower()
+                            if parsed.scheme.lower() not in ("http", "https") or not host:
+                                continue
+                            if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+                                continue
+                        except (TypeError, ValueError):
+                            continue
+                        try:
+                            profile_id = int(result.get("profile_id") or 0)
+                        except (TypeError, ValueError):
+                            profile_id = 0
+                        if profile_id > 0:
+                            unique_profiles.add("profile:" + str(profile_id))
+                        else:
+                            unique_profiles.add((host + parsed.path.rstrip("/")).lower())
+                    return len(unique_profiles)
                 connection = _open_connection()
                 for face_index, embedding in enumerate(embeddings):
                     update_job(
@@ -3114,13 +3155,28 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                         "Поиск кандидатов для лица " + str(face_index + 1)
                         + " / " + str(len(embeddings)) + "…",
                     )
-                    with _INDEX_USE_LOCK.read_lock():
-                        candidates = face_search.search_embedding(
-                            connection,
-                            embedding,
-                            top_k=search_top_k,
-                            min_similarity=float(options["min_similarity"]) / 100.0,
-                            backend=BACKEND,
+                    while True:
+                        with _INDEX_USE_LOCK.read_lock():
+                            candidates = face_search.search_embedding(
+                                connection,
+                                embedding,
+                                top_k=search_top_k,
+                                min_similarity=float(options["min_similarity"]) / 100.0,
+                                backend=BACKEND,
+                            )
+                        online_count = online_profile_count(candidates)
+                        if (
+                            online_count >= candidate_count
+                            or len(candidates) < search_top_k
+                            or search_top_k >= max_search_top_k
+                        ):
+                            break
+                        search_top_k = min(max_search_top_k, search_top_k * 2)
+                        update_job(
+                            5 + int(25 * face_index / max(1, len(embeddings))),
+                            "Для лица " + str(face_index + 1)
+                            + ": расширяю поиск до " + str(search_top_k)
+                            + " результатов, интернет-профилей пока " + str(online_count) + "…",
                         )
                     face_candidates = []
                     for candidate in candidates:
