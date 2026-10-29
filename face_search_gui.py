@@ -8959,14 +8959,17 @@ class FaceSearchGUI:
                 )
                 top_k = initial_top_k
                 while True:
-                    with _INDEX_USE_LOCK.read_lock():
-                        rows = search_embedding(
-                            connection,
-                            embedding,
-                            top_k=top_k,
-                            min_similarity=minimum,
-                            backend=backend,
-                        )
+                    # _INDEX_USE_LOCK принадлежит только server_http.py.
+                    # В Tkinter используем тот же путь поиска, что и обычная кнопка поиска:
+                    # search_embedding сам выбирает CPU/GPU и применяет внутренние блокировки
+                    # конкретных FAISS-кэшей, поэтому веб-серверный lock здесь не нужен.
+                    rows = search_embedding(
+                        connection,
+                        embedding,
+                        top_k=top_k,
+                        min_similarity=minimum,
+                        backend=backend,
+                    )
                     online_count = online_profile_count(rows)
                     if (
                         online_count >= candidate_limit
