@@ -47,7 +47,8 @@ _RESULT_SELECT_SQL = """
         p.is_closed,
         p.deactivated,
         p.profile_url,
-        p.raw_json
+        p.raw_json,
+        p.id
     FROM faces f
     JOIN images i ON i.id = f.image_id
     LEFT JOIN profiles p ON p.id = i.profile_id
@@ -146,6 +147,7 @@ def _row_to_result(row, rank: int, score: float) -> dict[str, Any]:
         deactivated,
         profile_url,
         raw_json,
+        profile_id,
     ) = row
 
     return {
@@ -190,4 +192,5 @@ def _row_to_result(row, rank: int, score: float) -> dict[str, Any]:
         "deactivated": deactivated,
         "profile_url": profile_url,
         "raw_json": raw_json,
+        "profile_id": int(profile_id) if profile_id is not None else None,
     }
