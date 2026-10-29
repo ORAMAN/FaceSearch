@@ -1644,6 +1644,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   let cameraStream=null;
   let cameraOpening=false;
   let lastResults=[];
+  let groupAnalysisMatches=null;
 
   const indexStatusBox=document.getElementById("index-status");
   const indexMetaBox=document.getElementById("index-meta");
@@ -1943,6 +1944,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     previewZoom=1;
     faceIdentificationRun++;
     faceMatchResults=[];
+    groupAnalysisMatches=null;
     identificationInProgress=false;
     faceLinkOverlay.replaceChildren();
     identifyFacesButton.textContent="Определить";
@@ -2136,15 +2138,38 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     const anchors=[];
     const drawOrder=faces.map(function(face,index){return {face:face,index:index};})
       .sort(function(a,b){return (a.index===selectedFace?1:0)-(b.index===selectedFace?1:0);});
+    function markerStyle(face,match){
+      const gender=String((match&&match.gender)||face.gender||"unknown");
+      const confidence=Number((match&&match.genderConfidence)!==undefined
+        ?match.genderConfidence:(face.gender_confidence||0));
+      if(confidence<0.65||gender==="unknown")return {stroke:"#94a3b8",fill:"#475569",gender:"unknown"};
+      if(gender==="female")return {stroke:"#f472b6",fill:"#9d174d",gender:"female"};
+      if(gender==="male")return {stroke:"#38bdf8",fill:"#075985",gender:"male"};
+      return {stroke:"#94a3b8",fill:"#475569",gender:"unknown"};
+    }
     drawOrder.forEach(function(entry){
       const face=entry.face,index=entry.index,b=face.bbox;
+      const match=faceMatchResults[index]||null;
+      const style=markerStyle(face,match);
       ctx.lineWidth=index===selectedFace?selectedLineWidth:lineWidth;
-      ctx.strokeStyle=index===selectedFace?"#4dffad":"#4d9cf5";
+      ctx.strokeStyle=style.stroke;
       ctx.strokeRect(b[0],b[1],b[2]-b[0],b[3]-b[1]);
+      // Круг на рамке помогает распознать класс даже при короткой подписи.
+      const radius=5/displayScale;
+      const cx=Math.min(canvas.width-radius,Math.max(radius,b[2]));
+      const cy=Math.min(canvas.height-radius,Math.max(radius,b[1]));
+      ctx.beginPath();
+      ctx.arc(cx,cy,radius,0,Math.PI*2);
+      ctx.fillStyle=style.stroke;
+      ctx.fill();
+      ctx.lineWidth=1.5/displayScale;
+      ctx.strokeStyle="#ffffff";
+      ctx.stroke();
     });
     drawOrder.forEach(function(entry){
       const face=entry.face,index=entry.index,b=face.bbox;
       const match=faceMatchResults[index]||null;
+      const style=markerStyle(face,match);
       const fullName=String(match&&match.name||"").trim();
       const labelSource=fullName||"#"+(index+1);
       ctx.font="600 "+fontSize+"px sans-serif";
@@ -2158,7 +2183,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       let labelY=b[1]-labelHeight-2/displayScale;
       if(labelY<0)labelY=Math.min(canvas.height-labelHeight,b[3]+2/displayScale);
       ctx.globalAlpha=index===selectedFace?0.84:0.58;
-      ctx.fillStyle=index===selectedFace?"#147a4b":"#1763a5";
+      ctx.fillStyle=style.fill;
+      if(index===selectedFace)ctx.globalAlpha=0.94;
       ctx.fillRect(labelX,labelY,labelWidth,labelHeight);
       ctx.globalAlpha=1;
       ctx.fillStyle="#ffffff";
