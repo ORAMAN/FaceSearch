@@ -2777,7 +2777,10 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             connection = None
             try:
                 candidate_count = int(options["candidates_per_face"])
-                search_top_k = min(100, max(candidate_count * 10, candidate_count + 10))
+                # Поиск возвращает строки лиц из изображений, а не уникальные профили.
+                # Если у одного профиля много одинаковых/похожих фотографий, маленький
+                # top-k может заполниться ими и скрыть профили, важные для анализа связей.
+                search_top_k = min(500, max(candidate_count * 40, candidate_count + 50))
                 candidates_by_face = []
                 connection = _open_connection()
                 for face_index, embedding in enumerate(embeddings):
