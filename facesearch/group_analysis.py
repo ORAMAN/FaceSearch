@@ -360,14 +360,16 @@ def _normalize_gender_prediction(value: Any) -> dict[str, Any]:
     if raw_gender is None:
         raw_gender = value.get("sex")
     if isinstance(raw_gender, bool):
-        gender = "female" if raw_gender else "male"
+        # bool не является контрактным форматом классификатора — не угадываем смысл.
+        gender = "unknown"
     elif isinstance(raw_gender, (int, float)):
-        gender = "male" if int(raw_gender) == 0 else ("female" if int(raw_gender) == 1 else "unknown")
+        # InsightFace genderage: 0 = female, 1 = male.
+        gender = "female" if int(raw_gender) == 0 else ("male" if int(raw_gender) == 1 else "unknown")
     else:
         text = str(raw_gender or "").strip().casefold()
-        if text in ("0", "m", "male", "man", "м", "муж", "мужской"):
+        if text in ("1", "m", "male", "man", "м", "муж", "мужской"):
             gender = "male"
-        elif text in ("1", "f", "female", "woman", "ж", "жен", "женский"):
+        elif text in ("0", "f", "female", "woman", "ж", "жен", "женский"):
             gender = "female"
         else:
             gender = "unknown"
