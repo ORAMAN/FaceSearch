@@ -253,7 +253,7 @@ class GroupAnalysisTests(unittest.TestCase):
         self.assertEqual(by_face[1]["profile_gender"], "male")
         self.assertGreater(by_face[1]["similarity"], 80.0)
 
-        def test_confident_gender_mismatch_prefers_candidate_compatible_with_source_face(self):
+    def test_confident_gender_mismatch_prefers_candidate_compatible_with_source_face(self):
         candidates = [
             [{
                 "face_id": 1001,
