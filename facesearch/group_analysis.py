@@ -26,9 +26,6 @@ DEFAULTS = {
     "check_vk_friends": True,
 }
 MAX_CANDIDATES_PER_FACE = 10
-# Не назначаем одно и то же сохранённое лицо другому человеку на исходном фото,
-# если оно заметно лучше совпадает с другим входным лицом.
-CROSS_FACE_SPECIFICITY_MARGIN = 8.0
 MAX_UNIQUE_FRIEND_LOOKUPS = 80
 FRIEND_CACHE_TTL_SECONDS = 15 * 60
 FRIEND_REQUEST_INTERVAL_SECONDS = 0.30
@@ -260,134 +257,71 @@ def _stable_profile_key(candidate: dict[str, Any]) -> str:
 def _prepare_candidates(
     candidates_by_face: list[list[dict[str, Any]]],
     options: dict[str, Any],
-) -> tuple[list[list[dict[str, Any]]], int]:
-    """Готовит кандидатов и отсекает лицо, более уверенно совпавшее с другим лицом группы.
-
-    Важно: сравниваем face_id найденного в БД лица между поисками всех лиц
-    исходной фотографии. Один и тот же снимок Елены, загруженный в профиль Дарьи,
-    не должен автоматически становиться кандидатом на место Анны только потому,
-    что у Анны нет сильного совпадения.
-    """
+) -> list[list[dict[str, Any]]]:
+    """Оставляет лучшие уникальные профили-кандидаты для каждого лица."""
+    result: list[list[dict[str, Any]]] = []
     limit = int(options["candidates_per_face"])
     minimum = float(options["min_similarity"])
-    raw_by_face: list[list[dict[str, Any]]] = []
-    # face_id -> {индекс лица на исходной фотографии: наилучшее сходство}
-    scores_by_stored_face: dict[int, dict[int, float]] = {}
-
-    # Сначала собираем полные списки, чтобы сравнивать каждый найденный face_id
-    # между лицами группы до ограничения числа кандидатов на лицо.
     for face_index, original in enumerate(candidates_by_face):
+        seen: set[str] = set()
         current: list[dict[str, Any]] = []
-        for item in original:
-            if not isinstance(item, dict):
-                continue
+        ordered = sorted(
+            (item for item in original if isinstance(item, dict)),
+            key=lambda item: float(item.get("similarity") or 0.0),
+            reverse=True,
+        )
+        for item in ordered:
             try:
                 score = float(item.get("similarity") or 0.0)
             except (TypeError, ValueError):
                 continue
             if not math.isfinite(score) or score < minimum:
                 continue
-
             candidate = dict(item)
             candidate["similarity"] = round(max(0.0, min(100.0, score)), 2)
             candidate["city"] = str(candidate.get("city") or "").strip()
             candidate["profile_key"] = _stable_profile_key(candidate)
-            candidate["face_index"] = face_index
-            candidate["vk_user_id"] = vk_user_id(candidate)
-            try:
-                stored_face_id = int(candidate.get("face_id") or 0)
-            except (TypeError, ValueError):
-                stored_face_id = 0
-
-            if stored_face_id > 0:
-                per_query = scores_by_stored_face.setdefault(stored_face_id, {})
-                per_query[face_index] = max(
-                    per_query.get(face_index, float("-inf")),
-                    float(candidate["similarity"]),
-                )
-            current.append(candidate)
-        raw_by_face.append(current)
-
-    rejected: set[tuple[int, int]] = set()
-    rejected_faces: set[int] = set()
-    result: list[list[dict[str, Any]]] = []
-    for face_index, original in enumerate(raw_by_face):
-        filtered: list[dict[str, Any]] = []
-        for candidate in original:
-            try:
-                stored_face_id = int(candidate.get("face_id") or 0)
-            except (TypeError, ValueError):
-                stored_face_id = 0
-
-            if stored_face_id > 0:
-                own_score = float(candidate["similarity"])
-                other_scores = [
-                    score
-                    for other_index, score in scores_by_stored_face.get(stored_face_id, {}).items()
-                    if other_index != face_index
-                ]
-                best_other_score = max(other_scores, default=float("-inf"))
-                if best_other_score >= own_score + CROSS_FACE_SPECIFICITY_MARGIN:
-                    rejected.add((face_index, stored_face_id))
-                    rejected_faces.add(face_index)
-                    continue
-            filtered.append(candidate)
-
-        ordered = sorted(
-            filtered,
-            key=lambda item: float(item.get("similarity") or 0.0),
-            reverse=True,
-        )
-        seen: set[str] = set()
-        current: list[dict[str, Any]] = []
-        for candidate in ordered:
-            key = candidate["profile_key"]
-            if key in seen:
+            if candidate["profile_key"] in seen:
                 continue
-            seen.add(key)
+            seen.add(candidate["profile_key"])
+            candidate["face_index"] = face_index
             candidate["candidate_rank"] = len(current) + 1
+            candidate["vk_user_id"] = vk_user_id(candidate)
             current.append(candidate)
             if len(current) >= limit:
                 break
-
-        # Если подтверждённого профиля нет, оставляем это лицо без сопоставления,
-        # а не подменяем его чужим профилем с более слабым сходством.
         current.append({
             "profile_key": "unmatched:" + str(face_index),
             "face_index": face_index,
             "candidate_rank": 0,
             "face_id": 0,
-            "name": (
-                "Нет отдельного совпадения"
-                if face_index in rejected_faces
-                else "Нет совпадения выше порога"
-            ),
+            "name": "Нет надёжного совпадения",
             "profile_url": "",
             "city": "",
             "similarity": 0.0,
             "vk_user_id": None,
             "unmatched_reason": (
-                "Некоторые найденные лица значительно лучше совпадают с другим лицом исходной фотографии; "
-                "они не назначены этому человеку."
-                if face_index in rejected_faces
-                else "В активном индексе нет кандидата выше заданного порога сходства."
+                "Ни один кандидат не получил достаточного подтверждения в общем наборе профилей."
             ),
             "unmatched": True,
         })
         result.append(current)
-    return result, len(rejected)
+    return result
 
 def _pair_relation(a: dict[str, Any], b: dict[str, Any], friend_ids: dict[int, set[int]]) -> dict[str, Any]:
+    """Сравнивает социальные связи двух профилей, не считая отсутствие данных доказательством."""
     a_id = a.get("vk_user_id")
     b_id = b.get("vk_user_id")
     direct = False
-    if a_id and b_id and int(a_id) != int(b_id):
-        direct = int(b_id) in friend_ids.get(int(a_id), set()) or int(a_id) in friend_ids.get(int(b_id), set())
     common_count = 0
+    friend_data_available = False
     if a_id and b_id and int(a_id) != int(b_id):
-        left = friend_ids.get(int(a_id), set())
-        right = friend_ids.get(int(b_id), set())
-        common_count = len(left.intersection(right))
+        a_id, b_id = int(a_id), int(b_id)
+        direct = b_id in friend_ids.get(a_id, set()) or a_id in friend_ids.get(b_id, set())
+        # Общие друзья можно оценить только если список успешно загружен для обоих.
+        friend_data_available = a_id in friend_ids and b_id in friend_ids
+        if friend_data_available:
+            common_count = len(friend_ids[a_id].intersection(friend_ids[b_id]))
     city_a = str(a.get("city") or "").strip().casefold()
     city_b = str(b.get("city") or "").strip().casefold()
     same_city = bool(city_a and city_b and city_a == city_b)
@@ -395,8 +329,8 @@ def _pair_relation(a: dict[str, Any], b: dict[str, Any], friend_ids: dict[int, s
         "friend": direct,
         "common_friends": common_count,
         "same_city": same_city,
+        "friend_data_available": friend_data_available,
     }
-
 
 def _pair_bonus(relation: dict[str, Any], options: dict[str, Any]) -> float:
     bonus = 0.0
@@ -420,13 +354,42 @@ def _rank_combinations(
     limit: int = 10,
     beam_width: int = 120,
 ) -> list[dict[str, Any]]:
-    """Beam search: выбирает по одному уникальному профилю на лицо."""
+    """Ищет согласованный набор профилей: социальные связи важнее небольших различий сходства.
+
+    Если для обоих VK-профилей успешно получены списки друзей, отсутствие прямой
+    дружбы и общих друзей считается отрицательным свидетельством. Если список
+    не удалось получить, отношение считается неизвестным, а не отрицательным.
+    """
+    disconnected_penalty = max(4.0, min(20.0, float(options["friend_weight"])))
+
+    def state_key(state: dict[str, Any]):
+        checked_pairs = int(state["checked_social_pairs"])
+        social_quality = (
+            float(state["social_score_sum"]) / checked_pairs
+            if checked_pairs else 0.0
+        )
+        # Сначала согласованность социальных связей, затем полнота, и только затем
+        # визуальный рейтинг. Это предотвращает подстановку постороннего профиля
+        # с высоким сходством вместо связанного кандидата или «нет совпадения».
+        return (
+            social_quality,
+            int(state["connected_social_pairs"]),
+            -int(state["disconnected_social_pairs"]),
+            int(state["matched_faces"]),
+            float(state["visual_sum"]) + float(state["bonus_sum"]),
+        )
+
     states: list[dict[str, Any]] = [{
         "chosen": [],
         "used": set(),
         "visual_sum": 0.0,
         "bonus_sum": 0.0,
         "pair_relations": [],
+        "social_score_sum": 0.0,
+        "checked_social_pairs": 0,
+        "connected_social_pairs": 0,
+        "disconnected_social_pairs": 0,
+        "matched_faces": 0,
     }]
     for face_items in candidates_by_face:
         expanded = []
@@ -437,17 +400,45 @@ def _rank_combinations(
                     continue
                 bonus = 0.0
                 pair_relations = list(state["pair_relations"])
+                social_score_sum = float(state["social_score_sum"])
+                checked_social_pairs = int(state["checked_social_pairs"])
+                connected_social_pairs = int(state["connected_social_pairs"])
+                disconnected_social_pairs = int(state["disconnected_social_pairs"])
                 for previous in state["chosen"]:
                     if candidate.get("unmatched") or previous.get("unmatched"):
                         continue
                     relation = _pair_relation(previous, candidate, friend_ids)
-                    if relation["friend"] or relation["common_friends"] or relation["same_city"]:
+                    bonus += _pair_bonus(relation, options)
+
+                    has_friend_edge = bool(relation["friend"])
+                    has_common_friend_evidence = int(relation["common_friends"]) > 0
+                    if has_friend_edge or has_common_friend_evidence:
+                        # Прямая дружба сильнее, чем просто общий круг знакомых.
+                        evidence_score = (
+                            max(1.0, float(options["friend_weight"]))
+                            if has_friend_edge
+                            else max(0.5, float(options["common_friend_weight"]))
+                            * min(
+                                1.0,
+                                math.log1p(int(relation["common_friends"])) / math.log(6.0),
+                            )
+                        )
+                        social_score_sum += evidence_score
+                        checked_social_pairs += 1
+                        connected_social_pairs += 1
+                    elif relation["friend_data_available"]:
+                        # Отрицательный вывод допустим только когда оба списка друзей
+                        # реально загружены; при сбое API неизвестность не штрафуется.
+                        social_score_sum -= disconnected_penalty
+                        checked_social_pairs += 1
+                        disconnected_social_pairs += 1
+
+                    if has_friend_edge or has_common_friend_evidence or relation["same_city"]:
                         pair_relations.append({
                             "from": previous["profile_key"],
                             "to": candidate["profile_key"],
                             **relation,
                         })
-                    bonus += _pair_bonus(relation, options)
                 chosen = state["chosen"] + [candidate]
                 used = set(state["used"])
                 if not candidate.get("unmatched"):
@@ -458,11 +449,13 @@ def _rank_combinations(
                     "visual_sum": state["visual_sum"] + float(candidate.get("similarity") or 0.0),
                     "bonus_sum": state["bonus_sum"] + bonus,
                     "pair_relations": pair_relations,
+                    "social_score_sum": social_score_sum,
+                    "checked_social_pairs": checked_social_pairs,
+                    "connected_social_pairs": connected_social_pairs,
+                    "disconnected_social_pairs": disconnected_social_pairs,
+                    "matched_faces": int(state["matched_faces"]) + int(not candidate.get("unmatched")),
                 })
-        expanded.sort(
-            key=lambda state: state["visual_sum"] + state["bonus_sum"],
-            reverse=True,
-        )
+        expanded.sort(key=state_key, reverse=True)
         states = expanded[:beam_width]
         if not states:
             break
@@ -470,6 +463,7 @@ def _rank_combinations(
     combinations = []
     pair_count = max(1, len(candidates_by_face) * (len(candidates_by_face) - 1) / 2)
     seen = set()
+    states.sort(key=state_key, reverse=True)
     for state in states:
         chosen = state["chosen"]
         signature = tuple(item["profile_key"] for item in chosen)
@@ -479,11 +473,20 @@ def _rank_combinations(
         count = max(1, len(chosen))
         visual_average = state["visual_sum"] / count
         relation_bonus = state["bonus_sum"] / pair_count
+        checked_pairs = int(state["checked_social_pairs"])
+        social_quality = (
+            float(state["social_score_sum"]) / checked_pairs
+            if checked_pairs else 0.0
+        )
         combinations.append({
             "rank": len(combinations) + 1,
             "score": round(visual_average + relation_bonus, 2),
             "visual_average": round(visual_average, 2),
             "social_bonus": round(relation_bonus, 2),
+            "social_evidence": round(social_quality, 2),
+            "connected_pairs": int(state["connected_social_pairs"]),
+            "disconnected_pairs": int(state["disconnected_social_pairs"]),
+            "checked_social_pairs": checked_pairs,
             "matched_faces": sum(1 for item in chosen if not item.get("unmatched")),
             "profiles": [
                 {
@@ -506,7 +509,6 @@ def _rank_combinations(
         if len(combinations) >= limit:
             break
     return combinations
-
 
 def _graph_payload(combination: dict[str, Any]) -> dict[str, Any]:
     profiles = combination.get("profiles", [])
@@ -542,7 +544,7 @@ def analyze_group(
         raise ValueError("Для группового анализа нужно обнаружить не менее двух лиц.")
 
     progress(5, "Подготовка кандидатов для каждого лица…")
-    prepared, cross_face_filtered = _prepare_candidates(candidates_by_face, options)
+    prepared = _prepare_candidates(candidates_by_face, options)
     totals = [sum(1 for item in items if not item.get("unmatched")) for items in prepared]
     progress(25, "Кандидаты подготовлены: " + ", ".join(str(n) for n in totals) + " на лицо.")
 
@@ -580,21 +582,14 @@ def analyze_group(
         "options": options,
         "face_count": len(candidates_by_face),
         "candidate_counts": totals,
-        "cross_face_filtered": cross_face_filtered,
         "friend_status": friend_status,
         "combinations": combinations,
         "best_graph": graph,
         "candidates": all_candidates,
         "notice": (
-            (
-                "Отфильтровано слабых назначений: одно и то же сохранённое лицо "
-                "значительно лучше совпадает с другим лицом исходной фотографии ("
-                + str(cross_face_filtered) + "). "
-                if cross_face_filtered else ""
-            )
-            + "Итоговый рейтинг — эвристическая оценка согласованности вариантов, "
-            "а не вероятность правильного определения личности. Отсутствие данных о связях "
-            "не трактуется как доказательство отсутствия связи. Если для лица нет сильного "
-            "совпадения в индексе, оно остаётся без сопоставления вместо подстановки чужого профиля."
+            "Результаты ранжируются с учётом подтверждённых связей между кандидатами. "
+            "Связь отсутствует только там, где успешно получены оба списка друзей и не найдено "
+            "ни дружбы, ни общих друзей; при недоступном API отношение считается неизвестным. "
+            "Общий рейтинг — эвристическая оценка, а не вероятность правильного определения личности."
         ),
     }
