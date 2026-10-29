@@ -309,6 +309,7 @@ def _prepare_candidates(
         raw_by_face.append(current)
 
     rejected: set[tuple[int, int]] = set()
+    rejected_faces: set[int] = set()
     result: list[list[dict[str, Any]]] = []
     for face_index, original in enumerate(raw_by_face):
         filtered: list[dict[str, Any]] = []
@@ -328,6 +329,7 @@ def _prepare_candidates(
                 best_other_score = max(other_scores, default=float("-inf"))
                 if best_other_score >= own_score + CROSS_FACE_SPECIFICITY_MARGIN:
                     rejected.add((face_index, stored_face_id))
+                    rejected_faces.add(face_index)
                     continue
             filtered.append(candidate)
 
@@ -355,11 +357,21 @@ def _prepare_candidates(
             "face_index": face_index,
             "candidate_rank": 0,
             "face_id": 0,
-            "name": "Нет совпадения выше порога",
+            "name": (
+                "Нет отдельного совпадения"
+                if face_index in rejected_faces
+                else "Нет совпадения выше порога"
+            ),
             "profile_url": "",
             "city": "",
             "similarity": 0.0,
             "vk_user_id": None,
+            "unmatched_reason": (
+                "Некоторые найденные лица значительно лучше совпадают с другим лицом исходной фотографии; "
+                "они не назначены этому человеку."
+                if face_index in rejected_faces
+                else "В активном индексе нет кандидата выше заданного порога сходства."
+            ),
             "unmatched": True,
         })
         result.append(current)
@@ -485,6 +497,7 @@ def _rank_combinations(
                     "profile_key": item["profile_key"],
                     "vk_user_id": item.get("vk_user_id"),
                     "unmatched": bool(item.get("unmatched")),
+                    "unmatched_reason": item.get("unmatched_reason") or "",
                 }
                 for index, item in enumerate(chosen)
             ],
