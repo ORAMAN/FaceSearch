@@ -44,6 +44,7 @@
     running = false;
     pollSequence += 1;
     lastResult = null;
+    if (core.setGroupAnalysisMatches) core.setGroupAnalysisMatches("", []);
     panel.hidden = true;
     summary.replaceChildren();
     graph.replaceChildren();
@@ -276,6 +277,10 @@
     renderGraph(combo);
     renderProfileCards(combo);
     renderCombinationButtons(combinations, index);
+    // Синхронизируем текущий выбранный вариант с кнопкой «Определить» и метками лиц.
+    if (core.setGroupAnalysisMatches) {
+      core.setGroupAnalysisMatches(core.getQueryId(), combo.profiles || []);
+    }
   }
 
   function renderResult(result) {
@@ -294,6 +299,7 @@
       graphWrap.hidden = true;
       profileList.replaceChildren();
       combinationsBox.replaceChildren();
+      if (core.setGroupAnalysisMatches) core.setGroupAnalysisMatches("", []);
       const noMatches = document.createElement("div");
       noMatches.className = "group-empty";
       noMatches.textContent = "Не удалось собрать допустимую комбинацию профилей выше заданного порога.";
@@ -352,6 +358,7 @@
     }
 
     const queryId = core.getQueryId();
+    if (core.setGroupAnalysisMatches) core.setGroupAnalysisMatches("", []);
     running = true;
     activeJobId = "";
     panel.hidden = false;
