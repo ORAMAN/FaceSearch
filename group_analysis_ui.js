@@ -23,6 +23,7 @@
   const cityWeightInput = document.getElementById("group-city-weight");
   const checkVkFriendsInput = document.getElementById("group-check-vk-friends");
   const genderWeightInput = document.getElementById("group-gender-weight");
+  const profileGenderWeightInput = document.getElementById("group-profile-gender-weight");
   const checkGenderInput = document.getElementById("group-check-gender");
 
   if (!core || !button || !panel) return;
@@ -83,7 +84,8 @@
       city_weight: numberFrom(cityWeightInput, "Вес города", 0, 10),
       check_vk_friends: Boolean(checkVkFriendsInput.checked),
       check_gender: Boolean(checkGenderInput.checked),
-      gender_weight: numberFrom(genderWeightInput, "Штраф за несовпадение пола", 0, 10)
+      gender_weight: numberFrom(genderWeightInput, "Штраф за несовпадение пола по фото", 0, 10),
+      profile_gender_weight: numberFrom(profileGenderWeightInput, "Штраф за несовпадение пола профиля", 0, 30)
     };
   }
 
@@ -209,12 +211,19 @@
         const candidateGenderText = candidateGender === "unknown"
           ? "модель не определила пол кандидата"
           : "модель: " + (genderLabels[candidateGender] || "не определён") + " (" + Math.round(candidateConfidence * 100) + "%)";
+        const profileGender = String(profile.profile_gender || "unknown");
+        const profileGenderText = profileGender === "unknown"
+          ? "в карточке не указан"
+          : (genderLabels[profileGender] || "не определён") + " (пол в карточке)";
         const penalty = Number(profile.gender_penalty || 0);
+        const facePenalty = Number(profile.face_gender_penalty || 0);
+        const profilePenalty = Number(profile.profile_gender_penalty || 0);
         meta.textContent =
           "Сходство лица: " + Number(profile.similarity || 0).toFixed(2) + "%" +
           " · пол по фото — " + candidateGenderText +
+          " · пол профиля — " + profileGenderText +
           " · " + queryGenderText +
-          (penalty > 0 ? " · штраф пола: −" + penalty.toFixed(2) : "") +
+          (penalty > 0 ? " · штраф: −" + penalty.toFixed(2) + " (по фото −" + facePenalty.toFixed(2) + ", по профилю −" + profilePenalty.toFixed(2) + ")" : "") +
           (profile.city ? " · " + profile.city : "");
       }
       card.appendChild(meta);
