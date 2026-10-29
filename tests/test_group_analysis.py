@@ -12,10 +12,48 @@ from facesearch.group_analysis import (
     _request_vk_friends,
     _gender_mismatch_penalty,
     _profile_gender_mismatch_penalty,
+    _prepare_candidates,
 )
 
 
 class GroupAnalysisTests(unittest.TestCase):
+
+    def test_candidate_limit_counts_unique_database_profiles_not_face_rows(self):
+        # Несколько фотографий/face.id принадлежат одному профилю profiles.id.
+        # Даже если у строк разные URL, они должны занимать только одно место.
+        candidates = [[
+            {
+                "face_id": 101, "profile_id": 501,
+                "profile_url": "", "source_url": "",
+                "name": "Тот же профиль, лицо 1", "similarity": 96.0,
+            },
+            {
+                "face_id": 102, "profile_id": 501,
+                "profile_url": "", "source_url": "",
+                "name": "Тот же профиль, лицо 2", "similarity": 95.0,
+            },
+            {
+                "face_id": 103, "profile_id": 501,
+                "profile_url": "https://example.test/photo/3",
+                "name": "Тот же профиль, лицо 3", "similarity": 94.0,
+            },
+            {
+                "face_id": 201, "profile_id": 502,
+                "profile_url": "", "source_url": "",
+                "name": "Другой профиль", "similarity": 90.0,
+            },
+        ]]
+        prepared = _prepare_candidates(
+            candidates,
+            normalize_options({"candidates_per_face": 2, "min_similarity": 0}),
+        )
+        selected = [item for item in prepared[0] if not item.get("unmatched")]
+
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(
+            [item["profile_key"] for item in selected],
+            ["profile:501", "profile:502"],
+        )
 
     def test_friend_lookup_uses_public_vk_loader_api_helper(self):
         class FakeSession:
