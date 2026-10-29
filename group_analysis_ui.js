@@ -22,6 +22,8 @@
   const commonWeightInput = document.getElementById("group-common-weight");
   const cityWeightInput = document.getElementById("group-city-weight");
   const checkVkFriendsInput = document.getElementById("group-check-vk-friends");
+  const genderWeightInput = document.getElementById("group-gender-weight");
+  const checkGenderInput = document.getElementById("group-check-gender");
 
   if (!core || !button || !panel) return;
 
@@ -78,7 +80,9 @@
       friend_weight: numberFrom(friendWeightInput, "Вес дружбы", 0, 20),
       common_friend_weight: numberFrom(commonWeightInput, "Вес общих друзей", 0, 10),
       city_weight: numberFrom(cityWeightInput, "Вес города", 0, 10),
-      check_vk_friends: Boolean(checkVkFriendsInput.checked)
+      check_vk_friends: Boolean(checkVkFriendsInput.checked),
+      check_gender: Boolean(checkGenderInput.checked),
+      gender_weight: numberFrom(genderWeightInput, "Штраф за несовпадение пола", 0, 10)
     };
   }
 
@@ -189,9 +193,28 @@
 
       const meta = document.createElement("div");
       meta.className = "group-profile-meta";
-      meta.textContent = profile.unmatched
-        ? String(profile.unmatched_reason || "Нет кандидата выше порога")
-        : "Сходство лица: " + Number(profile.similarity || 0).toFixed(2) + "%" + (profile.city ? " · " + profile.city : "");
+      if (profile.unmatched) {
+        meta.textContent = String(profile.unmatched_reason || "Нет надёжного совпадения");
+      } else {
+        const genderLabels = { female: "женский", male: "мужской", unknown: "не определён" };
+        const candidateGender = String(profile.gender || "unknown");
+        const queryGender = String((profile.query_gender || {}).gender || "unknown");
+        const candidateConfidence = Number(profile.gender_confidence || 0);
+        const queryConfidence = Number((profile.query_gender || {}).confidence || 0);
+        const candidateGenderText = candidateGender === "unknown"
+          ? "модель не определила пол кандидата"
+          : "модель: " + (genderLabels[candidateGender] || "не определён") + " (" + Math.round(candidateConfidence * 100) + "%)";
+        const queryGenderText = queryGender === "unknown"
+          ? "исходное лицо не определено"
+          : "исходное лицо: " + (genderLabels[queryGender] || "не определён") + " (" + Math.round(queryConfidence * 100) + "%)";
+        const penalty = Number(profile.gender_penalty || 0);
+        meta.textContent =
+          "Сходство лица: " + Number(profile.similarity || 0).toFixed(2) + "%" +
+          " · пол по фото — " + candidateGenderText +
+          " · " + queryGenderText +
+          (penalty > 0 ? " · штраф пола: −" + penalty.toFixed(2) : "") +
+          (profile.city ? " · " + profile.city : "");
+      }
       card.appendChild(meta);
 
       const value = String(profile.profile_url || profile.source_url || "").trim();
@@ -275,7 +298,8 @@
       summary.appendChild(noMatches);
     }
     const friendStatus = result.friend_status || {};
-    notice.textContent = [friendStatus.message || "", result.notice || ""].filter(Boolean).join(" ");
+    const genderStatus = result.gender_status || {};
+    notice.textContent = [friendStatus.message || "", genderStatus.message || "", result.notice || ""].filter(Boolean).join(" ");
     setProgress(100, "Анализ завершён.");
     panel.scrollIntoView({ behavior: "smooth", block: "start" });
   }
