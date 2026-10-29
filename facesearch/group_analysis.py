@@ -326,6 +326,8 @@ def _normalise_match_text(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
+    # U+2116 has a compatibility decomposition to the letters "No"; treat it as punctuation.
+    text = text.replace("№", " ")
     text = unicodedata.normalize("NFKD", text)
     text = "".join(char for char in text if not unicodedata.combining(char))
     text = text.casefold().replace("ё", "е")
