@@ -5869,6 +5869,8 @@ class FaceSearchGUI:
             "group_friend_weight": self.gui_settings.get("group_friend_weight", 8.0),
             "group_common_friend_weight": self.gui_settings.get("group_common_friend_weight", 2.0),
             "group_city_weight": self.gui_settings.get("group_city_weight", 1.5),
+            "group_education_weight": self.gui_settings.get("group_education_weight", 2.0),
+            "group_workplace_weight": self.gui_settings.get("group_workplace_weight", 2.0),
             "group_check_vk_friends": self.gui_settings.get("group_check_vk_friends", True),
             "group_gender_weight": self.gui_settings.get("group_gender_weight", 4.0),
             "group_profile_gender_weight": self.gui_settings.get("group_profile_gender_weight", 16.0),
@@ -5880,6 +5882,8 @@ class FaceSearchGUI:
             "group_friend_weight": tk.DoubleVar(value=float(initial["group_friend_weight"])),
             "group_common_friend_weight": tk.DoubleVar(value=float(initial["group_common_friend_weight"])),
             "group_city_weight": tk.DoubleVar(value=float(initial["group_city_weight"])),
+            "group_education_weight": tk.DoubleVar(value=float(initial["group_education_weight"])),
+            "group_workplace_weight": tk.DoubleVar(value=float(initial["group_workplace_weight"])),
             "group_check_vk_friends": tk.BooleanVar(value=bool(initial["group_check_vk_friends"])),
             "group_gender_weight": tk.DoubleVar(value=float(initial["group_gender_weight"])),
             "group_profile_gender_weight": tk.DoubleVar(value=float(initial["group_profile_gender_weight"])),
@@ -5893,6 +5897,8 @@ class FaceSearchGUI:
             ("Штраф за пол по фото", "group_gender_weight", 0, 10, 0.5),
             ("Штраф за несовпадение пола профиля", "group_profile_gender_weight", 0, 30, 1),
             ("Вес совпадения города", "group_city_weight", 0, 10, 0.5),
+            ("Вес совпадения школы / учебного заведения", "group_education_weight", 0, 10, 0.5),
+            ("Вес совпадения организации / места работы", "group_workplace_weight", 0, 10, 0.5),
         ]
         for row_index, (label, key, minimum, maximum, step) in enumerate(fields, start=1):
             ttk.Label(frame, text=label).grid(
@@ -5937,6 +5943,8 @@ class FaceSearchGUI:
                 values["group_friend_weight"] = max(0.0, min(20.0, float(values["group_friend_weight"])))
                 values["group_common_friend_weight"] = max(0.0, min(10.0, float(values["group_common_friend_weight"])))
                 values["group_city_weight"] = max(0.0, min(10.0, float(values["group_city_weight"])))
+                values["group_education_weight"] = max(0.0, min(10.0, float(values["group_education_weight"])))
+                values["group_workplace_weight"] = max(0.0, min(10.0, float(values["group_workplace_weight"])))
                 values["group_check_vk_friends"] = bool(values["group_check_vk_friends"])
                 values["group_gender_weight"] = max(0.0, min(10.0, float(values["group_gender_weight"])))
                 values["group_profile_gender_weight"] = max(0.0, min(30.0, float(values["group_profile_gender_weight"])))
@@ -8789,6 +8797,8 @@ class FaceSearchGUI:
             "friend_weight": settings.get("group_friend_weight", 8.0),
             "common_friend_weight": settings.get("group_common_friend_weight", 2.0),
             "city_weight": settings.get("group_city_weight", 1.5),
+            "education_weight": settings.get("group_education_weight", 2.0),
+            "workplace_weight": settings.get("group_workplace_weight", 2.0),
             "check_vk_friends": settings.get("group_check_vk_friends", True),
             "check_gender": settings.get("group_check_gender", True),
             "gender_weight": settings.get("group_gender_weight", 4.0),
