@@ -182,6 +182,8 @@ class GroupAnalysisTests(unittest.TestCase):
         by_face = {item["face_index"]: item for item in best["profiles"]}
         self.assertEqual(by_face[0]["name"], "Елена")
         self.assertTrue(by_face[1]["unmatched"])
+        self.assertEqual(by_face[1]["name"], "Нет отдельного совпадения")
+        self.assertIn("другим лицом", by_face[1]["unmatched_reason"])
         self.assertGreaterEqual(result["cross_face_filtered"], 1)
 
     def test_options_are_clamped(self):
