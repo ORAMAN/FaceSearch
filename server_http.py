@@ -3214,11 +3214,28 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                             continue
                         raw_meta = {}
                         try:
-                            raw_value = json.loads(str(candidate.get("raw_json") or ""))
+                            raw_value = candidate.get("raw_json")
                             if isinstance(raw_value, dict):
                                 raw_meta = raw_value
+                            else:
+                                parsed_raw = json.loads(str(raw_value or ""))
+                                if isinstance(parsed_raw, dict):
+                                    raw_meta = parsed_raw
                         except (TypeError, ValueError):
                             pass
+                        metadata_doc = {}
+                        try:
+                            raw_metadata = candidate.get("metadata_json")
+                            if isinstance(raw_metadata, dict):
+                                metadata_doc = raw_metadata
+                            else:
+                                parsed_metadata = json.loads(str(raw_metadata or ""))
+                                if isinstance(parsed_metadata, dict):
+                                    metadata_doc = parsed_metadata
+                        except (TypeError, ValueError):
+                            pass
+                        raw_info = raw_meta.get("info") if isinstance(raw_meta.get("info"), dict) else {}
+                        metadata_info = metadata_doc.get("info") if isinstance(metadata_doc.get("info"), dict) else {}
                         vk_id = candidate.get("vk_user_id")
                         try:
                             vk_id = int(vk_id) if vk_id is not None and int(vk_id) > 0 else None
@@ -3269,6 +3286,12 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                             "similarity": score,
                             "vk_user_id": vk_id,
                             "profile_sex": profile_sex,
+                            # Передаём исходные метаданные в анализ связей: здесь
+                            # могут находиться школа/вуз, организация и дата рождения.
+                            "raw_meta": raw_meta,
+                            "metadata": metadata_doc,
+                            "info": raw_info,
+                            "metadata_info": metadata_info,
                         })
                     candidates_by_face.append(face_candidates)
                     update_job(
