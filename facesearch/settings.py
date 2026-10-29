@@ -288,6 +288,15 @@ def _load_gui_settings() -> dict[str, Any]:
         "create_crops_on_html": False,
         "top_k": DEFAULT_TOP_K,
         "min_similarity": 43.0,
+        "group_min_similarity": 43.0,
+        "group_candidates_per_face": 5,
+        "group_friend_weight": 8.0,
+        "group_common_friend_weight": 2.0,
+        "group_city_weight": 1.5,
+        "group_check_vk_friends": True,
+        "group_gender_weight": 4.0,
+        "group_profile_gender_weight": 16.0,
+        "group_check_gender": True,
         "collapsible_sections": dict(COLLAPSIBLE_SECTION_DEFAULTS),
     }
 
@@ -408,6 +417,36 @@ def _load_gui_settings() -> dict[str, Any]:
             if value:
                 settings["backend"] = value.strip().lower()
 
+        node = root.find("group_analysis")
+        if node is not None:
+            settings["group_min_similarity"] = max(0.0, min(100.0, _xml_float(
+                node.findtext("min_similarity"), settings["group_min_similarity"]
+            )))
+            settings["group_candidates_per_face"] = max(1, min(10, _xml_int(
+                node.findtext("candidates_per_face"), settings["group_candidates_per_face"]
+            )))
+            settings["group_friend_weight"] = max(0.0, min(20.0, _xml_float(
+                node.findtext("friend_weight"), settings["group_friend_weight"]
+            )))
+            settings["group_common_friend_weight"] = max(0.0, min(10.0, _xml_float(
+                node.findtext("common_friend_weight"), settings["group_common_friend_weight"]
+            )))
+            settings["group_city_weight"] = max(0.0, min(10.0, _xml_float(
+                node.findtext("city_weight"), settings["group_city_weight"]
+            )))
+            settings["group_check_vk_friends"] = _xml_bool(
+                node.findtext("check_vk_friends"), settings["group_check_vk_friends"]
+            )
+            settings["group_gender_weight"] = max(0.0, min(10.0, _xml_float(
+                node.findtext("gender_weight"), settings["group_gender_weight"]
+            )))
+            settings["group_profile_gender_weight"] = max(0.0, min(30.0, _xml_float(
+                node.findtext("profile_gender_weight"), settings["group_profile_gender_weight"]
+            )))
+            settings["group_check_gender"] = _xml_bool(
+                node.findtext("check_gender"), settings["group_check_gender"]
+            )
+
     except Exception as exc:
         print(f"Предупреждение: не удалось прочитать {SETTINGS_FILE}: {exc}")
 
@@ -499,6 +538,35 @@ def _save_gui_settings_data(settings: dict[str, Any]) -> None:
     node = ET.SubElement(root, "compute")
     ET.SubElement(node, "backend").text = str(
         settings.get("backend") or ""
+    )
+
+    node = ET.SubElement(root, "group_analysis")
+    ET.SubElement(node, "min_similarity").text = str(max(
+        0.0, min(100.0, _xml_float(settings.get("group_min_similarity"), 43.0))
+    ))
+    ET.SubElement(node, "candidates_per_face").text = str(max(
+        1, min(10, _xml_int(settings.get("group_candidates_per_face"), 5))
+    ))
+    ET.SubElement(node, "friend_weight").text = str(max(
+        0.0, min(20.0, _xml_float(settings.get("group_friend_weight"), 8.0))
+    ))
+    ET.SubElement(node, "common_friend_weight").text = str(max(
+        0.0, min(10.0, _xml_float(settings.get("group_common_friend_weight"), 2.0))
+    ))
+    ET.SubElement(node, "city_weight").text = str(max(
+        0.0, min(10.0, _xml_float(settings.get("group_city_weight"), 1.5))
+    ))
+    ET.SubElement(node, "check_vk_friends").text = (
+        "true" if bool(settings.get("group_check_vk_friends", True)) else "false"
+    )
+    ET.SubElement(node, "gender_weight").text = str(max(
+        0.0, min(10.0, _xml_float(settings.get("group_gender_weight"), 4.0))
+    ))
+    ET.SubElement(node, "profile_gender_weight").text = str(max(
+        0.0, min(30.0, _xml_float(settings.get("group_profile_gender_weight"), 16.0))
+    ))
+    ET.SubElement(node, "check_gender").text = (
+        "true" if bool(settings.get("group_check_gender", True)) else "false"
     )
 
     tree = ET.ElementTree(root)

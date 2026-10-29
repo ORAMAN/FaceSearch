@@ -33,6 +33,7 @@ from contextlib import contextmanager
 from urllib.parse import parse_qs, urlparse
 
 import face_search_gui as face_search
+from facesearch import group_analysis
 from facesearch.settings import _load_gui_settings
 from facesearch.database_profiles import _load_db_profiles, _default_profile
 from facesearch.card_text_filter import (
@@ -53,9 +54,14 @@ MAX_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
 QUERY_TTL_SECONDS = 30 * 60
 MAX_QUERY_SESSIONS = 100
+GROUP_ANALYSIS_TTL_SECONDS = 30 * 60
+MAX_GROUP_ANALYSIS_JOBS = 100
+MAX_ACTIVE_GROUP_ANALYSES = 2
 
 QUERY_SESSIONS: dict[str, dict] = {}
 QUERY_SESSIONS_LOCK = threading.RLock()
+GROUP_ANALYSIS_JOBS: dict[str, dict] = {}
+GROUP_ANALYSIS_JOBS_LOCK = threading.RLock()
 API_SEMAPHORE = threading.BoundedSemaphore(4)
 
 PROFILE: dict = {}
@@ -66,6 +72,28 @@ DEFAULT_TOP_K = 24
 DEFAULT_MIN_SIMILARITY = 43.0
 DEFAULT_USE_LOCAL_CROPS = True
 DEFAULT_THEME = "dark"
+DEFAULT_GROUP_ANALYSIS_OPTIONS = dict(group_analysis.DEFAULTS)
+
+
+def _saved_group_analysis_options() -> dict:
+    """Read shared group-analysis defaults from the same settings.xml as Tkinter."""
+    try:
+        saved = _load_gui_settings()
+    except Exception:
+        saved = {}
+    if not isinstance(saved, dict):
+        saved = {}
+    return group_analysis.normalize_options({
+        "min_similarity": saved.get("group_min_similarity", DEFAULT_GROUP_ANALYSIS_OPTIONS["min_similarity"]),
+        "candidates_per_face": saved.get("group_candidates_per_face", DEFAULT_GROUP_ANALYSIS_OPTIONS["candidates_per_face"]),
+        "friend_weight": saved.get("group_friend_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["friend_weight"]),
+        "common_friend_weight": saved.get("group_common_friend_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["common_friend_weight"]),
+        "city_weight": saved.get("group_city_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["city_weight"]),
+        "check_vk_friends": saved.get("group_check_vk_friends", DEFAULT_GROUP_ANALYSIS_OPTIONS["check_vk_friends"]),
+        "check_gender": saved.get("group_check_gender", DEFAULT_GROUP_ANALYSIS_OPTIONS["check_gender"]),
+        "gender_weight": saved.get("group_gender_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["gender_weight"]),
+        "profile_gender_weight": saved.get("group_profile_gender_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["profile_gender_weight"]),
+    })
 CREATE_CROPS_ON_HTML = False
 CROP_REPAIR_WORKERS = 4
 CROP_REPAIR_AUTO_WORKERS = False
@@ -77,6 +105,9 @@ _CROP_REPAIR_LAST_START_MAX = 5000
 _FACE_IMAGE_CACHE_LOCK = threading.RLock()
 _FACE_IMAGE_CACHE: dict[int, tuple] = {}
 _FACE_IMAGE_CACHE_MAX = 5000
+_FACE_GENDER_CACHE_LOCK = threading.RLock()
+_FACE_GENDER_CACHE: dict[int, dict] = {}
+_FACE_GENDER_CACHE_MAX = 20000
 _REMOTE_IMAGE_CHECK_LOCK = threading.RLock()
 _REMOTE_IMAGE_CHECK_CACHE: dict[str, tuple[float, bool]] = {}
 _REMOTE_IMAGE_CHECK_CACHE_TTL = 20.0
@@ -581,6 +612,7 @@ def _initialize_runtime() -> None:
     global PROFILE, PROFILE_NAME, BACKEND, FACE_APP
     global DEFAULT_TOP_K, DEFAULT_MIN_SIMILARITY
     global DEFAULT_USE_LOCAL_CROPS, DEFAULT_THEME, CREATE_CROPS_ON_HTML
+    global DEFAULT_GROUP_ANALYSIS_OPTIONS
     global CROP_REPAIR_WORKERS, CROP_REPAIR_AUTO_WORKERS
     global _INDEX_ACTIVE_SIGNATURE, _INDEX_RELOAD_STATE, _INDEX_RELOAD_MESSAGE
 
@@ -599,6 +631,17 @@ def _initialize_runtime() -> None:
     )
     DEFAULT_USE_LOCAL_CROPS = bool(gui_settings.get("use_local_crops", True))
     DEFAULT_THEME = "dark" if str(gui_settings.get("theme") or "").lower() == "dark" else "light"
+    DEFAULT_GROUP_ANALYSIS_OPTIONS = group_analysis.normalize_options({
+        "min_similarity": gui_settings.get("group_min_similarity", 43.0),
+        "candidates_per_face": gui_settings.get("group_candidates_per_face", 5),
+        "friend_weight": gui_settings.get("group_friend_weight", 8.0),
+        "common_friend_weight": gui_settings.get("group_common_friend_weight", 2.0),
+        "city_weight": gui_settings.get("group_city_weight", 1.5),
+        "check_vk_friends": gui_settings.get("group_check_vk_friends", True),
+        "check_gender": gui_settings.get("group_check_gender", True),
+        "gender_weight": gui_settings.get("group_gender_weight", 4.0),
+        "profile_gender_weight": gui_settings.get("group_profile_gender_weight", 16.0),
+    })
     CREATE_CROPS_ON_HTML = bool(gui_settings.get("create_crops_on_html", False))
     try:
         CROP_REPAIR_WORKERS = max(1, min(32, int(gui_settings.get("workers", 4))))
@@ -766,6 +809,27 @@ def _decode_image(data_url: str):
     return image
 
 
+def _prune_group_analysis_jobs() -> None:
+    now = time.monotonic()
+    with GROUP_ANALYSIS_JOBS_LOCK:
+        expired = [
+            job_id for job_id, job in GROUP_ANALYSIS_JOBS.items()
+            if now - job.get("created", now) > GROUP_ANALYSIS_TTL_SECONDS
+            and job.get("state") not in ("queued", "running")
+        ]
+        for job_id in expired:
+            GROUP_ANALYSIS_JOBS.pop(job_id, None)
+        while len(GROUP_ANALYSIS_JOBS) > MAX_GROUP_ANALYSIS_JOBS:
+            finished = [
+                job_id for job_id, job in GROUP_ANALYSIS_JOBS.items()
+                if job.get("state") not in ("queued", "running")
+            ]
+            if not finished:
+                break
+            oldest = min(finished, key=lambda job_id: GROUP_ANALYSIS_JOBS[job_id].get("created", 0))
+            GROUP_ANALYSIS_JOBS.pop(oldest, None)
+
+
 def _prune_sessions() -> None:
     now = time.monotonic()
     with QUERY_SESSIONS_LOCK:
@@ -812,6 +876,184 @@ def _get_face_image_row(face_id: int):
     with _FACE_IMAGE_CACHE_LOCK:
         return _FACE_IMAGE_CACHE.get(int(face_id))
 
+
+
+def _gender_model():
+    """Возвращает уже загруженную модель genderage из набора InsightFace."""
+    app = FACE_APP
+    models = getattr(app, "models", {}) if app is not None else {}
+    if not isinstance(models, dict):
+        return None
+    model = models.get("genderage")
+    if model is not None:
+        return model
+    return next(
+        (value for value in models.values()
+         if str(getattr(value, "taskname", "")).casefold() == "genderage"),
+        None,
+    )
+
+
+def _predict_face_gender(image, face) -> dict:
+    """Возвращает осторожную оценку видимого пола по genderage-модели InsightFace."""
+    unknown = {"gender": "unknown", "confidence": 0.0}
+    model = _gender_model()
+    if model is None:
+        return unknown
+
+    # Повторно запускаем только маленькую genderage ONNX-модель, чтобы получить
+    # оценку уверенности, а не использовать только жёсткий argmax из face.gender.
+    try:
+        import numpy as np
+        from insightface.utils import face_align
+
+        bbox = np.asarray(face.bbox, dtype=np.float32)
+        width = float(bbox[2] - bbox[0])
+        height = float(bbox[3] - bbox[1])
+        if width < 2.0 or height < 2.0:
+            return unknown
+        center = ((float(bbox[2]) + float(bbox[0])) / 2.0,
+                  (float(bbox[3]) + float(bbox[1])) / 2.0)
+        input_side = int(model.input_size[0])
+        scale = input_side / (max(width, height) * 1.5)
+        aligned, _transform = face_align.transform(
+            image, center, input_side, scale, 0
+        )
+        input_size = tuple(aligned.shape[0:2][::-1])
+        mean = float(model.input_mean)
+        std = float(model.input_std)
+        if std == 0:
+            return unknown
+        blob = face_search.cv2.dnn.blobFromImage(
+            aligned, 1.0 / std, input_size,
+            (mean, mean, mean), swapRB=True,
+        )
+        raw = model.session.run(
+            model.output_names,
+            {model.input_name: blob},
+        )[0][0]
+        scores = np.asarray(raw[:2], dtype=np.float64)
+        if scores.shape[0] != 2 or not np.all(np.isfinite(scores)):
+            return unknown
+
+        # Некоторые сборки возвращают нормированные вероятности, другие —
+        # оценки до softmax. Поддерживаем оба варианта.
+        total = float(scores.sum())
+        if np.all(scores >= 0.0) and np.all(scores <= 1.0) and 0.90 <= total <= 1.10:
+            probabilities = scores / max(total, 1e-12)
+        else:
+            shifted = scores - float(np.max(scores))
+            exponentials = np.exp(shifted)
+            probabilities = exponentials / max(float(exponentials.sum()), 1e-12)
+
+        label_index = int(np.argmax(probabilities))
+        # InsightFace genderage class order: 0 = female, 1 = male.
+        return {
+            "gender": "female" if label_index == 0 else "male",
+            "confidence": max(0.0, min(1.0, float(probabilities[label_index]))),
+            "gender_model": "insightface_genderage",
+        }
+    except Exception:
+        # Совместимость с версиями InsightFace, в которых результат genderage
+        # доступен лишь через face.gender / face.sex, но внутренний session отличается.
+        raw_gender = getattr(face, "gender", None)
+        if raw_gender is None:
+            raw_gender = getattr(face, "sex", None)
+        if isinstance(raw_gender, bool):
+            label = "unknown"
+        elif isinstance(raw_gender, (int, float)):
+            label = "female" if int(raw_gender) == 0 else ("male" if int(raw_gender) == 1 else "unknown")
+        else:
+            text = str(raw_gender or "").strip().casefold()
+            label = (
+                "male" if text in ("m", "male", "1", "м", "мужской")
+                else "female" if text in ("f", "female", "0", "ж", "женский")
+                else "unknown"
+            )
+        return {
+            "gender": label,
+            # Без доступа к исходной оценке модели задаём только слабую уверенность.
+            "confidence": 0.65 if label != "unknown" else 0.0,
+            "gender_model": "insightface_genderage_fallback",
+        }
+
+
+def _classify_candidate_face_gender(candidate: dict) -> dict:
+    """Классифицирует сохранённый face crop кандидата с кэшем по faces.id."""
+    try:
+        face_id = int(candidate.get("face_id") or 0)
+    except (TypeError, ValueError):
+        return {"gender": "unknown", "confidence": 0.0}
+    if face_id <= 0 or FACE_APP is None:
+        return {"gender": "unknown", "confidence": 0.0}
+
+    with _FACE_GENDER_CACHE_LOCK:
+        cached = _FACE_GENDER_CACHE.get(face_id)
+        if cached is not None:
+            return dict(cached)
+
+    crop_path = None
+    raw_path = str(candidate.get("path") or "").strip()
+    if raw_path:
+        try:
+            resolved = face_search._resolve_db_crop_path(raw_path)
+            if resolved.is_file():
+                crop_path = resolved
+        except (OSError, TypeError, ValueError):
+            pass
+
+    # Если путь не удалось разрешить напрямую (например, pending_ path),
+    # читаем точный путь CROP по связке faces.id -> images.id.
+    if crop_path is None:
+        connection = None
+        try:
+            connection = _open_connection()
+            row = connection.execute(
+                "SELECT i.id, i.path FROM faces f JOIN images i ON i.id = f.image_id WHERE f.id = ?",
+                (face_id,),
+            ).fetchone()
+            if row:
+                resolved = face_search._resolve_db_crop_path(row[1], image_id=int(row[0]))
+                if resolved.is_file():
+                    crop_path = resolved
+        except Exception as exc:
+            print(f"[HTTP][GENDER] Не удалось найти CROP для face_id={face_id}: {exc}", flush=True)
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+
+    prediction = {"gender": "unknown", "confidence": 0.0}
+    if crop_path is not None:
+        try:
+            image = face_search.cv2.imread(str(crop_path))
+            if image is not None:
+                # CROP может содержать небольшой фон. Берём самый крупный
+                # уверенно обнаруженный face, а не угадываем по данным профиля.
+                found = face_search._detect_faces_with_padding(
+                    FACE_APP, image, padding_ratio=0.40
+                )
+                if found:
+                    height, width = image.shape[:2]
+                    def face_size(face):
+                        box = face.bbox
+                        area = max(0.0, float(box[2] - box[0])) * max(0.0, float(box[3] - box[1]))
+                        return area * max(0.0, float(getattr(face, "det_score", 0.0)))
+                    selected = max(found, key=face_size)
+                    prediction = _predict_face_gender(image, selected)
+        except Exception as exc:
+            print(f"[HTTP][GENDER] Не удалось определить атрибут face_id={face_id}: {exc}", flush=True)
+
+    # Кэшируем только валидную классификацию. Если CROP пока отсутствует,
+    # неизвестный результат не должен блокировать повторную попытку после ремонта файла.
+    if prediction.get("gender") in ("male", "female"):
+        with _FACE_GENDER_CACHE_LOCK:
+            _FACE_GENDER_CACHE[face_id] = dict(prediction)
+            while len(_FACE_GENDER_CACHE) > _FACE_GENDER_CACHE_MAX:
+                _FACE_GENDER_CACHE.pop(next(iter(_FACE_GENDER_CACHE)))
+    return prediction
 
 def _looks_like_image_content_type(value: str) -> bool:
     content_type = str(value or "").split(";", 1)[0].strip().lower()
@@ -1021,6 +1263,12 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .preview-controls #identify-faces-button{min-width:112px;font-weight:650;margin-right:4px}
 .preview-zoom-value{min-width:54px;text-align:center;font-size:12px;font-variant-numeric:tabular-nums;color:var(--text)}
 .preview-zoom-hint{grid-column:3;justify-self:end;color:var(--muted);font-size:12px;margin-left:0;text-align:right}
+  .gender-legend{grid-column:1/-1;justify-self:start;display:flex;flex-wrap:wrap;gap:10px;margin-top:3px}
+  .gender-legend-item{display:inline-flex;align-items:center;gap:5px}
+  .gender-legend-dot{width:9px;height:9px;display:inline-block;border-radius:50%;border:1px solid rgba(255,255,255,.72)}
+  .gender-legend-dot.female{background:#f472b6}
+  .gender-legend-dot.male{background:#38bdf8}
+  .gender-legend-dot.unknown{background:#94a3b8}
 .preview-stage{position:relative;display:block;flex:0 0 auto;margin:0 auto;line-height:0;max-width:none}
 #preview-canvas{margin:0}
 .face-link-overlay{position:absolute;inset:0;z-index:4;pointer-events:none;overflow:hidden}
@@ -1031,6 +1279,45 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .preview-viewport:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .status{min-height:28px;color:var(--muted);padding:10px 2px;overflow-wrap:anywhere;scroll-margin-top:10px}
 .status.error{color:#c83e3e}
+.group-options{margin:0 0 16px}
+.group-options details,.group-panel{border:1px solid var(--line);background:var(--panel);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow)}
+.group-options summary{cursor:pointer;font-weight:650}
+.group-options-note{color:var(--muted);font-size:12px;margin:5px 0 12px}
+.group-options-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px;align-items:end}
+.group-options-grid .field{min-width:0}
+.group-options-grid input[type=number]{width:100%;min-width:0}
+.group-options-grid .toggle-label{white-space:normal}
+.group-panel{margin:18px 0 24px}
+.group-panel[hidden]{display:none!important}
+.group-panel-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.group-panel h2{font-size:20px;margin:0}
+.group-progress{height:10px;overflow:hidden;border-radius:99px;background:var(--secondary);margin:12px 0 5px}
+.group-progress-bar{height:100%;width:0;background:var(--accent);transition:width .18s}
+.group-progress-message{font-size:13px;color:var(--muted);overflow-wrap:anywhere}
+.group-graph-wrap{margin-top:14px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--drop)}
+.group-graph{display:block;width:100%;height:auto;max-height:440px}
+.group-gender-legend{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding:10px 14px 0;font-size:12px;color:var(--muted)}
+.group-gender-legend-item{display:inline-flex;align-items:center;gap:6px}
+.group-gender-swatch{display:inline-block;width:11px;height:11px;border-radius:50%;border:2px solid transparent;flex:0 0 auto}
+.group-gender-swatch.female{background:#fce7f3;border-color:#db2777}
+.group-gender-swatch.male{background:#dbeafe;border-color:#0284c7}
+.group-gender-swatch.unknown{background:#e5e7eb;border-color:#9ca3af}
+.group-gender-swatch.mismatch{background:#dbeafe;border:3px solid #dc2626}
+.group-gender-swatch.unmatched{background:#e5e7eb;border:2px dashed #6b7280}
+.group-combinations{display:grid;gap:8px;margin-top:14px}
+.group-combination{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;text-align:left;width:100%;min-height:auto;background:var(--secondary);color:var(--button-text);border:1px solid var(--button-line);padding:11px 13px}
+.group-combination[aria-pressed=true]{border-color:var(--accent);box-shadow:inset 3px 0 var(--accent)}
+.group-combination small{display:block;color:var(--muted);font-weight:400;margin-top:3px}
+.group-profile-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:12px;margin-top:14px}
+.group-profile-card{border:1px solid var(--line);border-radius:10px;padding:10px;min-width:0;background:var(--panel)}
+.group-profile-card img{display:block;width:100%;height:150px;object-fit:contain;background:var(--image-bg);border-radius:6px;margin-bottom:8px}
+.group-profile-card .group-profile-name{font-weight:650;overflow-wrap:anywhere}
+.group-profile-card .group-profile-meta{font-size:12px;color:var(--muted);margin-top:4px;overflow-wrap:anywhere}
+.group-profile-card a{color:var(--link);overflow-wrap:anywhere}
+.group-notice{font-size:12px;color:var(--muted);margin-top:12px;line-height:1.45}
+.group-empty{padding:14px;border:1px dashed var(--line);border-radius:8px;color:var(--muted)}
+@media(max-width:700px){.group-panel{padding:12px}.group-graph{min-height:190px}.group-combination{padding:10px}.group-profile-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:380px){.group-profile-list{grid-template-columns:minmax(0,1fr)}}
 .index-meta{margin:4px 0 9px;color:var(--muted);font-size:12px;line-height:1.35;overflow-wrap:anywhere}
 .index-status{margin:8px 0 12px;padding:11px 14px;border:1px solid var(--line);border-radius:9px;font-size:14px;line-height:1.45;overflow-wrap:anywhere}
 .index-status[hidden]{display:none}
@@ -1214,6 +1501,51 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     <span class="hint format-hint">Поддерживаются JPG, PNG, WEBP и другие форматы изображений.</span>
   </section>
 
+  <section class="group-options" aria-label="Параметры группового анализа">
+    <details>
+      <summary>Параметры анализа связей группы — только для текущего сеанса</summary>
+      <div class="group-options-note">Эти изменения не записываются в settings.xml. Постоянные значения задаются в окне FaceSearch → «Параметры группового анализа». Токены добавляются только через загрузчик VK; на этой странице их вводить не нужно.</div>
+      <div class="group-options-grid">
+        <div class="field">
+          <label for="group-min-similarity">Минимальное сходство, %</label>
+          <input id="group-min-similarity" type="number" min="0" max="100" step="1" value="__GROUP_MIN_SIMILARITY__">
+        </div>
+        <div class="field">
+          <label for="group-candidates">Кандидатов на лицо</label>
+          <input id="group-candidates" type="number" min="1" max="10" step="1" value="__GROUP_CANDIDATES_PER_FACE__">
+        </div>
+        <div class="field">
+          <label for="group-friend-weight">Вес дружбы</label>
+          <input id="group-friend-weight" type="number" min="0" max="20" step="0.5" value="__GROUP_FRIEND_WEIGHT__">
+        </div>
+        <div class="field">
+          <label for="group-common-weight">Вес общих друзей</label>
+          <input id="group-common-weight" type="number" min="0" max="10" step="0.5" value="__GROUP_COMMON_FRIEND_WEIGHT__">
+        </div>
+        <div class="field">
+          <label for="group-city-weight">Вес совпадения города</label>
+          <input id="group-city-weight" type="number" min="0" max="10" step="0.5" value="__GROUP_CITY_WEIGHT__">
+        </div>
+        <div class="field">
+          <label for="group-gender-weight">Штраф за несовпадение пола лица по фото</label>
+          <input id="group-gender-weight" type="number" min="0" max="10" step="0.5" value="__GROUP_GENDER_WEIGHT__">
+        </div>
+        <div class="field">
+          <label for="group-profile-gender-weight">Штраф за несовпадение пола профиля</label>
+          <input id="group-profile-gender-weight" type="number" min="0" max="30" step="1" value="__GROUP_PROFILE_GENDER_WEIGHT__">
+        </div>
+        <div class="field toggle-field">
+          <label class="toggle-label" for="group-check-vk-friends"><input id="group-check-vk-friends" type="checkbox" __GROUP_CHECK_VK_FRIENDS__> Проверять друзей VK</label>
+          <span class="hint">Используются токены, настроенные в загрузчике VK.</span>
+        </div>
+        <div class="field toggle-field">
+          <label class="toggle-label" for="group-check-gender"><input id="group-check-gender" type="checkbox" __GROUP_CHECK_GENDER__> Учитывать пол лица и пол профиля</label>
+          <span class="hint">Сопоставляются оценка InsightFace и поле пола в карточке профиля. Пол профиля учитывается отдельно и сильнее; это мягкий штраф, не жёсткий фильтр.</span>
+        </div>
+      </div>
+    </details>
+  </section>
+
   <section id="dropzone" class="dropzone">
     <div class="dropzone-content" id="drop-copy">
       <strong>Перетащите фотографию сюда</strong><br>
@@ -1222,12 +1554,18 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     <div id="preview-controls" class="preview-controls" hidden aria-label="Определение лиц и управление масштабом">
       <div class="preview-control-buttons">
         <button type="button" id="identify-faces-button" class="secondary" disabled>Определить</button>
+        <button type="button" id="group-analysis-button" class="secondary" disabled title="Активируется, когда обнаружено не менее двух лиц">Анализ связей группы</button>
         <button type="button" id="zoom-out-button" class="secondary" aria-label="Уменьшить масштаб">−</button>
         <span id="preview-zoom-value" class="preview-zoom-value">100%</span>
         <button type="button" id="zoom-in-button" class="secondary" aria-label="Увеличить масштаб">+</button>
         <button type="button" id="zoom-fit-button" class="secondary">Вписать</button>
       </div>
       <span class="preview-zoom-hint">Ctrl — масштаб · Shift — вверх/вниз · Alt — влево/вправо · колесо — страница</span>
+      <span class="preview-zoom-hint gender-legend" aria-label="Цвет обнаруженного лица по оценке модели">
+        <span class="gender-legend-item"><span class="gender-legend-dot female"></span>Женский класс</span>
+        <span class="gender-legend-item"><span class="gender-legend-dot male"></span>Мужской класс</span>
+        <span class="gender-legend-item"><span class="gender-legend-dot unknown"></span>Не определён / низкая уверенность</span>
+      </span>
     </div>
     <div id="preview-viewport" class="preview-viewport" hidden>
       <div id="preview-stage" class="preview-stage">
@@ -1255,6 +1593,34 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   </div>
   <div id="status" class="status" role="status">Выберите изображение, затем нажмите «Определить лица».</div>
   <button type="button" id="search-button" disabled>Искать похожее лицо</button>
+
+  <section id="group-analysis-panel" class="group-panel" hidden aria-live="polite">
+    <div class="group-panel-header">
+      <div>
+        <h2>Анализ связей группы</h2>
+        <div class="hint">Поиск согласованного набора профилей с учётом сходства лиц, дружбы и города.</div>
+      </div>
+      <button type="button" id="group-analysis-hide" class="secondary">Скрыть</button>
+    </div>
+    <div class="group-progress" id="group-progress" role="progressbar" aria-label="Ход анализа" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div class="group-progress-bar" id="group-progress-bar"></div>
+    </div>
+    <div id="group-progress-message" class="group-progress-message">Ожидание запуска анализа.</div>
+    <div id="group-analysis-summary"></div>
+    <div id="group-graph-wrap" class="group-graph-wrap" hidden>
+      <div class="group-gender-legend" aria-label="Обозначения пола на графе">
+        <span class="group-gender-legend-item"><span class="group-gender-swatch female" aria-hidden="true"></span>Женский класс исходного лица</span>
+        <span class="group-gender-legend-item"><span class="group-gender-swatch male" aria-hidden="true"></span>Мужской класс исходного лица</span>
+        <span class="group-gender-legend-item"><span class="group-gender-swatch unknown" aria-hidden="true"></span>Пол не определён</span>
+        <span class="group-gender-legend-item"><span class="group-gender-swatch mismatch" aria-hidden="true"></span>Пол кандидата не совпадает</span>
+        <span class="group-gender-legend-item"><span class="group-gender-swatch unmatched" aria-hidden="true"></span>Пунктир — профиль не назначен</span>
+      </div>
+      <svg id="group-graph" class="group-graph" viewBox="0 0 600 360" role="img" aria-label="Граф связей выбранной комбинации; цвет узла отражает оценку пола исходного лица"></svg>
+    </div>
+    <div id="group-profile-list" class="group-profile-list"></div>
+    <div id="group-combinations" class="group-combinations"></div>
+    <div id="group-analysis-notice" class="group-notice"></div>
+  </section>
 
   <section>
     <div class="section-title"><h2>Результаты</h2><span id="result-count"></span></div>
@@ -1292,6 +1658,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   const faceLinkOverlay=document.getElementById("face-link-overlay");
   const previewControls=document.getElementById("preview-controls");
   const identifyFacesButton=document.getElementById("identify-faces-button");
+  const groupAnalysisButton=document.getElementById("group-analysis-button");
   const previewZoomValue=document.getElementById("preview-zoom-value");
   const zoomOutButton=document.getElementById("zoom-out-button");
   const zoomInButton=document.getElementById("zoom-in-button");
@@ -1329,6 +1696,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   let cameraStream=null;
   let cameraOpening=false;
   let lastResults=[];
+  let groupAnalysisMatches=null;
 
   const indexStatusBox=document.getElementById("index-status");
   const indexMetaBox=document.getElementById("index-meta");
@@ -1621,15 +1989,18 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     cameraButton.disabled=value||cameraOpening;
     descriptionFilterInput.disabled=value;
     identifyFacesButton.disabled=value||!queryId||!faces.length||identificationInProgress;
+    if(window.FaceSearchGroupUI)window.FaceSearchGroupUI.sync();
   }
   function useDataUrl(sourceDataUrl){
     dataUrl=String(sourceDataUrl||"");
     previewZoom=1;
     faceIdentificationRun++;
     faceMatchResults=[];
+    groupAnalysisMatches=null;
     identificationInProgress=false;
     faceLinkOverlay.replaceChildren();
     identifyFacesButton.textContent="Определить";
+    if(window.FaceSearchGroupUI)window.FaceSearchGroupUI.reset();
     imageObject=new Image();
     imageObject.onload=function(){
       queryId="";faces=[];selectedFace=-1;
@@ -1819,15 +2190,60 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     const anchors=[];
     const drawOrder=faces.map(function(face,index){return {face:face,index:index};})
       .sort(function(a,b){return (a.index===selectedFace?1:0)-(b.index===selectedFace?1:0);});
+    function markerStyle(face,match){
+      function normalizeGender(value){
+        const gender=String(value||"").trim().toLowerCase();
+        if(gender==="female"||gender==="f"||gender==="женский")return "female";
+        if(gender==="male"||gender==="m"||gender==="мужской")return "male";
+        return "unknown";
+      }
+      function readConfidence(value){
+        if(value===undefined||value===null||value==="")return null;
+        const number=Number(value);
+        return Number.isFinite(number)?number:null;
+      }
+
+      // Цвет относится к полу обнаруженного лица на исходном фото.
+      // Имя/совпадение из поиска не должно затирать его значением "unknown".
+      const detectedGender=normalizeGender(face&&face.gender);
+      const matchedGender=normalizeGender(match&&match.gender);
+      const gender=detectedGender!=="unknown"?detectedGender:matchedGender;
+      const detectedConfidence=readConfidence(face&&face.gender_confidence);
+      const matchedConfidence=readConfidence(
+        match&&(match.genderConfidence!==undefined?match.genderConfidence:match.gender_confidence)
+      );
+      const confidence=detectedGender!=="unknown"
+        ?(detectedConfidence!==null?detectedConfidence:matchedConfidence)
+        :(matchedConfidence!==null?matchedConfidence:detectedConfidence);
+      if(gender==="unknown"||(confidence!==null&&confidence<0.65))
+        return {stroke:"#94a3b8",fill:"#475569",gender:"unknown"};
+      if(gender==="female")return {stroke:"#f472b6",fill:"#9d174d",gender:"female"};
+      if(gender==="male")return {stroke:"#38bdf8",fill:"#075985",gender:"male"};
+      return {stroke:"#94a3b8",fill:"#475569",gender:"unknown"};
+    }
     drawOrder.forEach(function(entry){
       const face=entry.face,index=entry.index,b=face.bbox;
+      const match=faceMatchResults[index]||null;
+      const style=markerStyle(face,match);
       ctx.lineWidth=index===selectedFace?selectedLineWidth:lineWidth;
-      ctx.strokeStyle=index===selectedFace?"#4dffad":"#4d9cf5";
+      ctx.strokeStyle=style.stroke;
       ctx.strokeRect(b[0],b[1],b[2]-b[0],b[3]-b[1]);
+      // Круг на рамке помогает распознать класс даже при короткой подписи.
+      const radius=5/displayScale;
+      const cx=Math.min(canvas.width-radius,Math.max(radius,b[2]));
+      const cy=Math.min(canvas.height-radius,Math.max(radius,b[1]));
+      ctx.beginPath();
+      ctx.arc(cx,cy,radius,0,Math.PI*2);
+      ctx.fillStyle=style.stroke;
+      ctx.fill();
+      ctx.lineWidth=1.5/displayScale;
+      ctx.strokeStyle="#ffffff";
+      ctx.stroke();
     });
     drawOrder.forEach(function(entry){
       const face=entry.face,index=entry.index,b=face.bbox;
       const match=faceMatchResults[index]||null;
+      const style=markerStyle(face,match);
       const fullName=String(match&&match.name||"").trim();
       const labelSource=fullName||"#"+(index+1);
       ctx.font="600 "+fontSize+"px sans-serif";
@@ -1841,7 +2257,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       let labelY=b[1]-labelHeight-2/displayScale;
       if(labelY<0)labelY=Math.min(canvas.height-labelHeight,b[3]+2/displayScale);
       ctx.globalAlpha=index===selectedFace?0.84:0.58;
-      ctx.fillStyle=index===selectedFace?"#147a4b":"#1763a5";
+      ctx.fillStyle=style.fill;
+      if(index===selectedFace)ctx.globalAlpha=0.94;
       ctx.fillRect(labelX,labelY,labelWidth,labelHeight);
       ctx.globalAlpha=1;
       ctx.fillStyle="#ffffff";
@@ -1984,6 +2401,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     if(!dataUrl||busy)return;
     faceIdentificationRun++;
     faceMatchResults=[];
+    groupAnalysisMatches=null;
+    if(window.FaceSearchGroupUI)window.FaceSearchGroupUI.reset();
     identificationInProgress=false;
     faceLinkOverlay.replaceChildren();
     identifyFacesButton.textContent="Определить";
@@ -1999,13 +2418,31 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       detected=true;
       setStatus("Обнаружено лиц: "+faces.length+". "+(autoSearch?"Запускаю поиск по первому лицу...":"Выберите рамку лица и запустите поиск."));
     }catch(error){setStatus(error.message||String(error),true);queryId="";faces=[];selectedFace=-1;}
-    finally{setBusy(false);}
+    finally{
+      if(window.FaceSearchGroupUI)window.FaceSearchGroupUI.sync();
+      setBusy(false);
+    }
     if(detected&&autoSearch)await searchSimilar();
   }
   detectButton.addEventListener("click",function(){detectFaces(false);});
 
   async function identifyAllFaces(){
     if(!queryId||!faces.length||busy||identificationInProgress)return;
+    if(groupAnalysisMatches&&groupAnalysisMatches.queryId===queryId){
+      faceIdentificationRun++;
+      faceMatchResults=groupAnalysisMatches.matches.map(function(match){
+        return match?Object.assign({},match):null;
+      });
+      drawFaces();
+      const identified=faceMatchResults.filter(function(item){
+        return item&&item.name&&item.name!=="Нет совпадения";
+      }).length;
+      setStatus(
+        "Использованы имена из выбранного варианта группового анализа: "+
+        identified+" из "+faces.length+" лиц. Повторный поиск не выполнялся."
+      );
+      return;
+    }
     const runId=++faceIdentificationRun;
     const activeQueryId=queryId;
     const faceCount=faces.length;
@@ -2372,8 +2809,47 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     event.preventDefault();
     searchSimilar();
   });
+  window.FaceSearchGroupCore={
+    getQueryId:function(){return queryId;},
+    getFaceCount:function(){return faces.length;},
+    isBusy:function(){return busy;},
+    postJson:postJson,
+    setStatus:setStatus,
+    setGroupAnalysisMatches:function(resultQueryId,profiles){
+      if(!resultQueryId||resultQueryId!==queryId){
+        groupAnalysisMatches=null;
+        faceMatchResults=[];
+        drawFaces();
+        return;
+      }
+      const mapped=Array(faces.length).fill(null);
+      (Array.isArray(profiles)?profiles:[]).forEach(function(profile){
+        const index=Number(profile&&profile.face_index);
+        if(!Number.isInteger(index)||index<0||index>=mapped.length)return;
+        const queryGender=profile&&profile.query_gender&&typeof profile.query_gender==="object"
+          ?profile.query_gender:{};
+        const unmatched=Boolean(profile&&profile.unmatched);
+        mapped[index]={
+          name:unmatched?"Нет совпадения":String(profile.name||"").trim(),
+          profileUrl:unmatched?"":safeLink(profile.profile_url||""),
+          similarity:Number(profile&&profile.similarity||0),
+          gender:String(queryGender.gender||"unknown"),
+          genderConfidence:Number(queryGender.confidence||0),
+          unmatched:unmatched
+        };
+      });
+      groupAnalysisMatches={queryId:resultQueryId,matches:mapped};
+      // Обновляем подписи сразу после выбора варианта группы; кнопка «Определить»
+      // затем лишь подтверждает эти имена и не делает отдельный top_k=1 поиск.
+      faceMatchResults=mapped.map(function(match){
+        return match?Object.assign({},match):null;
+      });
+      drawFaces();
+    }
+  };
 })();
 </script>
+<script src="/group-analysis.js"></script>
 </body>
 </html>
 """
@@ -2452,6 +2928,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/":
+            group_defaults = _saved_group_analysis_options()
             page = PAGE_TEMPLATE.replace(
                 "__DEFAULT_TOP_K__", str(DEFAULT_TOP_K)
             ).replace(
@@ -2462,8 +2939,34 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 "__CREATE_CROPS_ON_HTML__", "true" if CREATE_CROPS_ON_HTML else "false"
             ).replace(
                 "__DEFAULT_THEME__", DEFAULT_THEME
+            ).replace(
+                "__GROUP_MIN_SIMILARITY__", str(group_defaults["min_similarity"])
+            ).replace(
+                "__GROUP_CANDIDATES_PER_FACE__", str(group_defaults["candidates_per_face"])
+            ).replace(
+                "__GROUP_FRIEND_WEIGHT__", str(group_defaults["friend_weight"])
+            ).replace(
+                "__GROUP_COMMON_FRIEND_WEIGHT__", str(group_defaults["common_friend_weight"])
+            ).replace(
+                "__GROUP_CITY_WEIGHT__", str(group_defaults["city_weight"])
+            ).replace(
+                "__GROUP_CHECK_VK_FRIENDS__", "checked" if group_defaults["check_vk_friends"] else ""
+            ).replace(
+                "__GROUP_CHECK_GENDER__", "checked" if group_defaults["check_gender"] else ""
+            ).replace(
+                "__GROUP_GENDER_WEIGHT__", str(group_defaults["gender_weight"])
+            ).replace(
+                "__GROUP_PROFILE_GENDER_WEIGHT__", str(group_defaults["profile_gender_weight"])
             )
             self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+            return
+        if path == "/group-analysis.js":
+            try:
+                script = (APP_DIR / "group_analysis_ui.js").read_bytes()
+            except OSError:
+                self._send(404, b"// group analysis UI is unavailable", "application/javascript; charset=utf-8")
+            else:
+                self._send(200, script, "application/javascript; charset=utf-8")
             return
         if path == "/favicon.ico":
             self._send(204, b"", "image/x-icon")
@@ -2475,6 +2978,34 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             query = parse_qs(urlparse(self.path).query)
             use_crop = query.get("crop", ["1"])[0] != "0"
             self._serve_face_image(path, use_crop=use_crop)
+            return
+        if path == "/api/group-analysis/status":
+            query = parse_qs(urlparse(self.path).query)
+            job_id = str(query.get("job_id", [""])[0] or "")
+            query_id = str(query.get("query_id", [""])[0] or "")
+            if not job_id or len(job_id) > 128:
+                self._json(400, {"error": "Не указан идентификатор задачи анализа."})
+                return
+            with GROUP_ANALYSIS_JOBS_LOCK:
+                job = GROUP_ANALYSIS_JOBS.get(job_id)
+                if job is None or not secrets.compare_digest(str(job.get("query_id") or ""), query_id):
+                    job = None
+                else:
+                    payload = {
+                        "ok": True,
+                        "job_id": job_id,
+                        "state": job.get("state"),
+                        "progress": int(job.get("progress") or 0),
+                        "message": str(job.get("message") or ""),
+                    }
+                    if job.get("state") == "done":
+                        payload["result"] = job.get("result")
+                    if job.get("state") == "error":
+                        payload["error"] = str(job.get("error") or "Ошибка группового анализа.")
+            if job is None:
+                self._json(404, {"error": "Задача анализа не найдена или сессия не совпадает."})
+                return
+            self._json(200, payload)
             return
         if path == "/api/status":
             payload = _index_status_payload()
@@ -2491,7 +3022,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/api/detect", "/api/search", "/api/load-image"):
+        if path not in ("/api/detect", "/api/search", "/api/load-image", "/api/group-analysis/start"):
             self._json(404, {"error": "API-метод не найден."})
             return
         if not API_SEMAPHORE.acquire(timeout=15):
@@ -2505,6 +3036,9 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 return
             except ValueError as exc:
                 self._json(400, {"error": str(exc)})
+                return
+            if path == "/api/group-analysis/start":
+                self._start_group_analysis(data)
                 return
             if path == "/api/load-image":
                 try:
@@ -2524,6 +3058,271 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         finally:
             API_SEMAPHORE.release()
 
+    def _start_group_analysis(self, data: dict):
+        """Запускает анализ в отдельном потоке; HTTP-запрос сразу возвращает job_id."""
+        token = str(data.get("query_id") or "")
+        if not token or len(token) > 128:
+            raise ValueError("Сессия запроса не найдена. Загрузите изображение ещё раз.")
+        with QUERY_SESSIONS_LOCK:
+            query = QUERY_SESSIONS.get(token)
+            if query is None or time.monotonic() - query["created"] > QUERY_TTL_SECONDS:
+                QUERY_SESSIONS.pop(token, None)
+                raise ValueError("Сессия истекла. Определите лица на фотографии повторно.")
+            embeddings = [embedding.copy() for embedding in query.get("embeddings", [])]
+            query_genders = [dict(value) for value in query.get("gender_predictions", [])]
+        if len(embeddings) < 2:
+            raise ValueError("Для группового анализа нужно обнаружить не менее двух лиц.")
+
+        raw_options = data.get("options")
+        if not isinstance(raw_options, dict) or not raw_options:
+            raw_options = _saved_group_analysis_options()
+        options = group_analysis.normalize_options(raw_options)
+        with GROUP_ANALYSIS_JOBS_LOCK:
+            for existing_id, job in GROUP_ANALYSIS_JOBS.items():
+                if (
+                    job.get("query_id") == token
+                    and job.get("state") in ("queued", "running")
+                ):
+                    self._json(409, {
+                        "error": "Для этой фотографии групповой анализ уже выполняется.",
+                        "job_id": existing_id,
+                    })
+                    return
+            active_jobs = sum(
+                1 for job in GROUP_ANALYSIS_JOBS.values()
+                if job.get("state") in ("queued", "running")
+            )
+            if active_jobs >= MAX_ACTIVE_GROUP_ANALYSES:
+                self._json(429, {
+                    "error": (
+                        "Уже выполняются две задачи группового анализа. "
+                        "Повторите запуск после завершения одной из них."
+                    )
+                })
+                return
+            job_id = secrets.token_urlsafe(18)
+            GROUP_ANALYSIS_JOBS[job_id] = {
+                "created": time.monotonic(),
+                "query_id": token,
+                "state": "queued",
+                "progress": 0,
+                "message": "Задача поставлена в очередь.",
+                "result": None,
+                "error": "",
+            }
+        _prune_group_analysis_jobs()
+
+        def update_job(progress, message, state=None):
+            with GROUP_ANALYSIS_JOBS_LOCK:
+                job = GROUP_ANALYSIS_JOBS.get(job_id)
+                if job is None:
+                    return
+                job["progress"] = max(0, min(100, int(progress)))
+                job["message"] = str(message or "")
+                if state:
+                    job["state"] = state
+
+        def worker():
+            update_job(1, "Подготовка поисковых кандидатов…", "running")
+            connection = None
+            try:
+                candidate_count = int(options["candidates_per_face"])
+                # Поиск FAISS сначала возвращает отдельные строки лиц, включая локальные
+                # изображения без интернет-профиля. Расширяем top-k, пока не наберём
+                # требуемое число уникальных интернет-профилей или пока не закончатся
+                # результаты выше минимального порога сходства.
+                initial_search_top_k = min(500, max(candidate_count * 40, candidate_count + 50))
+                max_search_top_k = min(10000, max(initial_search_top_k, candidate_count * 400))
+                candidates_by_face = []
+
+                def online_profile_count(search_results):
+                    unique_profiles = set()
+                    for result in search_results:
+                        raw = {}
+                        try:
+                            decoded = json.loads(str(result.get("raw_json") or ""))
+                            if isinstance(decoded, dict):
+                                raw = decoded
+                        except (TypeError, ValueError):
+                            pass
+                        url = str(result.get("profile_url") or raw.get("url_source") or "").strip()
+                        try:
+                            user_id = int(result.get("vk_user_id") or 0)
+                        except (TypeError, ValueError):
+                            user_id = 0
+                        if user_id > 0:
+                            unique_profiles.add("vk:" + str(user_id))
+                            continue
+                        if not url:
+                            continue
+                        try:
+                            parsed = urlparse(url if "://" in url else "https://" + url)
+                            host = (parsed.hostname or "").strip(".").lower()
+                            if parsed.scheme.lower() not in ("http", "https") or not host:
+                                continue
+                            if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+                                continue
+                        except (TypeError, ValueError):
+                            continue
+                        try:
+                            profile_id = int(result.get("profile_id") or 0)
+                        except (TypeError, ValueError):
+                            profile_id = 0
+                        if profile_id > 0:
+                            unique_profiles.add("profile:" + str(profile_id))
+                        else:
+                            unique_profiles.add((host + parsed.path.rstrip("/")).lower())
+                    return len(unique_profiles)
+                connection = _open_connection()
+                for face_index, embedding in enumerate(embeddings):
+                    update_job(
+                        5 + int(25 * face_index / max(1, len(embeddings))),
+                        "Поиск кандидатов для лица " + str(face_index + 1)
+                        + " / " + str(len(embeddings)) + "…",
+                    )
+                    # Расширение предыдущего лица не должно замедлять следующие лица.
+                    search_top_k = initial_search_top_k
+                    while True:
+                        with _INDEX_USE_LOCK.read_lock():
+                            candidates = face_search.search_embedding(
+                                connection,
+                                embedding,
+                                top_k=search_top_k,
+                                min_similarity=float(options["min_similarity"]) / 100.0,
+                                backend=BACKEND,
+                            )
+                        online_count = online_profile_count(candidates)
+                        if (
+                            online_count >= candidate_count
+                            or len(candidates) < search_top_k
+                            or search_top_k >= max_search_top_k
+                        ):
+                            break
+                        search_top_k = min(max_search_top_k, search_top_k * 2)
+                        update_job(
+                            5 + int(25 * face_index / max(1, len(embeddings))),
+                            "Для лица " + str(face_index + 1)
+                            + ": расширяю поиск до " + str(search_top_k)
+                            + " результатов, интернет-профилей пока " + str(online_count) + "…",
+                        )
+                    face_candidates = []
+                    for candidate in candidates:
+                        try:
+                            score = max(0.0, min(100.0, float(candidate.get("score") or 0.0) * 100.0))
+                            face_id = int(candidate.get("face_id") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        raw_meta = {}
+                        try:
+                            raw_value = json.loads(str(candidate.get("raw_json") or ""))
+                            if isinstance(raw_value, dict):
+                                raw_meta = raw_value
+                        except (TypeError, ValueError):
+                            pass
+                        vk_id = candidate.get("vk_user_id")
+                        try:
+                            vk_id = int(vk_id) if vk_id is not None and int(vk_id) > 0 else None
+                        except (TypeError, ValueError):
+                            vk_id = None
+                        profile_sex = candidate.get("sex")
+                        if profile_sex in (None, "", 0, "0"):
+                            profile_sources = [raw_meta]
+                            raw_info = raw_meta.get("info")
+                            if isinstance(raw_info, dict):
+                                profile_sources.append(raw_info)
+                            for profile_source in profile_sources:
+                                for field_name in ("sex", "gender", "Пол", "пол", "profile_gender"):
+                                    value = profile_source.get(field_name)
+                                    if value not in (None, "") and str(value).strip() not in ("", "0"):
+                                        profile_sex = value
+                                        break
+                                if profile_sex not in (None, "", 0, "0"):
+                                    break
+                        profile_url = str(
+                            candidate.get("profile_url")
+                            or raw_meta.get("url_source")
+                            or ""
+                        ).strip()
+                        if not profile_url and vk_id:
+                            profile_url = "https://vk.com/id" + str(vk_id)
+                        full_name = " ".join(
+                            part for part in (
+                                str(candidate.get("first_name") or "").strip(),
+                                str(candidate.get("last_name") or "").strip(),
+                            ) if part
+                        ).strip()
+                        if not full_name:
+                            full_name = str(
+                                candidate.get("screen_name")
+                                or candidate.get("domain")
+                                or profile_url
+                                or ("Профиль #" + str(face_id))
+                            ).strip()
+                        face_candidates.append({
+                            "profile_id": candidate.get("profile_id"),
+                            "face_id": face_id,
+                            "name": full_name,
+                            "profile_url": profile_url,
+                            "source_url": str(candidate.get("source_url") or ""),
+                            "city": str(candidate.get("city_title") or "").strip(),
+                            "path": str(candidate.get("path") or ""),
+                            "similarity": score,
+                            "vk_user_id": vk_id,
+                            "profile_sex": profile_sex,
+                        })
+                    candidates_by_face.append(face_candidates)
+                    update_job(
+                        5 + int(25 * (face_index + 1) / max(1, len(embeddings))),
+                        "Поиск кандидатов завершён для лица "
+                        + str(face_index + 1) + " / " + str(len(embeddings)),
+                    )
+                connection.close()
+                connection = None
+
+                def progress_callback(percent, message):
+                    update_job(30 + int(max(0, min(100, int(percent))) * 0.7), message)
+
+                result = group_analysis.analyze_group(
+                    candidates_by_face,
+                    options,
+                    APP_DIR,
+                    progress=progress_callback,
+                    query_genders=query_genders,
+                    gender_classifier=_classify_candidate_face_gender,
+                )
+                # Сначала публикуем результат и только затем помечаем задачу завершённой,
+                # чтобы клиент не успел получить state=done без поля result.
+                with GROUP_ANALYSIS_JOBS_LOCK:
+                    job = GROUP_ANALYSIS_JOBS.get(job_id)
+                    if job is not None:
+                        job["result"] = result
+                        job["progress"] = 100
+                        job["message"] = "Групповой анализ завершён."
+                        job["state"] = "done"
+            except Exception as exc:
+                message = str(exc).strip() or exc.__class__.__name__
+                print("[HTTP][GROUP-ANALYSIS][ERROR] " + message, flush=True)
+                with GROUP_ANALYSIS_JOBS_LOCK:
+                    job = GROUP_ANALYSIS_JOBS.get(job_id)
+                    if job is not None:
+                        job["error"] = message[:1000]
+                        job["progress"] = 100
+                        job["message"] = "Анализ завершился с ошибкой."
+                        job["state"] = "error"
+            finally:
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except Exception:
+                        pass
+
+        threading.Thread(
+            target=worker,
+            name="FaceSearch-GroupAnalysis-" + job_id[:8],
+            daemon=True,
+        ).start()
+        self._json(202, {"ok": True, "job_id": job_id, "state": "queued"})
+
     def _detect(self, data: dict):
         image = _decode_image(data.get("image", ""))
         found = face_search._detect_faces_with_padding(
@@ -2531,6 +3330,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         )
         faces = []
         embeddings = []
+        gender_predictions = []
         for face in found:
             if float(face.det_score) < face_search.DET_THRESHOLD:
                 continue
@@ -2540,11 +3340,15 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             if float(face_search.np.linalg.norm(embedding)) <= 0:
                 continue
             bbox = [float(value) for value in face.bbox.tolist()]
+            gender_prediction = _predict_face_gender(image, face)
+            gender_predictions.append(gender_prediction)
             embeddings.append(embedding)
             faces.append({
                 "index": len(faces),
                 "bbox": bbox,
                 "confidence": float(face.det_score),
+                "gender": gender_prediction.get("gender", "unknown"),
+                "gender_confidence": float(gender_prediction.get("confidence") or 0.0),
             })
 
         token = secrets.token_urlsafe(24)
@@ -2552,6 +3356,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             QUERY_SESSIONS[token] = {
                 "created": time.monotonic(),
                 "embeddings": embeddings,
+                "gender_predictions": gender_predictions,
             }
         _prune_sessions()
         self._json(200, {"query_id": token, "faces": faces})

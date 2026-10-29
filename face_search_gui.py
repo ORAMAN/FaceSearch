@@ -31,6 +31,7 @@ import hashlib
 import html
 import importlib
 import json
+import math
 import os
 import shutil
 import ssl
@@ -62,6 +63,9 @@ _LOADER_MODULE_DIR = str(Path(__file__).resolve().parent / "loaders")
 if _LOADER_MODULE_DIR not in sys.path:
     sys.path.insert(0, _LOADER_MODULE_DIR)
 from edit_shortcuts import install_edit_shortcuts
+
+_TK_GROUP_GENDER_CACHE: dict[int, dict[str, Any]] = {}
+_TK_GROUP_GENDER_CACHE_LOCK = threading.RLock()
 
 # Необязательная поддержка drag-and-drop. Устанавливается через requirements.txt.
 # Если расширение TkDND недоступно, приложение продолжит запускаться без DnD.
@@ -187,6 +191,7 @@ from facesearch.card_text_filter import (
     candidate_count_for_text_filter,
     filter_results_by_card_text,
 )
+from facesearch import group_analysis
 from facesearch.indexing.cleanup import image_record_has_recoverable_source
 from facesearch.indexing.embeddings import embedding_blob_to_view
 from facesearch.database.schema import (
@@ -4920,6 +4925,15 @@ class FaceSearchGUI:
                 "top_k": int(self.topk_var.get()),
                 "min_similarity": float(self.min_similarity_var.get()),
                 "description_filter": str(self.description_filter_var.get()),
+                "group_min_similarity": float(self.gui_settings.get("group_min_similarity", 43.0)),
+                "group_candidates_per_face": int(self.gui_settings.get("group_candidates_per_face", 5)),
+                "group_friend_weight": float(self.gui_settings.get("group_friend_weight", 8.0)),
+                "group_common_friend_weight": float(self.gui_settings.get("group_common_friend_weight", 2.0)),
+                "group_city_weight": float(self.gui_settings.get("group_city_weight", 1.5)),
+                "group_check_vk_friends": bool(self.gui_settings.get("group_check_vk_friends", True)),
+                "group_gender_weight": float(self.gui_settings.get("group_gender_weight", 4.0)),
+                "group_profile_gender_weight": float(self.gui_settings.get("group_profile_gender_weight", 16.0)),
+                "group_check_gender": bool(self.gui_settings.get("group_check_gender", True)),
                 "collapsible_sections": {
                     key: bool(group.get("expanded", True))
                     for key, group in getattr(self, "_collapsible_groups", {}).items()
@@ -5825,6 +5839,124 @@ class FaceSearchGUI:
         self._render_collapsible_group(key)
         self._schedule_settings_save()
 
+
+    def _open_group_analysis_settings(self):
+        """Открывает постоянные параметры группового анализа, используемые server_http.py."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Настройки группового анализа")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        try:
+            dialog.grab_set()
+        except tk.TclError:
+            pass
+
+        frame = ttk.Frame(dialog, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(
+            frame,
+            text=(
+                "Общие параметры группового анализа для Tkinter и server_http.py. "
+                "Они сохраняются в settings.xml и загружаются сервером при открытии или обновлении веб-страницы."
+            ),
+            style="Section.TLabel",
+            wraplength=430,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+
+        initial = {
+            "group_min_similarity": self.gui_settings.get("group_min_similarity", 43.0),
+            "group_candidates_per_face": self.gui_settings.get("group_candidates_per_face", 5),
+            "group_friend_weight": self.gui_settings.get("group_friend_weight", 8.0),
+            "group_common_friend_weight": self.gui_settings.get("group_common_friend_weight", 2.0),
+            "group_city_weight": self.gui_settings.get("group_city_weight", 1.5),
+            "group_check_vk_friends": self.gui_settings.get("group_check_vk_friends", True),
+            "group_gender_weight": self.gui_settings.get("group_gender_weight", 4.0),
+            "group_profile_gender_weight": self.gui_settings.get("group_profile_gender_weight", 16.0),
+            "group_check_gender": self.gui_settings.get("group_check_gender", True),
+        }
+        variables = {
+            "group_min_similarity": tk.DoubleVar(value=float(initial["group_min_similarity"])),
+            "group_candidates_per_face": tk.IntVar(value=int(initial["group_candidates_per_face"])),
+            "group_friend_weight": tk.DoubleVar(value=float(initial["group_friend_weight"])),
+            "group_common_friend_weight": tk.DoubleVar(value=float(initial["group_common_friend_weight"])),
+            "group_city_weight": tk.DoubleVar(value=float(initial["group_city_weight"])),
+            "group_check_vk_friends": tk.BooleanVar(value=bool(initial["group_check_vk_friends"])),
+            "group_gender_weight": tk.DoubleVar(value=float(initial["group_gender_weight"])),
+            "group_profile_gender_weight": tk.DoubleVar(value=float(initial["group_profile_gender_weight"])),
+            "group_check_gender": tk.BooleanVar(value=bool(initial["group_check_gender"])),
+        }
+        fields = [
+            ("Минимальное сходство кандидата, %", "group_min_similarity", 0, 100, 1),
+            ("Кандидатов на одно лицо", "group_candidates_per_face", 1, 10, 1),
+            ("Вес дружбы между профилями", "group_friend_weight", 0, 20, 0.5),
+            ("Вес общих друзей", "group_common_friend_weight", 0, 10, 0.5),
+            ("Штраф за пол по фото", "group_gender_weight", 0, 10, 0.5),
+            ("Штраф за несовпадение пола профиля", "group_profile_gender_weight", 0, 30, 1),
+            ("Вес совпадения города", "group_city_weight", 0, 10, 0.5),
+        ]
+        for row_index, (label, key, minimum, maximum, step) in enumerate(fields, start=1):
+            ttk.Label(frame, text=label).grid(
+                row=row_index, column=0, sticky="w", padx=(0, 16), pady=4
+            )
+            ttk.Spinbox(
+                frame, from_=minimum, to=maximum, increment=step,
+                textvariable=variables[key], width=10,
+            ).grid(row=row_index, column=1, sticky="e", pady=4)
+
+        ttk.Checkbutton(
+            frame,
+            text="Проверять друзей VK (если доступен токен)",
+            variable=variables["group_check_vk_friends"],
+        ).grid(row=len(fields) + 1, column=0, columnspan=2, sticky="w", pady=(10, 4))
+        ttk.Checkbutton(
+            frame,
+            text="Учитывать пол лица и указанный пол профиля",
+            variable=variables["group_check_gender"],
+        ).grid(row=len(fields) + 2, column=0, columnspan=2, sticky="w", pady=(3, 4))
+        ttk.Label(
+            frame,
+            text=(
+                "В браузере эти значения можно временно менять для текущего сеанса. "
+                "Здесь задаются только постоянные значения по умолчанию. "
+                "Весовые коэффициенты — эвристика, а не вероятность правильного совпадения."
+            ),
+            style="Muted.TLabel",
+            wraplength=430,
+            justify="left",
+        ).grid(row=len(fields) + 3, column=0, columnspan=2, sticky="w", pady=(7, 12))
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=len(fields) + 4, column=0, columnspan=2, sticky="e")
+        ttk.Button(buttons, text="Отмена", command=dialog.destroy).pack(side="right", padx=(8, 0))
+
+        def save():
+            try:
+                values = {key: variable.get() for key, variable in variables.items()}
+                values["group_min_similarity"] = max(0.0, min(100.0, float(values["group_min_similarity"])))
+                values["group_candidates_per_face"] = max(1, min(10, int(values["group_candidates_per_face"])))
+                values["group_friend_weight"] = max(0.0, min(20.0, float(values["group_friend_weight"])))
+                values["group_common_friend_weight"] = max(0.0, min(10.0, float(values["group_common_friend_weight"])))
+                values["group_city_weight"] = max(0.0, min(10.0, float(values["group_city_weight"])))
+                values["group_check_vk_friends"] = bool(values["group_check_vk_friends"])
+                values["group_gender_weight"] = max(0.0, min(10.0, float(values["group_gender_weight"])))
+                values["group_profile_gender_weight"] = max(0.0, min(30.0, float(values["group_profile_gender_weight"])))
+                values["group_check_gender"] = bool(values["group_check_gender"])
+            except (tk.TclError, TypeError, ValueError) as exc:
+                messagebox.showwarning(
+                    "Параметры группового анализа",
+                    f"Проверьте значения параметров.\n{exc}",
+                    parent=dialog,
+                )
+                return
+            self.gui_settings.update(values)
+            self._schedule_settings_save()
+            self.status_var.set("Параметры группового анализа сохранены в settings.xml.")
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Сохранить", style="Primary.TButton", command=save).pack(side="right")
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.bind("<Return>", lambda _event: save())
+
     def _build_ui(self):
         """Создаёт современную компоновку интерфейса, не меняя обработчики приложения."""
         self.style = ttk.Style(self.root)
@@ -6210,6 +6342,16 @@ class FaceSearchGUI:
             left, text="⌕  Искать выбранное лицо", style="Primary.TButton", command=self.start_search,
         )
         self.search_btn.pack(side="bottom", fill="x", pady=(6, 0))
+        self.group_analysis_settings_btn = ttk.Button(
+            left, text="⚙  Параметры группового анализа",
+            command=self._open_group_analysis_settings,
+        )
+        self.group_analysis_settings_btn.pack(side="bottom", fill="x", pady=(6, 0))
+        self.group_analysis_btn = ttk.Button(
+            left, text="◎  Анализ связей группы",
+            command=self.start_group_analysis, state="disabled",
+        )
+        self.group_analysis_btn.pack(side="bottom", fill="x", pady=(6, 0))
 
         controls = ttk.Frame(left, style="Surface.TFrame")
         controls.pack(side="bottom", fill="x", pady=(0, 8))
@@ -6595,6 +6737,7 @@ class FaceSearchGUI:
                 pass
 
         self._update_worker_control_state()
+        self._update_group_analysis_state()
 
 
     def _show_scan_control_status(self, message: str):
@@ -8377,6 +8520,7 @@ class FaceSearchGUI:
                 self.status_var.set(
                     "Лица не найдены."
                 )
+                self._update_group_analysis_state()
 
         except Exception as e:
             messagebox.showerror(
@@ -8386,6 +8530,7 @@ class FaceSearchGUI:
             self.status_var.set(
                 "Ошибка определения лиц."
             )
+            self._update_group_analysis_state()
 
     # --------------------------------------------------------
     # Preview
@@ -8607,10 +8752,722 @@ class FaceSearchGUI:
                 else "normal"
             )
         )
+        self._update_group_analysis_state()
+
+    def _update_group_analysis_state(self):
+        button = getattr(self, "group_analysis_btn", None)
+        if button is None:
+            return
+        valid_count = sum(
+            1 for face in (getattr(self, "query_faces", []) or [])
+            if float(getattr(face, "det_score", 0.0)) >= DET_THRESHOLD
+            and getattr(face, "normed_embedding", None) is not None
+        )
+        ready = (
+            valid_count >= 2
+            and not bool(getattr(self, "busy", False))
+            and not bool(getattr(self, "startup_db_pending", True))
+            and not bool(getattr(self, "startup_db_failed", False))
+            and Path(INDEX_FILE).is_file()
+        )
+        try:
+            button.configure(state="normal" if ready else "disabled")
+        except tk.TclError:
+            pass
 
     # --------------------------------------------------------
     # FAISS / Search
     # --------------------------------------------------------
+
+
+    def _group_analysis_options(self) -> dict[str, Any]:
+        """Returns the canonical group-analysis parameters saved in settings.xml."""
+        settings = self.gui_settings
+        return group_analysis.normalize_options({
+            "min_similarity": settings.get("group_min_similarity", 43.0),
+            "candidates_per_face": settings.get("group_candidates_per_face", 5),
+            "friend_weight": settings.get("group_friend_weight", 8.0),
+            "common_friend_weight": settings.get("group_common_friend_weight", 2.0),
+            "city_weight": settings.get("group_city_weight", 1.5),
+            "check_vk_friends": settings.get("group_check_vk_friends", True),
+            "check_gender": settings.get("group_check_gender", True),
+            "gender_weight": settings.get("group_gender_weight", 4.0),
+            "profile_gender_weight": settings.get("group_profile_gender_weight", 16.0),
+        })
+
+    def start_group_analysis(self):
+        """Starts a background group-analysis job for every valid face in the query image."""
+        if not self._startup_ready_or_warn("групповой анализ"):
+            return
+        if self.busy:
+            return
+        if not Path(INDEX_FILE).is_file():
+            messagebox.showwarning(
+                "Групповой анализ",
+                "FAISS-индекс отсутствует. Сначала выполните сканирование и создание индекса.",
+                parent=self.root,
+            )
+            return
+        if self.query_image is None:
+            messagebox.showwarning(
+                "Групповой анализ",
+                "Сначала выберите фотографию и определите лица.",
+                parent=self.root,
+            )
+            return
+
+        face_indices = [
+            index for index, face in enumerate(self.query_faces)
+            if float(getattr(face, "det_score", 0.0)) >= DET_THRESHOLD
+            and getattr(face, "normed_embedding", None) is not None
+        ]
+        if len(face_indices) < 2:
+            messagebox.showinfo(
+                "Групповой анализ",
+                "Для группового анализа нужно обнаружить не менее двух лиц.",
+                parent=self.root,
+            )
+            return
+
+        embeddings = []
+        for face_index in face_indices:
+            vector = np.asarray(
+                self.query_faces[face_index].normed_embedding, dtype=np.float32
+            ).copy()
+            norm = float(np.linalg.norm(vector))
+            if not math.isfinite(norm) or norm <= 0.0:
+                messagebox.showwarning(
+                    "Групповой анализ",
+                    "У одного из обнаруженных лиц некорректный embedding. Повторно определите лица.",
+                    parent=self.root,
+                )
+                return
+            embeddings.append(vector / norm)
+
+        profile_name = str(getattr(self, "connected_db_name", "") or self.active_db_name)
+        profile = next(
+            (dict(item) for item in self.db_profiles
+             if str(item.get("name") or "") == profile_name),
+            dict(getattr(self, "startup_profile", {}) or {}),
+        )
+        if not profile:
+            messagebox.showwarning(
+                "Групповой анализ", "Не удалось определить активный профиль базы данных.",
+                parent=self.root,
+            )
+            return
+
+        source_image = self.query_image.copy()
+        source_faces = [self.query_faces[index] for index in face_indices]
+        options = self._group_analysis_options()
+        backend = str(self._backend_runtime or BACKEND_GPU)
+
+        self.operation = "group_analysis"
+        self._set_busy(True)
+        self.progress.stop()
+        self.progress.configure(mode="determinate", maximum=100, value=0)
+        self.status_var.set("Групповой анализ: поиск интернет-профилей для обнаруженных лиц…")
+        self.progress.configure(value=1)
+        threading.Thread(
+            target=self._group_analysis_worker,
+            args=(embeddings, face_indices, source_faces, source_image, profile, options, backend),
+            daemon=True,
+            name="tk-group-analysis",
+        ).start()
+
+    def _group_analysis_worker(
+        self, embeddings, face_indices, source_faces, source_image, profile, options, backend
+    ):
+        """Runs FAISS lookups and the shared group-scoring engine outside the Tk event loop."""
+        connection = None
+
+        def report(percent, message):
+            self.events.put((
+                "group_analysis_progress",
+                max(0, min(100, int(percent))),
+                str(message or ""),
+            ))
+
+        try:
+            if not profile:
+                raise RuntimeError("Не удалось определить активный профиль базы данных.")
+            if not Path(INDEX_FILE).is_file():
+                raise FileNotFoundError("FAISS-индекс отсутствует для активного профиля.")
+
+            connection = create_database_for_profile(
+                profile,
+                maintenance=False,
+                create_if_missing=False,
+                activate_storage=False,
+                initialize=False,
+                check_crop_migration=False,
+            )
+            candidate_limit = int(options["candidates_per_face"])
+            initial_top_k = min(500, max(candidate_limit * 40, candidate_limit + 50))
+            max_top_k = min(10000, max(initial_top_k, candidate_limit * 400))
+            minimum = float(options["min_similarity"]) / 100.0
+            candidates_by_face: list[list[dict[str, Any]]] = []
+
+            def parse_metadata(row):
+                try:
+                    decoded = json.loads(str(row.get("raw_json") or ""))
+                    return decoded if isinstance(decoded, dict) else {}
+                except (TypeError, ValueError):
+                    return {}
+
+            def online_profile_count(rows):
+                unique = set()
+                for row in rows:
+                    meta = parse_metadata(row)
+                    try:
+                        vk_id = int(row.get("vk_user_id") or 0)
+                    except (TypeError, ValueError):
+                        vk_id = 0
+                    if vk_id > 0:
+                        unique.add("vk:" + str(vk_id))
+                        continue
+                    url = str(row.get("profile_url") or meta.get("url_source") or "").strip()
+                    if not url:
+                        continue
+                    try:
+                        parsed = urlparse(url if "://" in url else "https://" + url)
+                        host = (parsed.hostname or "").strip(".").lower()
+                        if parsed.scheme.lower() not in ("http", "https") or not host:
+                            continue
+                        if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                    try:
+                        profile_id = int(row.get("profile_id") or 0)
+                    except (TypeError, ValueError):
+                        profile_id = 0
+                    unique.add(
+                        "profile:" + str(profile_id)
+                        if profile_id > 0
+                        else (host + parsed.path.rstrip("/")).lower()
+                    )
+                return len(unique)
+
+            for compact_index, embedding in enumerate(embeddings):
+                original_face_number = face_indices[compact_index] + 1
+                report(
+                    2 + int(22 * compact_index / max(1, len(embeddings))),
+                    "Поиск интернет-профилей для лица "
+                    + str(original_face_number) + " ("
+                    + str(compact_index + 1) + "/" + str(len(embeddings)) + ")…",
+                )
+                top_k = initial_top_k
+                while True:
+                    # _INDEX_USE_LOCK принадлежит только server_http.py.
+                    # В Tkinter используем тот же путь поиска, что и обычная кнопка поиска:
+                    # search_embedding сам выбирает CPU/GPU и применяет внутренние блокировки
+                    # конкретных FAISS-кэшей, поэтому веб-серверный lock здесь не нужен.
+                    rows = search_embedding(
+                        connection,
+                        embedding,
+                        top_k=top_k,
+                        min_similarity=minimum,
+                        backend=backend,
+                    )
+                    online_count = online_profile_count(rows)
+                    if (
+                        online_count >= candidate_limit
+                        or len(rows) < top_k
+                        or top_k >= max_top_k
+                    ):
+                        break
+                    top_k = min(max_top_k, top_k * 2)
+                    report(
+                        2 + int(22 * compact_index / max(1, len(embeddings))),
+                        "Для лица " + str(original_face_number)
+                        + ": расширяю поиск до " + str(top_k)
+                        + " строк; уникальных интернет-профилей найдено " + str(online_count) + "…",
+                    )
+
+                normalized = []
+                for row in rows:
+                    try:
+                        face_id = int(row.get("face_id") or 0)
+                        similarity = max(
+                            0.0, min(100.0, float(row.get("score") or 0.0) * 100.0)
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    meta = parse_metadata(row)
+                    try:
+                        vk_id = int(row.get("vk_user_id") or 0)
+                        vk_id = vk_id if vk_id > 0 else None
+                    except (TypeError, ValueError):
+                        vk_id = None
+
+                    profile_sex = row.get("sex")
+                    if profile_sex in (None, "", 0, "0"):
+                        raw_info = meta.get("info")
+                        sources = [meta, raw_info if isinstance(raw_info, dict) else {}]
+                        for source in sources:
+                            for field_name in ("sex", "gender", "Пол", "пол", "profile_gender"):
+                                value = source.get(field_name)
+                                if value not in (None, "") and str(value).strip() not in ("", "0"):
+                                    profile_sex = value
+                                    break
+                            if profile_sex not in (None, "", 0, "0"):
+                                break
+
+                    profile_url = str(
+                        row.get("profile_url") or meta.get("url_source") or ""
+                    ).strip()
+                    if not profile_url and vk_id:
+                        profile_url = "https://vk.com/id" + str(vk_id)
+                    name = " ".join(
+                        part for part in (
+                            str(row.get("first_name") or "").strip(),
+                            str(row.get("last_name") or "").strip(),
+                        ) if part
+                    ).strip()
+                    if not name:
+                        name = str(
+                            row.get("screen_name") or row.get("domain") or profile_url
+                            or ("Профиль #" + str(face_id))
+                        )
+
+                    normalized.append({
+                        "face_id": face_id,
+                        "profile_id": row.get("profile_id"),
+                        "name": name,
+                        "profile_url": profile_url,
+                        "url_source": str(meta.get("url_source") or ""),
+                        "source_url": str(row.get("source_url") or ""),
+                        "city": str(row.get("city_title") or "").strip(),
+                        "path": str(row.get("path") or ""),
+                        "similarity": similarity,
+                        "vk_user_id": vk_id,
+                        "profile_sex": profile_sex,
+                    })
+                candidates_by_face.append(normalized)
+                report(
+                    5 + int(25 * (compact_index + 1) / max(1, len(embeddings))),
+                    "Кандидаты для лица " + str(original_face_number)
+                    + " подготовлены: " + str(len(normalized)) + " результатов.",
+                )
+
+            query_genders = []
+            for index, face in enumerate(source_faces, start=1):
+                query_genders.append(self._predict_group_face_gender(source_image, face))
+                report(
+                    30 + int(8 * index / max(1, len(source_faces))),
+                    "Оценка пола исходных лиц: " + str(index) + "/" + str(len(source_faces)),
+                )
+
+            def classify_candidate(candidate):
+                return self._classify_group_candidate_gender(candidate, connection)
+
+            result = group_analysis.analyze_group(
+                candidates_by_face,
+                options,
+                Path(__file__).resolve().parent,
+                progress=lambda percent, message: report(
+                    38 + int(max(0, min(100, int(percent))) * 0.62), message
+                ),
+                query_genders=query_genders,
+                gender_classifier=classify_candidate,
+            )
+            result["source_face_indices"] = list(face_indices)
+            result["source_profile_name"] = str(profile.get("name") or "")
+            self.events.put(("group_analysis_done", result, list(face_indices)))
+        except Exception as exc:
+            self.events.put((
+                "group_analysis_error",
+                str(exc).strip() or exc.__class__.__name__,
+            ))
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+
+    def _predict_group_face_gender(self, image, face) -> dict[str, Any]:
+        """Predicts the visible gender class using the already-loaded InsightFace genderage model."""
+        unknown = {"gender": "unknown", "confidence": 0.0}
+        try:
+            models = getattr(self.app, "models", {}) if self.app is not None else {}
+            model = models.get("genderage") if isinstance(models, dict) else None
+            if model is None and isinstance(models, dict):
+                model = next(
+                    (value for value in models.values()
+                     if str(getattr(value, "taskname", "")).casefold() == "genderage"),
+                    None,
+                )
+            if model is None:
+                return unknown
+            from insightface.utils import face_align
+
+            bbox = np.asarray(face.bbox, dtype=np.float32)
+            width = float(bbox[2] - bbox[0])
+            height = float(bbox[3] - bbox[1])
+            if width < 2.0 or height < 2.0:
+                return unknown
+            center = (
+                (float(bbox[2]) + float(bbox[0])) / 2.0,
+                (float(bbox[3]) + float(bbox[1])) / 2.0,
+            )
+            input_side = int(model.input_size[0])
+            aligned, _transform = face_align.transform(
+                image, center, input_side,
+                input_side / (max(width, height) * 1.5), 0,
+            )
+            input_size = tuple(aligned.shape[0:2][::-1])
+            mean = float(model.input_mean)
+            std = float(model.input_std)
+            if std == 0:
+                return unknown
+            blob = cv2.dnn.blobFromImage(
+                aligned, 1.0 / std, input_size,
+                (mean, mean, mean), swapRB=True,
+            )
+            raw = model.session.run(
+                model.output_names, {model.input_name: blob}
+            )[0][0]
+            scores = np.asarray(raw[:2], dtype=np.float64)
+            if scores.shape[0] != 2 or not np.all(np.isfinite(scores)):
+                return unknown
+            total = float(scores.sum())
+            if np.all(scores >= 0.0) and np.all(scores <= 1.0) and 0.90 <= total <= 1.10:
+                probabilities = scores / max(total, 1e-12)
+            else:
+                shifted = scores - float(np.max(scores))
+                exponentials = np.exp(shifted)
+                probabilities = exponentials / max(float(exponentials.sum()), 1e-12)
+            label_index = int(np.argmax(probabilities))
+            return {
+                "gender": "female" if label_index == 0 else "male",
+                "confidence": max(0.0, min(1.0, float(probabilities[label_index]))),
+                "gender_model": "insightface_genderage",
+            }
+        except Exception:
+            raw_gender = getattr(face, "gender", None)
+            if raw_gender is None:
+                raw_gender = getattr(face, "sex", None)
+            if isinstance(raw_gender, bool):
+                label = "unknown"
+            elif isinstance(raw_gender, (int, float)):
+                label = "female" if int(raw_gender) == 0 else ("male" if int(raw_gender) == 1 else "unknown")
+            else:
+                raw_text = str(raw_gender or "").strip().casefold()
+                label = (
+                    "male" if raw_text in ("m", "male", "1", "м", "мужской")
+                    else "female" if raw_text in ("f", "female", "0", "ж", "женский")
+                    else "unknown"
+                )
+            return {
+                "gender": label,
+                "confidence": 0.65 if label != "unknown" else 0.0,
+                "gender_model": "insightface_genderage_fallback",
+            }
+
+    def _classify_group_candidate_gender(self, candidate: dict[str, Any], connection):
+        """Classifies a candidate CROP with a bounded in-memory cache."""
+        try:
+            face_id = int(candidate.get("face_id") or 0)
+        except (TypeError, ValueError):
+            return {"gender": "unknown", "confidence": 0.0}
+        if face_id <= 0:
+            return {"gender": "unknown", "confidence": 0.0}
+        with _TK_GROUP_GENDER_CACHE_LOCK:
+            cached = _TK_GROUP_GENDER_CACHE.get(face_id)
+            if cached is not None:
+                return dict(cached)
+
+        crop_path = None
+        try:
+            resolved = _resolve_db_crop_path(str(candidate.get("path") or ""))
+            if resolved.is_file():
+                crop_path = resolved
+        except (OSError, TypeError, ValueError):
+            pass
+        if crop_path is None and connection is not None:
+            try:
+                row = connection.execute(
+                    "SELECT i.id, i.path FROM faces f "
+                    "JOIN images i ON i.id = f.image_id WHERE f.id = ?",
+                    (face_id,),
+                ).fetchone()
+                if row:
+                    resolved = _resolve_db_crop_path(str(row[1]), image_id=int(row[0]))
+                    if resolved.is_file():
+                        crop_path = resolved
+            except Exception:
+                pass
+
+        prediction = {"gender": "unknown", "confidence": 0.0}
+        if crop_path is not None:
+            try:
+                image = cv2.imread(str(crop_path))
+                if image is not None:
+                    found = _detect_faces_with_padding(self.app, image, padding_ratio=0.40)
+                    if found:
+                        def area_with_confidence(item):
+                            box = item.bbox
+                            area = max(0.0, float(box[2] - box[0])) * max(
+                                0.0, float(box[3] - box[1])
+                            )
+                            return area * max(0.0, float(getattr(item, "det_score", 0.0)))
+                        selected = max(found, key=area_with_confidence)
+                        prediction = self._predict_group_face_gender(image, selected)
+            except Exception as exc:
+                print(
+                    "[GROUP-ANALYSIS][GENDER] face_id=" + str(face_id) + ": " + str(exc),
+                    flush=True,
+                )
+
+        if prediction.get("gender") in ("female", "male"):
+            with _TK_GROUP_GENDER_CACHE_LOCK:
+                _TK_GROUP_GENDER_CACHE[face_id] = dict(prediction)
+                if len(_TK_GROUP_GENDER_CACHE) > 5000:
+                    _TK_GROUP_GENDER_CACHE.pop(next(iter(_TK_GROUP_GENDER_CACHE)))
+        return prediction
+
+    def _show_group_analysis_results(self, result: dict[str, Any], face_indices: list[int]):
+        """Shows combinations, a relation graph and candidate details in a native Tk window."""
+        old = getattr(self, "_group_analysis_window", None)
+        if old is not None:
+            try:
+                if old.winfo_exists():
+                    old.destroy()
+            except tk.TclError:
+                pass
+
+        window = tk.Toplevel(self.root)
+        self._group_analysis_window = window
+        window.title("FaceSearch — Анализ связей группы")
+        window.geometry("1240x820")
+        window.minsize(980, 650)
+        outer = ttk.Frame(window, padding=12)
+        outer.pack(fill="both", expand=True)
+
+        combinations = list(result.get("combinations") or [])
+        best = combinations[0] if combinations else {}
+        ttk.Label(
+            outer,
+            text=(
+                "Обнаружено лиц: " + str(len(face_indices))
+                + "   •   Назначено профилей: " + str(int(best.get("matched_faces") or 0))
+                + "   •   Вариантов: " + str(len(combinations))
+                + "   •   Среднее сходство: " + str(float(best.get("visual_average") or 0.0)) + "%"
+            ),
+            style="Section.TLabel",
+        ).pack(anchor="w")
+        ttk.Label(
+            outer, text=str(result.get("notice") or ""),
+            wraplength=1180, justify="left", style="Muted.TLabel",
+        ).pack(fill="x", anchor="w", pady=(4, 2))
+        friend_status = result.get("friend_status") or {}
+        ttk.Label(
+            outer,
+            text="Проверка VK: " + str(friend_status.get("message") or friend_status.get("status") or "нет данных"),
+            wraplength=1180, justify="left", style="Muted.TLabel",
+        ).pack(fill="x", anchor="w", pady=(0, 8))
+
+        notebook = ttk.Notebook(outer)
+        notebook.pack(fill="both", expand=True)
+        gender_labels = {"female": "женский", "male": "мужской", "unknown": "не определён"}
+        confidence_labels = {"high": "высокая", "medium": "средняя", "low": "низкая", "none": "нет"}
+        for combo_index, combination in enumerate(combinations):
+            tab = ttk.Frame(notebook, padding=8)
+            notebook.add(tab, text="Вариант " + str(combo_index + 1))
+            ttk.Label(
+                tab,
+                text=(
+                    "Рейтинг: " + str(float(combination.get("score") or 0.0))
+                    + "   •   Сходство: " + str(float(combination.get("visual_average") or 0.0)) + "%"
+                    + "   •   Связанных пар: " + str(int(combination.get("connected_pairs") or 0))
+                    + "   •   Противоречащих пар: " + str(int(combination.get("disconnected_pairs") or 0))
+                ),
+                style="Section.TLabel",
+            ).pack(anchor="w", pady=(0, 5))
+
+            graph = tk.Canvas(tab, height=300, background="#202020", highlightthickness=0)
+            graph.pack(fill="x", expand=False, pady=(0, 8))
+            graph.bind(
+                "<Configure>",
+                lambda _event, canvas=graph, combo=combination, indices=list(face_indices):
+                    self._redraw_group_graph(canvas, combo, indices),
+                add="+",
+            )
+            self._redraw_group_graph(graph, combination, list(face_indices))
+
+            table_frame = ttk.Frame(tab)
+            table_frame.pack(fill="both", expand=True)
+            columns = (
+                "face", "name", "similarity", "query_gender",
+                "candidate_gender", "profile_gender", "confidence", "city", "reason",
+            )
+            headings = {
+                "face": "Исходное лицо",
+                "name": "Интернет-профиль",
+                "similarity": "Сходство",
+                "query_gender": "Пол исходного",
+                "candidate_gender": "Пол по фото",
+                "profile_gender": "Пол профиля",
+                "confidence": "Уверенность",
+                "city": "Город",
+                "reason": "Пояснение",
+            }
+            widths = {
+                "face": 95, "name": 190, "similarity": 80, "query_gender": 95,
+                "candidate_gender": 100, "profile_gender": 100, "confidence": 105,
+                "city": 100, "reason": 300,
+            }
+            tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=8)
+            for column in columns:
+                tree.heading(column, text=headings[column])
+                tree.column(
+                    column, width=widths[column], minwidth=65,
+                    stretch=column in ("name", "reason"),
+                )
+            yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+            xscroll = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+            tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+            tree.grid(row=0, column=0, sticky="nsew")
+            yscroll.grid(row=0, column=1, sticky="ns")
+            xscroll.grid(row=1, column=0, sticky="ew")
+            table_frame.rowconfigure(0, weight=1)
+            table_frame.columnconfigure(0, weight=1)
+            url_by_row = {}
+            for profile in combination.get("profiles") or []:
+                compact_index = int(profile.get("face_index") or 0)
+                actual_face = (
+                    face_indices[compact_index] + 1
+                    if 0 <= compact_index < len(face_indices) else compact_index + 1
+                )
+                query_gender = profile.get("query_gender") or {}
+                confidence = confidence_labels.get(
+                    str(profile.get("assignment_confidence") or "none"), "не рассчитана"
+                )
+                reason = str(profile.get("confidence_reason") or profile.get("unmatched_reason") or "")
+                similarity = (
+                    "—" if profile.get("unmatched")
+                    else str(round(float(profile.get("similarity") or 0.0), 2)) + "%"
+                )
+                row_id = tree.insert("", "end", values=(
+                    "Лицо " + str(actual_face),
+                    str(profile.get("name") or ""),
+                    similarity,
+                    gender_labels.get(str(query_gender.get("gender") or "unknown"), "не определён"),
+                    gender_labels.get(str(profile.get("gender") or "unknown"), "не определён"),
+                    gender_labels.get(str(profile.get("profile_gender") or "unknown"), "не определён"),
+                    confidence,
+                    str(profile.get("city") or ""),
+                    reason,
+                ))
+                url_by_row[row_id] = str(profile.get("profile_url") or "")
+
+            def open_profile(event, target=tree, mapping=url_by_row):
+                row_id = target.identify_row(event.y)
+                url = mapping.get(row_id, "")
+                if url.lower().startswith(("http://", "https://")):
+                    try:
+                        webbrowser.open(url)
+                    except Exception:
+                        pass
+            tree.bind("<Double-1>", open_profile)
+
+        ttk.Label(
+            outer,
+            text="Дважды щёлкните строку, чтобы открыть интернет-профиль. Цвет кружка — оценка пола исходного лица; красная обводка — уверенное противоречие пола.",
+            wraplength=1180, justify="left", style="Muted.TLabel",
+        ).pack(fill="x", pady=(6, 0))
+
+    def _redraw_group_graph(self, canvas, combination, face_indices):
+        """Draws the group relation graph, source gender and candidate conflicts."""
+        try:
+            width = max(900, int(canvas.winfo_width() or 900))
+            height = max(280, int(canvas.winfo_height() or 300))
+            canvas.delete("all")
+            profiles = list(combination.get("profiles") or [])
+            if not profiles:
+                canvas.create_text(
+                    width / 2, height / 2, text="Нет комбинаций для отображения",
+                    fill="#d1d5db",
+                )
+                return
+            positions = {}
+            count = len(profiles)
+            center_x, center_y = width / 2.0, height / 2.0
+            radius = max(55.0, min(width * 0.36, height * 0.34))
+            gender_colors = {
+                "female": ("#fce7f3", "#db2777", "#831843", "женский"),
+                "male": ("#dbeafe", "#0284c7", "#075985", "мужской"),
+                "unknown": ("#e5e7eb", "#9ca3af", "#374151", "не определён"),
+            }
+            for index, profile in enumerate(profiles):
+                angle = -math.pi / 2.0 + 2.0 * math.pi * index / max(1, count)
+                positions[str(profile.get("profile_key") or index)] = (
+                    center_x + radius * math.cos(angle),
+                    center_y + radius * math.sin(angle),
+                )
+            for relation in combination.get("relations") or []:
+                start = positions.get(str(relation.get("from") or ""))
+                end = positions.get(str(relation.get("to") or ""))
+                if not start or not end:
+                    continue
+                if relation.get("friend"):
+                    color, dash, line_width = "#16a34a", (), 2
+                elif int(relation.get("common_friends") or 0) > 0:
+                    color, dash, line_width = "#22c55e", (5, 3), 2
+                elif relation.get("same_city"):
+                    color, dash, line_width = "#f59e0b", (2, 3), 1
+                else:
+                    continue
+                canvas.create_line(
+                    start[0], start[1], end[0], end[1],
+                    fill=color, dash=dash, width=line_width,
+                )
+            for index, profile in enumerate(profiles):
+                key = str(profile.get("profile_key") or index)
+                x, y = positions[key]
+                unmatched = bool(profile.get("unmatched"))
+                query_gender = str((profile.get("query_gender") or {}).get("gender") or "unknown")
+                fill, stroke, text_color, gender_label = gender_colors.get(
+                    query_gender, gender_colors["unknown"]
+                )
+                if unmatched:
+                    fill, stroke, text_color = "#6b7280", "#9ca3af", "#ffffff"
+                gender_conflict = float(profile.get("gender_penalty") or 0.0) > 0.0
+                if gender_conflict:
+                    stroke = "#dc2626"
+                canvas.create_oval(
+                    x - 22, y - 22, x + 22, y + 22,
+                    fill=fill, outline=stroke,
+                    width=3 if gender_conflict else 2,
+                    dash=(4, 3) if unmatched else (),
+                )
+                compact_index = int(profile.get("face_index", index))
+                actual_face = (
+                    face_indices[compact_index] + 1
+                    if 0 <= compact_index < len(face_indices) else compact_index + 1
+                )
+                canvas.create_text(
+                    x, y, text="Л" + str(actual_face), fill=text_color,
+                    font=("Segoe UI", 11, "bold"),
+                )
+                name = str(profile.get("name") or "")
+                if len(name) > 22:
+                    name = name[:20] + "…"
+                canvas.create_text(
+                    x, y + 33, text=name, fill="#f3f4f6", font=("Segoe UI", 9)
+                )
+                sub = "нет профиля" if unmatched else str(round(float(profile.get("similarity") or 0.0), 1)) + "%"
+                if gender_conflict:
+                    sub = "проверьте пол · " + sub
+                canvas.create_text(
+                    x, y + 48, text=sub,
+                    fill="#fca5a5" if gender_conflict else "#d1d5db",
+                    font=("Segoe UI", 8, "bold" if gender_conflict else "normal"),
+                )
+        except tk.TclError:
+            pass
 
     def start_index(self):
         if not self._startup_ready_or_warn("создание FAISS-индекса"):
@@ -9877,6 +10734,55 @@ class FaceSearchGUI:
                         self._html_crop_rebuild_context = None
 
                     self._update_search_state()
+
+                elif kind == "group_analysis_progress":
+                    percent = max(0, min(100, int(event[1] or 0)))
+                    message = str(event[2] or "Выполняется групповой анализ…")
+                    try:
+                        self.progress.stop()
+                        self.progress.configure(
+                            mode="determinate", maximum=100, value=percent
+                        )
+                    except tk.TclError:
+                        pass
+                    self.status_var.set(message)
+
+                elif kind == "group_analysis_done":
+                    result, face_indices = event[1:3]
+                    try:
+                        self.progress.stop()
+                        self.progress.configure(
+                            mode="determinate", maximum=100, value=100
+                        )
+                    except tk.TclError:
+                        pass
+                    self.operation = None
+                    self._set_busy(False)
+                    self._update_search_state()
+                    best = (result.get("combinations") or [{}])[0]
+                    self.status_var.set(
+                        "Групповой анализ завершён. Назначено профилей: "
+                        + str(int(best.get("matched_faces") or 0))
+                        + " из " + str(len(face_indices)) + "."
+                    )
+                    self._show_group_analysis_results(result, list(face_indices))
+
+                elif kind == "group_analysis_error":
+                    error = str(event[1] or "Неизвестная ошибка группового анализа.")
+                    try:
+                        self.progress.stop()
+                        self.progress.configure(
+                            mode="determinate", maximum=100, value=0
+                        )
+                    except tk.TclError:
+                        pass
+                    self.operation = None
+                    self._set_busy(False)
+                    self._update_search_state()
+                    self.status_var.set("Групповой анализ завершился с ошибкой.")
+                    messagebox.showerror(
+                        "Групповой анализ", error, parent=self.root
+                    )
 
                 elif kind == "fatal":
                     self.progress.stop()
