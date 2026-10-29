@@ -112,7 +112,7 @@ class GroupAnalysisTests(unittest.TestCase):
                     "face_id": 2002,
                     "name": "Дарья",
                     "profile_url": "https://vk.com/id202",
-                    "similarity": 94.0,
+                    "similarity": 88.0,
                 },
                 {
                     "face_id": 2001,
@@ -204,13 +204,13 @@ class GroupAnalysisTests(unittest.TestCase):
                     "face_id": 2002,
                     "name": "Дарья",
                     "profile_url": "https://vk.com/id202",
-                    "similarity": 94.0,
+                    "similarity": 88.0,
                 },
                 {
                     "face_id": 2001,
                     "name": "Анна",
                     "profile_url": "https://vk.com/id303",
-                    "similarity": 75.0,
+                    "similarity": 85.0,
                 },
             ],
         ]
@@ -258,13 +258,13 @@ class GroupAnalysisTests(unittest.TestCase):
                     "face_id": 2002,
                     "name": "Дарья",
                     "profile_url": "https://vk.com/id202",
-                    "similarity": 94.0,
+                    "similarity": 88.0,
                 },
                 {
                     "face_id": 2001,
                     "name": "Анна",
                     "profile_url": "https://vk.com/id303",
-                    "similarity": 75.0,
+                    "similarity": 85.0,
                 },
             ],
         ]
