@@ -84,6 +84,9 @@ _CROP_REPAIR_LAST_START_MAX = 5000
 _FACE_IMAGE_CACHE_LOCK = threading.RLock()
 _FACE_IMAGE_CACHE: dict[int, tuple] = {}
 _FACE_IMAGE_CACHE_MAX = 5000
+_FACE_GENDER_CACHE_LOCK = threading.RLock()
+_FACE_GENDER_CACHE: dict[int, dict] = {}
+_FACE_GENDER_CACHE_MAX = 20000
 _REMOTE_IMAGE_CHECK_LOCK = threading.RLock()
 _REMOTE_IMAGE_CHECK_CACHE: dict[str, tuple[float, bool]] = {}
 _REMOTE_IMAGE_CHECK_CACHE_TTL = 20.0
@@ -849,6 +852,176 @@ def _get_face_image_row(face_id: int):
     with _FACE_IMAGE_CACHE_LOCK:
         return _FACE_IMAGE_CACHE.get(int(face_id))
 
+
+
+def _gender_model():
+    """Возвращает уже загруженную модель genderage из набора InsightFace."""
+    app = FACE_APP
+    models = getattr(app, "models", {}) if app is not None else {}
+    if not isinstance(models, dict):
+        return None
+    model = models.get("genderage")
+    if model is not None:
+        return model
+    return next(
+        (value for value in models.values()
+         if str(getattr(value, "taskname", "")).casefold() == "genderage"),
+        None,
+    )
+
+
+def _predict_face_gender(image, face) -> dict:
+    """Возвращает осторожную оценку видимого пола по genderage-модели InsightFace."""
+    unknown = {"gender": "unknown", "confidence": 0.0}
+    model = _gender_model()
+    if model is None:
+        return unknown
+
+    # Повторно запускаем только маленькую genderage ONNX-модель, чтобы получить
+    # оценку уверенности, а не использовать только жёсткий argmax из face.gender.
+    try:
+        import numpy as np
+        from insightface.utils import face_align
+
+        bbox = np.asarray(face.bbox, dtype=np.float32)
+        width = float(bbox[2] - bbox[0])
+        height = float(bbox[3] - bbox[1])
+        if width < 2.0 or height < 2.0:
+            return unknown
+        center = ((float(bbox[2]) + float(bbox[0])) / 2.0,
+                  (float(bbox[3]) + float(bbox[1])) / 2.0)
+        input_side = int(model.input_size[0])
+        scale = input_side / (max(width, height) * 1.5)
+        aligned, _transform = face_align.transform(
+            image, center, input_side, scale, 0
+        )
+        input_size = tuple(aligned.shape[0:2][::-1])
+        mean = float(model.input_mean)
+        std = float(model.input_std)
+        if std == 0:
+            return unknown
+        blob = face_search.cv2.dnn.blobFromImage(
+            aligned, 1.0 / std, input_size,
+            (mean, mean, mean), swapRB=True,
+        )
+        raw = model.session.run(
+            model.output_names,
+            {model.input_name: blob},
+        )[0][0]
+        scores = np.asarray(raw[:2], dtype=np.float64)
+        if scores.shape[0] != 2 or not np.all(np.isfinite(scores)):
+            return unknown
+
+        # Некоторые сборки возвращают нормированные вероятности, другие —
+        # оценки до softmax. Поддерживаем оба варианта.
+        total = float(scores.sum())
+        if np.all(scores >= 0.0) and np.all(scores <= 1.0) and 0.90 <= total <= 1.10:
+            probabilities = scores / max(total, 1e-12)
+        else:
+            shifted = scores - float(np.max(scores))
+            exponentials = np.exp(shifted)
+            probabilities = exponentials / max(float(exponentials.sum()), 1e-12)
+
+        label_index = int(np.argmax(probabilities))
+        return {
+            "gender": "male" if label_index == 0 else "female",
+            "confidence": max(0.0, min(1.0, float(probabilities[label_index]))),
+            "gender_model": "insightface_genderage",
+        }
+    except Exception:
+        # Совместимость с версиями InsightFace, в которых результат genderage
+        # доступен лишь через face.gender / face.sex, но внутренний session отличается.
+        raw_gender = getattr(face, "gender", None)
+        if raw_gender is None:
+            raw_gender = getattr(face, "sex", None)
+        if isinstance(raw_gender, (int, float)):
+            label = "male" if int(raw_gender) == 0 else ("female" if int(raw_gender) == 1 else "unknown")
+        else:
+            text = str(raw_gender or "").strip().casefold()
+            label = (
+                "male" if text in ("m", "male", "0", "м", "мужской")
+                else "female" if text in ("f", "female", "1", "ж", "женский")
+                else "unknown"
+            )
+        return {
+            "gender": label,
+            # Без доступа к исходной оценке модели задаём только слабую уверенность.
+            "confidence": 0.65 if label != "unknown" else 0.0,
+            "gender_model": "insightface_genderage_fallback",
+        }
+
+
+def _classify_candidate_face_gender(candidate: dict) -> dict:
+    """Классифицирует сохранённый face crop кандидата с кэшем по faces.id."""
+    try:
+        face_id = int(candidate.get("face_id") or 0)
+    except (TypeError, ValueError):
+        return {"gender": "unknown", "confidence": 0.0}
+    if face_id <= 0 or FACE_APP is None:
+        return {"gender": "unknown", "confidence": 0.0}
+
+    with _FACE_GENDER_CACHE_LOCK:
+        cached = _FACE_GENDER_CACHE.get(face_id)
+        if cached is not None:
+            return dict(cached)
+
+    crop_path = None
+    raw_path = str(candidate.get("path") or "").strip()
+    if raw_path:
+        try:
+            resolved = face_search._resolve_db_crop_path(raw_path)
+            if resolved.is_file():
+                crop_path = resolved
+        except (OSError, TypeError, ValueError):
+            pass
+
+    # Если путь не удалось разрешить напрямую (например, pending_ path),
+    # читаем точный путь CROP по связке faces.id -> images.id.
+    if crop_path is None:
+        connection = None
+        try:
+            connection = _open_connection()
+            row = connection.execute(
+                "SELECT i.id, i.path FROM faces f JOIN images i ON i.id = f.image_id WHERE f.id = ?",
+                (face_id,),
+            ).fetchone()
+            if row:
+                resolved = face_search._resolve_db_crop_path(row[1], image_id=int(row[0]))
+                if resolved.is_file():
+                    crop_path = resolved
+        except Exception as exc:
+            print(f"[HTTP][GENDER] Не удалось найти CROP для face_id={face_id}: {exc}", flush=True)
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+
+    prediction = {"gender": "unknown", "confidence": 0.0}
+    if crop_path is not None:
+        try:
+            image = face_search.cv2.imread(str(crop_path))
+            if image is not None:
+                # CROP может содержать небольшой фон. Берём самый крупный
+                # уверенно обнаруженный face, а не угадываем по данным профиля.
+                found = FACE_APP.get(image)
+                if found:
+                    height, width = image.shape[:2]
+                    def face_size(face):
+                        box = face.bbox
+                        area = max(0.0, float(box[2] - box[0])) * max(0.0, float(box[3] - box[1]))
+                        return area * max(0.0, float(getattr(face, "det_score", 0.0)))
+                    selected = max(found, key=face_size)
+                    prediction = _predict_face_gender(image, selected)
+        except Exception as exc:
+            print(f"[HTTP][GENDER] Не удалось определить атрибут face_id={face_id}: {exc}", flush=True)
+
+    with _FACE_GENDER_CACHE_LOCK:
+        _FACE_GENDER_CACHE[face_id] = dict(prediction)
+        while len(_FACE_GENDER_CACHE) > _FACE_GENDER_CACHE_MAX:
+            _FACE_GENDER_CACHE.pop(next(iter(_FACE_GENDER_CACHE)))
+    return prediction
 
 def _looks_like_image_content_type(value: str) -> bool:
     content_type = str(value or "").split(";", 1)[0].strip().lower()
@@ -2723,6 +2896,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 QUERY_SESSIONS.pop(token, None)
                 raise ValueError("Сессия истекла. Определите лица на фотографии повторно.")
             embeddings = [embedding.copy() for embedding in query.get("embeddings", [])]
+            query_genders = [dict(value) for value in query.get("gender_predictions", [])]
         if len(embeddings) < 2:
             raise ValueError("Для группового анализа нужно обнаружить не менее двух лиц.")
 
@@ -2842,6 +3016,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                             "profile_url": profile_url,
                             "source_url": str(candidate.get("source_url") or ""),
                             "city": str(candidate.get("city_title") or "").strip(),
+                            "path": str(candidate.get("path") or ""),
                             "similarity": score,
                             "vk_user_id": vk_id,
                         })
@@ -2862,6 +3037,8 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                     options,
                     APP_DIR,
                     progress=progress_callback,
+                    query_genders=query_genders,
+                    gender_classifier=_classify_candidate_face_gender,
                 )
                 # Сначала публикуем результат и только затем помечаем задачу завершённой,
                 # чтобы клиент не успел получить state=done без поля result.
@@ -2903,6 +3080,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         )
         faces = []
         embeddings = []
+        gender_predictions = []
         for face in found:
             if float(face.det_score) < face_search.DET_THRESHOLD:
                 continue
@@ -2912,11 +3090,15 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             if float(face_search.np.linalg.norm(embedding)) <= 0:
                 continue
             bbox = [float(value) for value in face.bbox.tolist()]
+            gender_prediction = _predict_face_gender(image, face)
+            gender_predictions.append(gender_prediction)
             embeddings.append(embedding)
             faces.append({
                 "index": len(faces),
                 "bbox": bbox,
                 "confidence": float(face.det_score),
+                "gender": gender_prediction.get("gender", "unknown"),
+                "gender_confidence": float(gender_prediction.get("confidence") or 0.0),
             })
 
         token = secrets.token_urlsafe(24)
@@ -2924,6 +3106,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
             QUERY_SESSIONS[token] = {
                 "created": time.monotonic(),
                 "embeddings": embeddings,
+                "gender_predictions": gender_predictions,
             }
         _prune_sessions()
         self._json(200, {"query_id": token, "faces": faces})
