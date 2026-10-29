@@ -294,6 +294,8 @@ def _load_gui_settings() -> dict[str, Any]:
         "group_common_friend_weight": 2.0,
         "group_city_weight": 1.5,
         "group_check_vk_friends": True,
+        "group_gender_weight": 4.0,
+        "group_check_gender": True,
         "collapsible_sections": dict(COLLAPSIBLE_SECTION_DEFAULTS),
     }
 
@@ -434,6 +436,12 @@ def _load_gui_settings() -> dict[str, Any]:
             settings["group_check_vk_friends"] = _xml_bool(
                 node.findtext("check_vk_friends"), settings["group_check_vk_friends"]
             )
+            settings["group_gender_weight"] = max(0.0, min(10.0, _xml_float(
+                node.findtext("gender_weight"), settings["group_gender_weight"]
+            )))
+            settings["group_check_gender"] = _xml_bool(
+                node.findtext("check_gender"), settings["group_check_gender"]
+            )
 
     except Exception as exc:
         print(f"Предупреждение: не удалось прочитать {SETTINGS_FILE}: {exc}")
@@ -546,6 +554,12 @@ def _save_gui_settings_data(settings: dict[str, Any]) -> None:
     ))
     ET.SubElement(node, "check_vk_friends").text = (
         "true" if bool(settings.get("group_check_vk_friends", True)) else "false"
+    )
+    ET.SubElement(node, "gender_weight").text = str(max(
+        0.0, min(10.0, _xml_float(settings.get("group_gender_weight"), 4.0))
+    ))
+    ET.SubElement(node, "check_gender").text = (
+        "true" if bool(settings.get("group_check_gender", True)) else "false"
     )
 
     tree = ET.ElementTree(root)
