@@ -14,10 +14,83 @@ from facesearch.group_analysis import (
     _profile_gender_mismatch_penalty,
     _prepare_candidates,
     _hungarian_maximize,
+    _pair_relation,
+    _merge_candidates_across_sources,
 )
 
 
 class GroupAnalysisTests(unittest.TestCase):
+
+
+    def test_cross_source_profiles_with_same_name_and_known_gender_merge(self):
+        options = normalize_options({"min_similarity": 0, "candidates_per_face": 5})
+        prepared = _prepare_candidates([
+            [{
+                "face_id": 101, "profile_id": 501,
+                "profile_url": "https://vk.com/id100", "name": "Алексей Иванов",
+                "similarity": 94.0, "profile_gender": "male",
+            }],
+            [{
+                "face_id": 202, "profile_id": 601,
+                "profile_url": "https://ok.ru/profile/200", "name": "Алексей Иванов",
+                "similarity": 92.0, "profile_gender": "male",
+            }],
+        ], options)
+
+        merged, status = _merge_candidates_across_sources(prepared)
+        first = next(item for item in merged[0] if not item.get("unmatched"))
+        second = next(item for item in merged[1] if not item.get("unmatched"))
+
+        self.assertEqual(first["profile_key"], second["profile_key"])
+        self.assertTrue(first["profile_key"].startswith("cross-source:"))
+        self.assertEqual(len(first["source_profiles"]), 2)
+        self.assertEqual(status["merged_groups"], 1)
+
+    def test_conflicting_birth_dates_block_cross_source_merge(self):
+        options = normalize_options({"min_similarity": 0, "candidates_per_face": 5})
+        prepared = _prepare_candidates([
+            [{
+                "face_id": 101, "profile_id": 501,
+                "profile_url": "https://vk.com/id100", "name": "Алексей Иванов",
+                "similarity": 94.0, "profile_gender": "male", "birthdate": "1980-02-01",
+            }],
+            [{
+                "face_id": 202, "profile_id": 601,
+                "profile_url": "https://ok.ru/profile/200", "name": "Алексей Иванов",
+                "similarity": 92.0, "profile_gender": "male", "birthdate": "1985-06-17",
+            }],
+        ], options)
+
+        merged, status = _merge_candidates_across_sources(prepared)
+        first = next(item for item in merged[0] if not item.get("unmatched"))
+        second = next(item for item in merged[1] if not item.get("unmatched"))
+
+        self.assertNotEqual(first["profile_key"], second["profile_key"])
+        self.assertEqual(status["merged_groups"], 0)
+
+    def test_shared_education_and_workplace_are_profile_relationships(self):
+        options = normalize_options({"min_similarity": 0, "candidates_per_face": 5})
+        prepared = _prepare_candidates([[
+            {
+                "face_id": 101, "profile_id": 501,
+                "profile_url": "https://vk.com/id100", "name": "Иван Первый",
+                "similarity": 94.0,
+                "info": {"Школа": "Школа № 12", "Место работы": "ООО Ромашка"},
+            },
+            {
+                "face_id": 202, "profile_id": 601,
+                "profile_url": "https://ok.ru/profile/200", "name": "Пётр Второй",
+                "similarity": 92.0,
+                "metadata": {"school": "Школа 12", "organization": "ооо ромашка"},
+            },
+        ]], options)[0]
+        first, second = [item for item in prepared if not item.get("unmatched")]
+        relation = _pair_relation(first, second, {})
+
+        self.assertTrue(relation["same_education"])
+        self.assertTrue(relation["same_workplace"])
+        self.assertEqual(relation["education_matches"], ["Школа № 12"])
+        self.assertEqual(relation["workplace_matches"], ["ООО Ромашка"])
 
     def test_candidate_limit_counts_unique_database_profiles_not_face_rows(self):
         # Несколько фотографий/face.id принадлежат одному профилю profiles.id.
