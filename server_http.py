@@ -2151,7 +2151,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       .sort(function(a,b){return (a.index===selectedFace?1:0)-(b.index===selectedFace?1:0);});
     function markerStyle(face,match){
       const gender=String((match&&match.gender)||face.gender||"unknown");
-      const confidence=Number((match&&match.genderConfidence)!==undefined
+      const confidence=Number(match&&match.genderConfidence!==undefined&&match.genderConfidence!==null
         ?match.genderConfidence:(face.gender_confidence||0));
       if(confidence<0.65||gender==="unknown")return {stroke:"#94a3b8",fill:"#475569",gender:"unknown"};
       if(gender==="female")return {stroke:"#f472b6",fill:"#9d174d",gender:"female"};
