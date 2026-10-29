@@ -3139,6 +3139,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                                 or ("Профиль #" + str(face_id))
                             ).strip()
                         face_candidates.append({
+                            "profile_id": candidate.get("profile_id"),
                             "face_id": face_id,
                             "name": full_name,
                             "profile_url": profile_url,
