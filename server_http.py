@@ -2744,6 +2744,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     setGroupAnalysisMatches:function(resultQueryId,profiles){
       if(!resultQueryId||resultQueryId!==queryId){
         groupAnalysisMatches=null;
+        faceMatchResults=[];
+        drawFaces();
         return;
       }
       const mapped=Array(faces.length).fill(null);
@@ -2763,6 +2765,11 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
         };
       });
       groupAnalysisMatches={queryId:resultQueryId,matches:mapped};
+      // Обновляем подписи сразу после выбора варианта группы; кнопка «Определить»
+      // затем лишь подтверждает эти имена и не делает отдельный top_k=1 поиск.
+      faceMatchResults=mapped.map(function(match){
+        return match?Object.assign({},match):null;
+      });
       drawFaces();
     }
   };
