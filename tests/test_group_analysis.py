@@ -11,6 +11,7 @@ from facesearch.group_analysis import (
     _load_friend_sets,
     _request_vk_friends,
     _gender_mismatch_penalty,
+    _profile_gender_mismatch_penalty,
 )
 
 
@@ -254,6 +255,79 @@ class GroupAnalysisTests(unittest.TestCase):
             0.0,
         )
 
+    def test_profile_sex_mismatch_beats_visual_candidate_with_matching_face_classifier(self):
+        candidates = [
+            [
+                {
+                    "face_id": 1001,
+                    "name": "Анастасия",
+                    "profile_url": "https://vk.com/id101",
+                    "similarity": 82.0,
+                    "profile_sex": 1,  # VK: 1 = female
+                },
+                {
+                    "face_id": 1002,
+                    "name": "Виталий",
+                    "profile_url": "https://vk.com/id102",
+                    "similarity": 77.0,
+                    "profile_sex": 2,  # VK: 2 = male
+                },
+            ],
+            [{
+                "face_id": 2001,
+                "name": "Андрей",
+                "profile_url": "https://vk.com/id201",
+                "similarity": 80.0,
+                "profile_sex": 2,
+            }],
+        ]
+        # All candidate crops look male to InsightFace. Only profile sex
+        # distinguishes the false female-profile match from the alternative.
+        predictions = {
+            1001: {"gender": 1, "confidence": 0.99},
+            1002: {"gender": 1, "confidence": 0.98},
+            2001: {"gender": 1, "confidence": 0.98},
+        }
+
+        with tempfile.TemporaryDirectory() as app_dir:
+            result = analyze_group(
+                candidates,
+                {
+                    "check_vk_friends": False,
+                    "check_gender": True,
+                    "gender_weight": 4.0,
+                    "profile_gender_weight": 16.0,
+                    "candidates_per_face": 5,
+                },
+                app_dir,
+                query_genders=[
+                    {"gender": 1, "confidence": 0.99},
+                    {"gender": 1, "confidence": 0.98},
+                ],
+                gender_classifier=lambda candidate: predictions[int(candidate["face_id"])],
+            )
+
+        best = result["combinations"][0]
+        by_face = {item["face_index"]: item for item in best["profiles"]}
+        self.assertEqual(by_face[0]["name"], "Виталий")
+        self.assertEqual(by_face[0]["profile_gender"], "male")
+        self.assertEqual(by_face[0]["gender"], "male")
+        self.assertGreater(by_face[0]["profile_gender_confidence"], 0.9)
+        self.assertEqual(by_face[0]["profile_gender_penalty"], 0.0)
+
+        false_match = next(
+            item for item in result["all_candidates"] if item["name"] == "Анастасия"
+        )
+        self.assertEqual(false_match["profile_gender"], "female")
+        self.assertGreater(
+            _profile_gender_mismatch_penalty(
+                {"gender": 1, "confidence": 0.99},
+                {"profile_sex": 1},
+                {"check_gender": True, "profile_gender_weight": 16.0},
+            ),
+            10.0,
+        )
+
     def test_uncertain_gender_prediction_does_not_penalize_visual_candidate(self):
         candidates = [
             [{
@@ -315,6 +389,7 @@ class GroupAnalysisTests(unittest.TestCase):
             "city_weight": 2.5,
             "check_vk_friends": False,
             "gender_weight": 99,
+            "profile_gender_weight": 99,
             "check_gender": False,
         })
         self.assertEqual(options["min_similarity"], 100.0)
@@ -324,6 +399,7 @@ class GroupAnalysisTests(unittest.TestCase):
         self.assertEqual(options["city_weight"], 2.5)
         self.assertFalse(options["check_vk_friends"])
         self.assertEqual(options["gender_weight"], 10.0)
+        self.assertEqual(options["profile_gender_weight"], 30.0)
         self.assertFalse(options["check_gender"])
 
     def test_city_evidence_ranks_a_coherent_unique_pair_higher(self):
