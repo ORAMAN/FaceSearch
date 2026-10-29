@@ -5857,7 +5857,7 @@ class FaceSearchGUI:
             frame,
             text=(
                 "Общие параметры группового анализа для Tkinter и server_http.py. "
-                "Они сохраняются в settings.xml и используются сервером при следующем запросе."
+                "Они сохраняются в settings.xml и загружаются сервером при открытии или обновлении веб-страницы."
             ),
             style="Section.TLabel",
             wraplength=430,
