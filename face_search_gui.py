@@ -4927,6 +4927,7 @@ class FaceSearchGUI:
                 "group_city_weight": float(self.gui_settings.get("group_city_weight", 1.5)),
                 "group_check_vk_friends": bool(self.gui_settings.get("group_check_vk_friends", True)),
                 "group_gender_weight": float(self.gui_settings.get("group_gender_weight", 4.0)),
+                "group_profile_gender_weight": float(self.gui_settings.get("group_profile_gender_weight", 16.0)),
                 "group_check_gender": bool(self.gui_settings.get("group_check_gender", True)),
                 "collapsible_sections": {
                     key: bool(group.get("expanded", True))
@@ -5862,6 +5863,7 @@ class FaceSearchGUI:
             "group_city_weight": self.gui_settings.get("group_city_weight", 1.5),
             "group_check_vk_friends": self.gui_settings.get("group_check_vk_friends", True),
             "group_gender_weight": self.gui_settings.get("group_gender_weight", 4.0),
+            "group_profile_gender_weight": self.gui_settings.get("group_profile_gender_weight", 16.0),
             "group_check_gender": self.gui_settings.get("group_check_gender", True),
         }
         variables = {
@@ -5872,6 +5874,7 @@ class FaceSearchGUI:
             "group_city_weight": tk.DoubleVar(value=float(initial["group_city_weight"])),
             "group_check_vk_friends": tk.BooleanVar(value=bool(initial["group_check_vk_friends"])),
             "group_gender_weight": tk.DoubleVar(value=float(initial["group_gender_weight"])),
+            "group_profile_gender_weight": tk.DoubleVar(value=float(initial["group_profile_gender_weight"])),
             "group_check_gender": tk.BooleanVar(value=bool(initial["group_check_gender"])),
         }
         fields = [
@@ -5879,7 +5882,8 @@ class FaceSearchGUI:
             ("Кандидатов на одно лицо", "group_candidates_per_face", 1, 10, 1),
             ("Вес дружбы между профилями", "group_friend_weight", 0, 20, 0.5),
             ("Вес общих друзей", "group_common_friend_weight", 0, 10, 0.5),
-            ("Штраф за несовпадение пола лица", "group_gender_weight", 0, 10, 0.5),
+            ("Штраф за пол по фото", "group_gender_weight", 0, 10, 0.5),
+            ("Штраф за несовпадение пола профиля", "group_profile_gender_weight", 0, 30, 1),
             ("Вес совпадения города", "group_city_weight", 0, 10, 0.5),
         ]
         for row_index, (label, key, minimum, maximum, step) in enumerate(fields, start=1):
@@ -5898,7 +5902,7 @@ class FaceSearchGUI:
         ).grid(row=len(fields) + 1, column=0, columnspan=2, sticky="w", pady=(10, 4))
         ttk.Checkbutton(
             frame,
-            text="Учитывать пол лица по модели InsightFace",
+            text="Учитывать пол лица и указанный пол профиля",
             variable=variables["group_check_gender"],
         ).grid(row=len(fields) + 2, column=0, columnspan=2, sticky="w", pady=(3, 4))
         ttk.Label(
@@ -5927,6 +5931,7 @@ class FaceSearchGUI:
                 values["group_city_weight"] = max(0.0, min(10.0, float(values["group_city_weight"])))
                 values["group_check_vk_friends"] = bool(values["group_check_vk_friends"])
                 values["group_gender_weight"] = max(0.0, min(10.0, float(values["group_gender_weight"])))
+                values["group_profile_gender_weight"] = max(0.0, min(30.0, float(values["group_profile_gender_weight"])))
                 values["group_check_gender"] = bool(values["group_check_gender"])
             except (tk.TclError, TypeError, ValueError) as exc:
                 messagebox.showwarning(
