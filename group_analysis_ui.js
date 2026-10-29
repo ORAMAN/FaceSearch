@@ -21,6 +21,8 @@
   const friendWeightInput = document.getElementById("group-friend-weight");
   const commonWeightInput = document.getElementById("group-common-weight");
   const cityWeightInput = document.getElementById("group-city-weight");
+  const educationWeightInput = document.getElementById("group-education-weight");
+  const workplaceWeightInput = document.getElementById("group-workplace-weight");
   const checkVkFriendsInput = document.getElementById("group-check-vk-friends");
   const genderWeightInput = document.getElementById("group-gender-weight");
   const profileGenderWeightInput = document.getElementById("group-profile-gender-weight");
@@ -82,6 +84,8 @@
       friend_weight: numberFrom(friendWeightInput, "Вес дружбы", 0, 20),
       common_friend_weight: numberFrom(commonWeightInput, "Вес общих друзей", 0, 10),
       city_weight: numberFrom(cityWeightInput, "Вес города", 0, 10),
+      education_weight: numberFrom(educationWeightInput, "Вес совпадения учебного заведения", 0, 10),
+      workplace_weight: numberFrom(workplaceWeightInput, "Вес совпадения организации / места работы", 0, 10),
       check_vk_friends: Boolean(checkVkFriendsInput.checked),
       check_gender: Boolean(checkGenderInput.checked),
       gender_weight: numberFrom(genderWeightInput, "Штраф за несовпадение пола по фото", 0, 10),
