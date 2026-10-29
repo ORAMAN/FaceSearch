@@ -523,6 +523,70 @@ def _gender_mismatch_penalty(
     target_strength = max(0.0, min(1.0, (target_conf - 0.5) * 2.0))
     return float(options["gender_weight"]) * query_strength * target_strength
 
+
+def _hungarian_maximize(weights: list[list[float]]) -> list[int]:
+    """Pure-Python Hungarian assignment for rectangular matrices (rows <= columns)."""
+    if not weights:
+        return []
+    row_count = len(weights)
+    column_count = len(weights[0])
+    if row_count > column_count or any(len(row) != column_count for row in weights):
+        raise ValueError("Матрица назначения должна иметь не меньше столбцов, чем строк.")
+
+    # The standard potential-based Hungarian algorithm minimizes cost;
+    # negating weights turns it into a maximum-weight assignment.
+    costs = [[-float(value) for value in row] for row in weights]
+    u = [0.0] * (row_count + 1)
+    v = [0.0] * (column_count + 1)
+    p = [0] * (column_count + 1)
+    way = [0] * (column_count + 1)
+    infinity = float("inf")
+
+    for i in range(1, row_count + 1):
+        p[0] = i
+        j0 = 0
+        minv = [infinity] * (column_count + 1)
+        used = [False] * (column_count + 1)
+        while True:
+            used[j0] = True
+            i0 = p[j0]
+            delta = infinity
+            j1 = 0
+            for j in range(1, column_count + 1):
+                if used[j]:
+                    continue
+                cur = costs[i0 - 1][j - 1] - u[i0] - v[j]
+                if cur < minv[j]:
+                    minv[j] = cur
+                    way[j] = j0
+                if minv[j] < delta:
+                    delta = minv[j]
+                    j1 = j
+            for j in range(column_count + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while True:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+            if j0 == 0:
+                break
+
+    assigned_columns = [-1] * row_count
+    for j in range(1, column_count + 1):
+        if p[j]:
+            assigned_columns[p[j] - 1] = j - 1
+    if any(column < 0 for column in assigned_columns):
+        raise RuntimeError("Алгоритм назначения не сопоставил все исходные лица.")
+    return assigned_columns
+
+
 def _rank_combinations(
     candidates_by_face: list[list[dict[str, Any]]],
     friend_ids: dict[int, set[int]],
@@ -531,281 +595,434 @@ def _rank_combinations(
     beam_width: int = 120,
     query_genders: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Ищет согласованный набор профилей: социальные связи важнее небольших различий сходства.
+    """Оптимизирует единое назначение профилей, затем уточняет его по социальному графу.
 
-    Если для обоих VK-профилей успешно получены списки друзей, отсутствие прямой
-    дружбы и общих друзей считается отрицательным свидетельством. Если список
-    не удалось получить, отношение считается неизвестным, а не отрицательным.
+    Сначала Hungarian assignment находит оптимальное назначение по числу
+    сопоставленных лиц, уверенности гендерных сигналов и визуальному сходству.
+    Затем локальный поиск по одиночным переназначениям и парам лиц улучшает
+    общую согласованность социальных связей, не нарушая уникальность профилей.
+    Социальные данные, которых нет или которые не удалось загрузить, нейтральны.
     """
+    if not candidates_by_face:
+        return []
+
+    unmatched_by_face: list[dict[str, Any]] = []
+    candidate_maps: list[dict[str, dict[str, Any]]] = []
+    profile_keys: set[str] = set()
+    for face_index, items in enumerate(candidates_by_face):
+        mapping: dict[str, dict[str, Any]] = {}
+        unmatched = None
+        for candidate in items:
+            if candidate.get("unmatched"):
+                unmatched = candidate
+                continue
+            key = str(candidate.get("profile_key") or _stable_profile_key(candidate))
+            if key not in mapping:
+                candidate["profile_key"] = key
+                mapping[key] = candidate
+                profile_keys.add(key)
+        if unmatched is None:
+            unmatched = {
+                "profile_key": "unmatched:" + str(face_index),
+                "face_index": face_index,
+                "candidate_rank": 0,
+                "face_id": 0,
+                "name": "Нет назначенного профиля",
+                "profile_url": "",
+                "city": "",
+                "similarity": 0.0,
+                "vk_user_id": None,
+                "unmatched": True,
+                "unmatched_reason": "Для этого лица нет доступных интернет-профилей-кандидатов.",
+            }
+        unmatched_by_face.append(unmatched)
+        candidate_maps.append(mapping)
+
+    global_profile_keys = sorted(profile_keys)
+    profile_column = {key: idx for idx, key in enumerate(global_profile_keys)}
+    face_count = len(candidates_by_face)
+    unmatched_column_offset = len(global_profile_keys)
+    invalid_weight = -1.0e12
+    match_bonus = 1_000_000.0
+    penalty_multiplier = 1000.0
+
+    normalized_genders = [
+        _normalize_gender_prediction(value)
+        for value in (query_genders or [])
+    ]
+
+    penalty_cache: dict[tuple[int, str], tuple[float, float, float]] = {}
+
+    def candidate_penalties(face_index: int, candidate: dict[str, Any]) -> tuple[float, float, float]:
+        key = str(candidate.get("profile_key") or "")
+        cache_key = (face_index, key)
+        if cache_key in penalty_cache:
+            return penalty_cache[cache_key]
+        query_gender = (
+            normalized_genders[face_index]
+            if face_index < len(normalized_genders)
+            else {"gender": "unknown", "confidence": 0.0}
+        )
+        face_penalty = _gender_mismatch_penalty(query_gender, candidate, options)
+        profile_penalty = _profile_gender_mismatch_penalty(query_gender, candidate, options)
+        value = (face_penalty + profile_penalty, face_penalty, profile_penalty)
+        penalty_cache[cache_key] = value
+        return value
+
+    def row_choices(face_index: int, forbidden: set[tuple[int, str]]) -> list[dict[str, Any]]:
+        choices = [
+            candidate for key, candidate in candidate_maps[face_index].items()
+            if (face_index, key) not in forbidden
+        ]
+        choices.sort(
+            key=lambda item: (float(item.get("similarity") or 0.0), str(item.get("profile_key") or "")),
+            reverse=True,
+        )
+        choices.append(unmatched_by_face[face_index])
+        return choices
+
+    def initial_assignment(forbidden: set[tuple[int, str]]) -> list[dict[str, Any]]:
+        # Every face has its own dummy column so unmatched is always feasible.
+        column_count = len(global_profile_keys) + face_count
+        weights = [[invalid_weight] * column_count for _ in range(face_count)]
+        for face_index, mapping in enumerate(candidate_maps):
+            for key, candidate in mapping.items():
+                if (face_index, key) in forbidden:
+                    continue
+                penalty = candidate_penalties(face_index, candidate)[0]
+                similarity = float(candidate.get("similarity") or 0.0)
+                weights[face_index][profile_column[key]] = (
+                    match_bonus - penalty_multiplier * penalty + similarity
+                )
+            weights[face_index][unmatched_column_offset + face_index] = 0.0
+
+        columns = _hungarian_maximize(weights)
+        assignment: list[dict[str, Any]] = []
+        for face_index, column in enumerate(columns):
+            if column < unmatched_column_offset:
+                key = global_profile_keys[column]
+                candidate = candidate_maps[face_index].get(key)
+                if candidate is not None and (face_index, key) not in forbidden:
+                    assignment.append(candidate)
+                    continue
+            assignment.append(unmatched_by_face[face_index])
+        return assignment
+
     disconnected_penalty = max(4.0, min(20.0, float(options["friend_weight"])))
 
-    def state_key(state: dict[str, Any]):
-        checked_pairs = int(state["checked_social_pairs"])
-        social_quality = (
-            float(state["social_score_sum"]) / checked_pairs
-            if checked_pairs else 0.0
-        )
-        matched_faces = int(state["matched_faces"])
-        # Сначала максимизируем число сопоставленных исходных лиц. Отсутствие
-        # VK-связей не должно само по себе превращать хороший face-match в
-        # «нет кандидата». Далее учитываем уверенные противоречия по полу,
-        # а социальные связи используем для выбора между оставшимися вариантами.
-        gender_penalty = float(state.get("gender_penalty_sum", 0.0)) / max(
-            1, matched_faces
-        )
-        return (
-            matched_faces,
-            -gender_penalty,
-            social_quality,
-            int(state["connected_social_pairs"]),
-            -int(state["disconnected_social_pairs"]),
-            float(state["visual_sum"]) + float(state["bonus_sum"])
-            - float(state["gender_penalty_sum"]),
-        )
-
-    states: list[dict[str, Any]] = [{
-        "chosen": [],
-        "used": set(),
-        "visual_sum": 0.0,
-        "bonus_sum": 0.0,
-        "pair_relations": [],
-        "social_score_sum": 0.0,
-        "checked_social_pairs": 0,
-        "connected_social_pairs": 0,
-        "disconnected_social_pairs": 0,
-        "matched_faces": 0,
-        "gender_penalty_sum": 0.0,
-        "profile_gender_penalty_sum": 0.0,
-    }]
-    for face_items in candidates_by_face:
-        expanded = []
-        for state in states:
-            for candidate in face_items:
-                key = candidate["profile_key"]
-                if not candidate.get("unmatched") and key in state["used"]:
-                    continue
-                bonus = 0.0
-                pair_relations = list(state["pair_relations"])
-                social_score_sum = float(state["social_score_sum"])
-                checked_social_pairs = int(state["checked_social_pairs"])
-                connected_social_pairs = int(state["connected_social_pairs"])
-                disconnected_social_pairs = int(state["disconnected_social_pairs"])
-                gender_penalty_sum = float(state["gender_penalty_sum"])
-                profile_gender_penalty_sum = float(state.get("profile_gender_penalty_sum", 0.0))
-                current_query_gender = (
-                    query_genders[int(candidate.get("face_index", 0))]
-                    if query_genders is not None
-                    and 0 <= int(candidate.get("face_index", 0)) < len(query_genders)
-                    else {"gender": "unknown", "confidence": 0.0}
-                )
-                face_gender_penalty = (
-                    _gender_mismatch_penalty(current_query_gender, candidate, options)
-                    if not candidate.get("unmatched")
-                    else 0.0
-                )
-                profile_gender_penalty = (
-                    _profile_gender_mismatch_penalty(current_query_gender, candidate, options)
-                    if not candidate.get("unmatched")
-                    else 0.0
-                )
-                candidate_gender_penalty = face_gender_penalty + profile_gender_penalty
-                gender_penalty_sum += candidate_gender_penalty
-                profile_gender_penalty_sum += profile_gender_penalty
-                for previous in state["chosen"]:
-                    if candidate.get("unmatched") or previous.get("unmatched"):
-                        continue
-                    relation = _pair_relation(previous, candidate, friend_ids)
-                    bonus += _pair_bonus(relation, options)
-
-                    has_friend_edge = bool(relation["friend"])
-                    has_common_friend_evidence = int(relation["common_friends"]) > 0
-                    if has_friend_edge or has_common_friend_evidence:
-                        # Прямая дружба сильнее, чем просто общий круг знакомых.
-                        evidence_score = (
-                            max(1.0, float(options["friend_weight"]))
-                            if has_friend_edge
-                            else max(0.5, float(options["common_friend_weight"]))
-                            * min(
-                                1.0,
-                                math.log1p(int(relation["common_friends"])) / math.log(6.0),
-                            )
-                        )
-                        social_score_sum += evidence_score
-                        checked_social_pairs += 1
-                        connected_social_pairs += 1
-                    elif relation["friend_data_available"]:
-                        # Отрицательный вывод допустим только когда оба списка друзей
-                        # реально загружены; при сбое API неизвестность не штрафуется.
-                        social_score_sum -= disconnected_penalty
-                        checked_social_pairs += 1
-                        disconnected_social_pairs += 1
-
-                    if has_friend_edge or has_common_friend_evidence or relation["same_city"]:
-                        pair_relations.append({
-                            "from": previous["profile_key"],
-                            "to": candidate["profile_key"],
-                            **relation,
-                        })
-                chosen = state["chosen"] + [candidate]
-                used = set(state["used"])
-                if not candidate.get("unmatched"):
-                    used.add(key)
-                expanded.append({
-                    "chosen": chosen,
-                    "used": used,
-                    "visual_sum": state["visual_sum"] + float(candidate.get("similarity") or 0.0),
-                    "bonus_sum": state["bonus_sum"] + bonus,
-                    "pair_relations": pair_relations,
-                    "social_score_sum": social_score_sum,
-                    "checked_social_pairs": checked_social_pairs,
-                    "connected_social_pairs": connected_social_pairs,
-                    "disconnected_social_pairs": disconnected_social_pairs,
-                    "matched_faces": int(state["matched_faces"]) + int(not candidate.get("unmatched")),
-                    "gender_penalty_sum": gender_penalty_sum,
-                    "profile_gender_penalty_sum": profile_gender_penalty_sum,
-                })
-        expanded.sort(key=state_key, reverse=True)
-        states = expanded[:beam_width]
-        if not states:
-            break
-
-    combinations = []
-    pair_count = max(1, len(candidates_by_face) * (len(candidates_by_face) - 1) / 2)
-    seen = set()
-    states.sort(key=state_key, reverse=True)
-    for state in states:
-        chosen = state["chosen"]
-        signature = tuple(item["profile_key"] for item in chosen)
-        if signature in seen:
-            continue
-        seen.add(signature)
-        count = max(1, len(chosen))
-        visual_average = state["visual_sum"] / count
-        relation_bonus = state["bonus_sum"] / pair_count
-        checked_pairs = int(state["checked_social_pairs"])
-        social_quality = (
-            float(state["social_score_sum"]) / checked_pairs
-            if checked_pairs else 0.0
-        )
-        used_profile_keys = {
-            item["profile_key"] for item in chosen
+    def evaluate(assignment: list[dict[str, Any]]) -> dict[str, Any]:
+        matched = [
+            (index, item) for index, item in enumerate(assignment)
             if not item.get("unmatched")
+        ]
+        gender_penalty_sum = 0.0
+        face_gender_penalty_sum = 0.0
+        profile_gender_penalty_sum = 0.0
+        visual_sum = 0.0
+        for face_index, candidate in matched:
+            total, face_penalty, profile_penalty = candidate_penalties(face_index, candidate)
+            gender_penalty_sum += total
+            face_gender_penalty_sum += face_penalty
+            profile_gender_penalty_sum += profile_penalty
+            visual_sum += float(candidate.get("similarity") or 0.0)
+
+        social_score_sum = 0.0
+        checked_social_pairs = 0
+        connected_social_pairs = 0
+        disconnected_social_pairs = 0
+        relations: list[dict[str, Any]] = []
+        for offset, (face_index_a, candidate_a) in enumerate(matched):
+            for face_index_b, candidate_b in matched[offset + 1:]:
+                relation = _pair_relation(candidate_a, candidate_b, friend_ids)
+                social_score_sum += _pair_bonus(relation, options)
+                has_friend = bool(relation.get("friend"))
+                has_common = int(relation.get("common_friends") or 0) > 0
+                if has_friend or has_common:
+                    checked_social_pairs += 1
+                    connected_social_pairs += 1
+                elif relation.get("friend_data_available"):
+                    social_score_sum -= disconnected_penalty
+                    checked_social_pairs += 1
+                    disconnected_social_pairs += 1
+                if has_friend or has_common or relation.get("same_city"):
+                    relations.append({
+                        "from": candidate_a["profile_key"],
+                        "to": candidate_b["profile_key"],
+                        **relation,
+                    })
+
+        matched_count = len(matched)
+        # Lexicographic objective is intentional: never discard a usable face
+        # match only because API friendship data is absent. When match counts
+        # tie, prefer confident gender agreement, then known social coherence,
+        # and finally visual similarity.
+        objective = (
+            matched_count,
+            -round(gender_penalty_sum, 6),
+            round(social_score_sum, 6),
+            round(visual_sum, 6),
+        )
+        return {
+            "objective": objective,
+            "matched_faces": matched_count,
+            "gender_penalty_sum": gender_penalty_sum,
+            "face_gender_penalty_sum": face_gender_penalty_sum,
+            "profile_gender_penalty_sum": profile_gender_penalty_sum,
+            "visual_sum": visual_sum,
+            "social_score_sum": social_score_sum,
+            "checked_social_pairs": checked_social_pairs,
+            "connected_social_pairs": connected_social_pairs,
+            "disconnected_social_pairs": disconnected_social_pairs,
+            "relations": relations,
         }
 
-        def explain_unmatched(item: dict[str, Any], face_index: int) -> str:
-            original_reason = str(item.get("unmatched_reason") or "").strip()
-            face_candidates = (
-                candidates_by_face[face_index]
-                if 0 <= face_index < len(candidates_by_face) else []
-            )
-            original_candidates = [
-                candidate for candidate in face_candidates
+    def solve(forbidden: set[tuple[int, str]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        choices = [row_choices(i, forbidden) for i in range(face_count)]
+        assignment = initial_assignment(forbidden)
+        best_metrics = evaluate(assignment)
+
+        def is_better(metrics: dict[str, Any], current: dict[str, Any]) -> bool:
+            return metrics["objective"] > current["objective"]
+
+        # Coordinate ascent over one face and then pairs of faces. Pair moves
+        # allow reassignment when the best profile for one face is currently
+        # owned by another face; profile keys remain globally unique.
+        for _pass in range(3):
+            current_metrics = evaluate(assignment)
+            best_assignment = assignment
+            best_metrics = current_metrics
+
+            for i in range(face_count):
+                used_by_others = {
+                    str(item.get("profile_key") or "")
+                    for j, item in enumerate(assignment)
+                    if j != i and not item.get("unmatched")
+                }
+                for candidate in choices[i]:
+                    key = str(candidate.get("profile_key") or "")
+                    if not candidate.get("unmatched") and key in used_by_others:
+                        continue
+                    variant = list(assignment)
+                    variant[i] = candidate
+                    metrics = evaluate(variant)
+                    if is_better(metrics, best_metrics):
+                        best_assignment, best_metrics = variant, metrics
+
+            for i in range(face_count):
+                for j in range(i + 1, face_count):
+                    used_elsewhere = {
+                        str(item.get("profile_key") or "")
+                        for k, item in enumerate(assignment)
+                        if k not in (i, j) and not item.get("unmatched")
+                    }
+                    for candidate_i in choices[i]:
+                        key_i = str(candidate_i.get("profile_key") or "")
+                        if not candidate_i.get("unmatched") and key_i in used_elsewhere:
+                            continue
+                        for candidate_j in choices[j]:
+                            key_j = str(candidate_j.get("profile_key") or "")
+                            if not candidate_j.get("unmatched") and key_j in used_elsewhere:
+                                continue
+                            if (
+                                not candidate_i.get("unmatched")
+                                and not candidate_j.get("unmatched")
+                                and key_i == key_j
+                            ):
+                                continue
+                            variant = list(assignment)
+                            variant[i] = candidate_i
+                            variant[j] = candidate_j
+                            metrics = evaluate(variant)
+                            if is_better(metrics, best_metrics):
+                                best_assignment, best_metrics = variant, metrics
+
+            if not is_better(best_metrics, current_metrics):
+                break
+            assignment = best_assignment
+
+        return assignment, evaluate(assignment)
+
+    best_assignment, _best_metrics = solve(set())
+    solutions: list[tuple[list[dict[str, Any]], dict[str, Any]]] = [(best_assignment, _best_metrics)]
+    seen_signatures = {
+        tuple(str(item.get("profile_key") or "") for item in best_assignment)
+    }
+
+    # Generate alternatives by forbidding each best face->profile edge in turn.
+    # Each run re-solves the global assignment, instead of emitting arbitrary
+    # beam-search states that may violate the strongest group constraints.
+    for face_index, candidate in enumerate(best_assignment):
+        if candidate.get("unmatched"):
+            continue
+        forbidden = {(face_index, str(candidate.get("profile_key") or ""))}
+        alternative_assignment, alternative_metrics = solve(forbidden)
+        signature = tuple(str(item.get("profile_key") or "") for item in alternative_assignment)
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+        solutions.append((alternative_assignment, alternative_metrics))
+        if len(solutions) >= max(10, min(10, int(limit))):
+            break
+
+    solutions.sort(
+        key=lambda item: (
+            item[1]["objective"],
+            tuple(str(profile.get("profile_key") or "") for profile in item[0]),
+        ),
+        reverse=True,
+    )
+
+    combinations: list[dict[str, Any]] = []
+    pair_count = max(1, face_count * (face_count - 1) / 2)
+    for assignment, metrics in solutions[:max(1, int(limit))]:
+        matched_count = int(metrics["matched_faces"])
+        visual_average = (
+            float(metrics["visual_sum"]) / matched_count if matched_count else 0.0
+        )
+        relation_bonus = float(metrics["social_score_sum"]) / pair_count
+        checked_pairs = int(metrics["checked_social_pairs"])
+        social_quality = (
+            float(metrics["social_score_sum"]) / checked_pairs if checked_pairs else 0.0
+        )
+        used_profile_keys = {
+            str(item.get("profile_key") or "")
+            for item in assignment if not item.get("unmatched")
+        }
+
+        profiles = []
+        for face_index, item in enumerate(assignment):
+            unmatched = bool(item.get("unmatched"))
+            face_candidates = [
+                candidate for candidate in candidates_by_face[face_index]
                 if isinstance(candidate, dict) and not candidate.get("unmatched")
+                and _has_internet_profile(candidate)
             ]
-            available = [
-                candidate for candidate in original_candidates
-                if _has_internet_profile(candidate)
-            ]
-            if not available:
-                if original_candidates:
-                    return (
+            query_gender = (
+                normalized_genders[face_index]
+                if face_index < len(normalized_genders)
+                else {"gender": "unknown", "confidence": 0.0}
+            )
+            candidate_gender = _normalize_gender_prediction(item)
+            selected_key = str(item.get("profile_key") or "")
+            if unmatched:
+                original_candidates = [
+                    candidate for candidate in candidates_by_face[face_index]
+                    if isinstance(candidate, dict) and not candidate.get("unmatched")
+                ]
+                if original_candidates and not face_candidates:
+                    unmatched_reason = (
                         "Найдены локальные лица без интернет-профиля; они исключены "
                         "из оценки связей. Для назначения нужен URL страницы профиля."
                     )
-                return original_reason or (
-                    "В активном индексе нет кандидата выше заданного порога сходства."
+                elif face_candidates and {
+                    str(candidate.get("profile_key") or _stable_profile_key(candidate))
+                    for candidate in face_candidates
+                }.issubset(used_profile_keys):
+                    unmatched_reason = (
+                        "Все доступные интернет-профили-кандидаты уже назначены другим "
+                        "лицам в этой комбинации. Проверьте другие варианты группы."
+                    )
+                elif not face_candidates:
+                    unmatched_reason = (
+                        "В активном индексе нет интернет-профиля выше заданного порога сходства."
+                    )
+                else:
+                    unmatched_reason = (
+                        "Кандидат не выбран в этой комбинации. Проверьте альтернативы "
+                        "группового анализа и индивидуальные результаты поиска."
+                    )
+                similarity = 0.0
+                face_id = 0
+                profile_url = ""
+                source_url = ""
+                city = ""
+                profile_key = selected_key
+                name = item.get("name") or "Нет надёжного совпадения"
+                penalty, face_penalty, profile_penalty = 0.0, 0.0, 0.0
+                assignment_confidence = "none"
+                confidence_reason = unmatched_reason
+                visual_margin = None
+            else:
+                unmatched_reason = ""
+                similarity = float(item.get("similarity") or 0.0)
+                face_id = int(item.get("face_id") or 0)
+                profile_url = str(item.get("profile_url") or "")
+                source_url = str(item.get("source_url") or "")
+                city = str(item.get("city") or "")
+                profile_key = selected_key
+                name = item.get("name") or "Без имени"
+                penalty, face_penalty, profile_penalty = candidate_penalties(face_index, item)
+                other_scores = [
+                    float(candidate.get("similarity") or 0.0)
+                    for candidate in face_candidates
+                    if str(candidate.get("profile_key") or _stable_profile_key(candidate)) != selected_key
+                ]
+                best_alternative_similarity = max(other_scores) if other_scores else None
+                visual_margin = (
+                    similarity - best_alternative_similarity
+                    if best_alternative_similarity is not None else None
                 )
-            keys = {
-                str(candidate.get("profile_key") or _stable_profile_key(candidate))
-                for candidate in available
-            }
-            if keys and keys.issubset(used_profile_keys):
-                return (
-                    "Все доступные профили-кандидаты уже назначены другим лицам "
-                    "в этой комбинации. Проверьте другие комбинации или увеличьте "
-                    "параметр «Кандидатов на лицо»."
-                )
-            return (
-                "Кандидат не выбран в этой комбинации. Проверьте другие варианты "
-                "группы и индивидуальные результаты поиска."
-            )
+                strong_gender_conflict = penalty > 0.0
+                if strong_gender_conflict:
+                    assignment_confidence = "low"
+                    confidence_reason = "Есть уверенное противоречие по полу; проверьте результат вручную."
+                elif similarity >= 90.0 and (visual_margin is None or visual_margin >= 5.0):
+                    assignment_confidence = "high"
+                    confidence_reason = "Высокое сходство и заметный отрыв от следующего визуального кандидата."
+                elif similarity >= 75.0 and (visual_margin is None or visual_margin >= 2.0):
+                    assignment_confidence = "medium"
+                    confidence_reason = "Сходство достаточно высокое, но назначение требует контекстной проверки."
+                else:
+                    assignment_confidence = "low"
+                    confidence_reason = "Недостаточный отрыв от альтернатив или невысокое сходство."
+            profiles.append({
+                "face_index": face_index,
+                "name": name,
+                "profile_url": profile_url,
+                "source_url": source_url,
+                "city": city,
+                "similarity": similarity,
+                "face_id": face_id,
+                "profile_key": profile_key,
+                "vk_user_id": item.get("vk_user_id"),
+                "unmatched": unmatched,
+                "unmatched_reason": unmatched_reason,
+                "gender": candidate_gender.get("gender", "unknown"),
+                "gender_confidence": candidate_gender.get("confidence", 0.0),
+                "profile_gender": item.get("profile_gender", "unknown"),
+                "profile_gender_confidence": float(item.get("profile_gender_confidence") or 0.0),
+                "query_gender": query_gender,
+                "face_gender_penalty": round(face_penalty, 2),
+                "profile_gender_penalty": round(profile_penalty, 2),
+                "gender_penalty": round(penalty, 2),
+                "assignment_confidence": assignment_confidence,
+                "confidence_reason": confidence_reason,
+                "visual_margin": round(visual_margin, 2) if visual_margin is not None else None,
+            })
 
         combinations.append({
             "rank": len(combinations) + 1,
-            "score": round(visual_average + relation_bonus - float(state["gender_penalty_sum"]) / count, 2),
+            "score": round(
+                visual_average + relation_bonus
+                - float(metrics["gender_penalty_sum"]) / max(1, matched_count),
+                2,
+            ),
             "visual_average": round(visual_average, 2),
-            "gender_penalty": round(float(state["gender_penalty_sum"]), 2),
-            "profile_gender_penalty": round(float(state.get("profile_gender_penalty_sum", 0.0)), 2),
+            "gender_penalty": round(float(metrics["gender_penalty_sum"]), 2),
+            "profile_gender_penalty": round(float(metrics["profile_gender_penalty_sum"]), 2),
             "social_bonus": round(relation_bonus, 2),
             "social_evidence": round(social_quality, 2),
-            "connected_pairs": int(state["connected_social_pairs"]),
-            "disconnected_pairs": int(state["disconnected_social_pairs"]),
+            "connected_pairs": int(metrics["connected_social_pairs"]),
+            "disconnected_pairs": int(metrics["disconnected_social_pairs"]),
             "checked_social_pairs": checked_pairs,
-            "matched_faces": sum(1 for item in chosen if not item.get("unmatched")),
-            "profiles": [
-                {
-                    "face_index": int(item.get("face_index", index)),
-                    "name": item.get("name") or "Без имени",
-                    "profile_url": item.get("profile_url") or "",
-                    "source_url": item.get("source_url") or "",
-                    "city": item.get("city") or "",
-                    "similarity": float(item.get("similarity") or 0.0),
-                    "face_id": int(item.get("face_id") or 0),
-                    "profile_key": item["profile_key"],
-                    "vk_user_id": item.get("vk_user_id"),
-                    "unmatched": bool(item.get("unmatched")),
-                    "unmatched_reason": (
-                        explain_unmatched(item, int(item.get("face_index", index)))
-                        if item.get("unmatched") else ""
-                    ),
-                    "gender": _normalize_gender_prediction(item).get("gender", "unknown"),
-                    "gender_confidence": _normalize_gender_prediction(item).get("confidence", 0.0),
-                    "profile_gender": item.get("profile_gender", "unknown"),
-                    "profile_gender_confidence": float(item.get("profile_gender_confidence") or 0.0),
-                    "query_gender": (
-                        query_genders[int(item.get("face_index", index))]
-                        if query_genders is not None
-                        and 0 <= int(item.get("face_index", index)) < len(query_genders)
-                        else {"gender": "unknown", "confidence": 0.0}
-                    ),
-                    "face_gender_penalty": (
-                        round(_gender_mismatch_penalty(
-                            query_genders[int(item.get("face_index", index))], item, options
-                        ), 2)
-                        if query_genders is not None
-                        and 0 <= int(item.get("face_index", index)) < len(query_genders)
-                        and not item.get("unmatched")
-                        else 0.0
-                    ),
-                    "profile_gender_penalty": (
-                        round(_profile_gender_mismatch_penalty(
-                            query_genders[int(item.get("face_index", index))], item, options
-                        ), 2)
-                        if query_genders is not None
-                        and 0 <= int(item.get("face_index", index)) < len(query_genders)
-                        and not item.get("unmatched")
-                        else 0.0
-                    ),
-                    "gender_penalty": round(
-                        (
-                            _gender_mismatch_penalty(
-                                query_genders[int(item.get("face_index", index))], item, options
-                            )
-                            + _profile_gender_mismatch_penalty(
-                                query_genders[int(item.get("face_index", index))], item, options
-                            )
-                        ), 2
-                    ) if query_genders is not None
-                    and 0 <= int(item.get("face_index", index)) < len(query_genders)
-                    and not item.get("unmatched") else 0.0,
-                }
-                for index, item in enumerate(chosen)
-            ],
-            "relations": state["pair_relations"],
+            "matched_faces": matched_count,
+            "profiles": profiles,
+            "relations": metrics["relations"],
         })
-        if len(combinations) >= limit:
+        if len(combinations) >= max(1, int(limit)):
             break
     return combinations
+
 
 def _graph_payload(combination: dict[str, Any]) -> dict[str, Any]:
     profiles = combination.get("profiles", [])
