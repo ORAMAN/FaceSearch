@@ -89,6 +89,8 @@ def _saved_group_analysis_options() -> dict:
         "friend_weight": saved.get("group_friend_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["friend_weight"]),
         "common_friend_weight": saved.get("group_common_friend_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["common_friend_weight"]),
         "city_weight": saved.get("group_city_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["city_weight"]),
+        "education_weight": saved.get("group_education_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["education_weight"]),
+        "workplace_weight": saved.get("group_workplace_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["workplace_weight"]),
         "check_vk_friends": saved.get("group_check_vk_friends", DEFAULT_GROUP_ANALYSIS_OPTIONS["check_vk_friends"]),
         "check_gender": saved.get("group_check_gender", DEFAULT_GROUP_ANALYSIS_OPTIONS["check_gender"]),
         "gender_weight": saved.get("group_gender_weight", DEFAULT_GROUP_ANALYSIS_OPTIONS["gender_weight"]),
@@ -637,6 +639,8 @@ def _initialize_runtime() -> None:
         "friend_weight": gui_settings.get("group_friend_weight", 8.0),
         "common_friend_weight": gui_settings.get("group_common_friend_weight", 2.0),
         "city_weight": gui_settings.get("group_city_weight", 1.5),
+        "education_weight": gui_settings.get("group_education_weight", 2.0),
+        "workplace_weight": gui_settings.get("group_workplace_weight", 2.0),
         "check_vk_friends": gui_settings.get("group_check_vk_friends", True),
         "check_gender": gui_settings.get("group_check_gender", True),
         "gender_weight": gui_settings.get("group_gender_weight", 4.0),
@@ -1525,6 +1529,14 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
         <div class="field">
           <label for="group-city-weight">Вес совпадения города</label>
           <input id="group-city-weight" type="number" min="0" max="10" step="0.5" value="__GROUP_CITY_WEIGHT__">
+        </div>
+        <div class="field">
+          <label for="group-education-weight">Вес совпадения школы / учебного заведения</label>
+          <input id="group-education-weight" type="number" min="0" max="10" step="0.5" value="__GROUP_EDUCATION_WEIGHT__">
+        </div>
+        <div class="field">
+          <label for="group-workplace-weight">Вес совпадения организации / места работы</label>
+          <input id="group-workplace-weight" type="number" min="0" max="10" step="0.5" value="__GROUP_WORKPLACE_WEIGHT__">
         </div>
         <div class="field">
           <label for="group-gender-weight">Штраф за несовпадение пола лица по фото</label>
@@ -2949,6 +2961,10 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 "__GROUP_COMMON_FRIEND_WEIGHT__", str(group_defaults["common_friend_weight"])
             ).replace(
                 "__GROUP_CITY_WEIGHT__", str(group_defaults["city_weight"])
+            ).replace(
+                "__GROUP_EDUCATION_WEIGHT__", str(group_defaults["education_weight"])
+            ).replace(
+                "__GROUP_WORKPLACE_WEIGHT__", str(group_defaults["workplace_weight"])
             ).replace(
                 "__GROUP_CHECK_VK_FRIENDS__", "checked" if group_defaults["check_vk_friends"] else ""
             ).replace(
