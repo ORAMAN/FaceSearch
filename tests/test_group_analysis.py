@@ -214,10 +214,11 @@ class GroupAnalysisTests(unittest.TestCase):
                 },
             ],
         ]
+        # Numeric labels are the actual InsightFace contract: 0=female, 1=male.
         predictions = {
-            1001: {"gender": "female", "confidence": 0.96},
-            2002: {"gender": "male", "confidence": 0.97},
-            2001: {"gender": "female", "confidence": 0.94},
+            1001: {"gender": 0, "confidence": 0.96},
+            2002: {"gender": 1, "confidence": 0.97},
+            2001: {"gender": 0, "confidence": 0.94},
         }
 
         with tempfile.TemporaryDirectory() as app_dir:
@@ -231,8 +232,8 @@ class GroupAnalysisTests(unittest.TestCase):
                 },
                 app_dir,
                 query_genders=[
-                    {"gender": "female", "confidence": 0.96},
-                    {"gender": "female", "confidence": 0.95},
+                    {"gender": 0, "confidence": 0.96},
+                    {"gender": 0, "confidence": 0.95},
                 ],
                 gender_classifier=lambda candidate: predictions[int(candidate["face_id"])],
             )
@@ -267,10 +268,11 @@ class GroupAnalysisTests(unittest.TestCase):
                 },
             ],
         ]
+        # Numeric labels are the actual InsightFace contract: 0=female, 1=male.
         predictions = {
-            1001: {"gender": "female", "confidence": 0.96},
-            2002: {"gender": "male", "confidence": 0.97},
-            2001: {"gender": "female", "confidence": 0.94},
+            1001: {"gender": 0, "confidence": 0.96},
+            2002: {"gender": 1, "confidence": 0.97},
+            2001: {"gender": 0, "confidence": 0.94},
         }
 
         with tempfile.TemporaryDirectory() as app_dir:
@@ -284,8 +286,8 @@ class GroupAnalysisTests(unittest.TestCase):
                 },
                 app_dir,
                 query_genders=[
-                    {"gender": "female", "confidence": 0.96},
-                    {"gender": "female", "confidence": 0.58},
+                    {"gender": 0, "confidence": 0.96},
+                    {"gender": 0, "confidence": 0.58},
                 ],
                 gender_classifier=lambda candidate: predictions[int(candidate["face_id"])],
             )
