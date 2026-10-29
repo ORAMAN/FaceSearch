@@ -31,6 +31,7 @@ import hashlib
 import html
 import importlib
 import json
+import math
 import os
 import shutil
 import ssl
@@ -62,6 +63,9 @@ _LOADER_MODULE_DIR = str(Path(__file__).resolve().parent / "loaders")
 if _LOADER_MODULE_DIR not in sys.path:
     sys.path.insert(0, _LOADER_MODULE_DIR)
 from edit_shortcuts import install_edit_shortcuts
+
+_TK_GROUP_GENDER_CACHE: dict[int, dict[str, Any]] = {}
+_TK_GROUP_GENDER_CACHE_LOCK = threading.RLock()
 
 # Необязательная поддержка drag-and-drop. Устанавливается через requirements.txt.
 # Если расширение TkDND недоступно, приложение продолжит запускаться без DnD.
@@ -187,6 +191,7 @@ from facesearch.card_text_filter import (
     candidate_count_for_text_filter,
     filter_results_by_card_text,
 )
+from facesearch import group_analysis
 from facesearch.indexing.cleanup import image_record_has_recoverable_source
 from facesearch.indexing.embeddings import embedding_blob_to_view
 from facesearch.database.schema import (
@@ -5850,7 +5855,10 @@ class FaceSearchGUI:
         frame.pack(fill="both", expand=True)
         ttk.Label(
             frame,
-            text="Параметры по умолчанию для веб-интерфейса server_http.py",
+            text=(
+                "Общие параметры группового анализа для Tkinter и server_http.py. "
+                "Они сохраняются в settings.xml и используются сервером при следующем запросе."
+            ),
             style="Section.TLabel",
             wraplength=430,
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
@@ -6339,6 +6347,11 @@ class FaceSearchGUI:
             command=self._open_group_analysis_settings,
         )
         self.group_analysis_settings_btn.pack(side="bottom", fill="x", pady=(6, 0))
+        self.group_analysis_btn = ttk.Button(
+            left, text="◎  Анализ связей группы",
+            command=self.start_group_analysis, state="disabled",
+        )
+        self.group_analysis_btn.pack(side="bottom", fill="x", pady=(6, 0))
 
         controls = ttk.Frame(left, style="Surface.TFrame")
         controls.pack(side="bottom", fill="x", pady=(0, 8))
@@ -6724,6 +6737,7 @@ class FaceSearchGUI:
                 pass
 
         self._update_worker_control_state()
+        self._update_group_analysis_state()
 
 
     def _show_scan_control_status(self, message: str):
@@ -8736,6 +8750,28 @@ class FaceSearchGUI:
                 else "normal"
             )
         )
+        self._update_group_analysis_state()
+
+    def _update_group_analysis_state(self):
+        button = getattr(self, "group_analysis_btn", None)
+        if button is None:
+            return
+        valid_count = sum(
+            1 for face in (getattr(self, "query_faces", []) or [])
+            if float(getattr(face, "det_score", 0.0)) >= DET_THRESHOLD
+            and getattr(face, "normed_embedding", None) is not None
+        )
+        ready = (
+            valid_count >= 2
+            and not bool(getattr(self, "busy", False))
+            and not bool(getattr(self, "startup_db_pending", True))
+            and not bool(getattr(self, "startup_db_failed", False))
+            and Path(INDEX_FILE).is_file()
+        )
+        try:
+            button.configure(state="normal" if ready else "disabled")
+        except tk.TclError:
+            pass
 
     # --------------------------------------------------------
     # FAISS / Search
