@@ -270,6 +270,33 @@ def _stable_profile_key(candidate: dict[str, Any]) -> str:
     return "face:" + str(int(candidate.get("face_id") or 0))
 
 
+def _has_internet_profile(candidate: dict[str, Any]) -> bool:
+    """Return True only for candidates tied to an online profile, not just a local face/image."""
+    if not isinstance(candidate, dict):
+        return False
+    if vk_user_id(candidate):
+        return True
+
+    # source_url is intentionally excluded: it commonly points to the image/file,
+    # not to the page of the person/profile.
+    for field in ("profile_url", "url_source"):
+        value = str(candidate.get(field) or "").strip()
+        if not value:
+            continue
+        try:
+            url = value if "://" in value else "https://" + value
+            parsed = urlparse(url)
+            hostname = (parsed.hostname or "").strip(".").lower()
+            if parsed.scheme.lower() not in ("http", "https") or not hostname:
+                continue
+            if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".local"):
+                continue
+            return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def _prepare_candidates(
     candidates_by_face: list[list[dict[str, Any]]],
     options: dict[str, Any],
@@ -281,10 +308,14 @@ def _prepare_candidates(
     for face_index, original in enumerate(candidates_by_face):
         seen: set[str] = set()
         current: list[dict[str, Any]] = []
+        original_items = [item for item in original if isinstance(item, dict)]
         ordered = sorted(
-            (item for item in original if isinstance(item, dict)),
+            (item for item in original_items if _has_internet_profile(item)),
             key=lambda item: float(item.get("similarity") or 0.0),
             reverse=True,
+        )
+        had_local_only_candidates = any(
+            not _has_internet_profile(item) for item in original_items
         )
         for item in ordered:
             try:
@@ -324,7 +355,9 @@ def _prepare_candidates(
             "similarity": 0.0,
             "vk_user_id": None,
             "unmatched_reason": (
-                "Ни один кандидат не получил достаточного подтверждения в общем наборе профилей."
+                "Найдены локальные лица без интернет-профиля; они исключены из оценки связей."
+                if had_local_only_candidates and not current
+                else "Ни один кандидат не получил достаточного подтверждения в общем наборе профилей."
             ),
             "unmatched": True,
         })
@@ -665,11 +698,20 @@ def _rank_combinations(
                 candidates_by_face[face_index]
                 if 0 <= face_index < len(candidates_by_face) else []
             )
-            available = [
+            original_candidates = [
                 candidate for candidate in face_candidates
                 if isinstance(candidate, dict) and not candidate.get("unmatched")
             ]
+            available = [
+                candidate for candidate in original_candidates
+                if _has_internet_profile(candidate)
+            ]
             if not available:
+                if original_candidates:
+                    return (
+                        "Найдены локальные лица без интернет-профиля; они исключены "
+                        "из оценки связей. Для назначения нужен URL страницы профиля."
+                    )
                 return original_reason or (
                     "В активном индексе нет кандидата выше заданного порога сходства."
                 )
