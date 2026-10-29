@@ -190,7 +190,7 @@
       const meta = document.createElement("div");
       meta.className = "group-profile-meta";
       meta.textContent = profile.unmatched
-        ? "Нет кандидата выше порога"
+        ? String(profile.unmatched_reason || "Нет кандидата выше порога")
         : "Сходство лица: " + Number(profile.similarity || 0).toFixed(2) + "%" + (profile.city ? " · " + profile.city : "");
       card.appendChild(meta);
 
