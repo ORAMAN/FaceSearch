@@ -95,96 +95,101 @@ class GroupAnalysisTests(unittest.TestCase):
         self.assertEqual(status["status"], "ok")
         self.assertEqual(FakeVkLoader.calls, [(user_id, 5000)])
 
-    def test_group_analysis_keeps_anna_when_daryas_stored_elena_face_scores_higher_for_elena(self):
-        # Один и тот же face_id из фотографии в профиле Дарьи подходит Елене
-        # заметно лучше, чем Анне. Анна при этом сама присутствует в индексе.
+    def test_socially_connected_anna_beats_higher_similarity_darya(self):
+        # Дарья имеет чуть более высокий visual score для второго лица, но
+        # Елена и Анна подтверждённо связаны, а с Дарьей связи нет.
         candidates = [
             [
                 {
                     "face_id": 1001,
                     "name": "Елена",
-                    "profile_url": "https://vk.com/elena",
-                    "similarity": 89.0,
-                },
-                {
-                    "face_id": 1002,
-                    "name": "Дарья",
-                    "profile_url": "https://vk.com/darya",
+                    "profile_url": "https://vk.com/id101",
                     "similarity": 88.0,
                 },
             ],
             [
                 {
-                    "face_id": 1002,
+                    "face_id": 2002,
                     "name": "Дарья",
-                    "profile_url": "https://vk.com/darya",
-                    "similarity": 55.0,
+                    "profile_url": "https://vk.com/id202",
+                    "similarity": 94.0,
                 },
                 {
                     "face_id": 2001,
                     "name": "Анна",
-                    "profile_url": "https://vk.com/anna",
-                    "similarity": 83.0,
+                    "profile_url": "https://vk.com/id303",
+                    "similarity": 72.0,
                 },
             ],
         ]
+        friends = {
+            101: {303, 9001, 9002},
+            303: {101, 9001, 9002},
+            202: set(),
+        }
         options = {
             "min_similarity": 43.0,
             "candidates_per_face": 5,
-            "check_vk_friends": False,
+            "friend_weight": 8.0,
+            "common_friend_weight": 2.0,
+            "city_weight": 1.5,
+            "check_vk_friends": True,
         }
-        with tempfile.TemporaryDirectory() as app_dir:
+        with tempfile.TemporaryDirectory() as app_dir, patch(
+            "facesearch.group_analysis._load_friend_sets",
+            return_value=(friends, {"status": "ok", "message": "test"}),
+        ):
             result = analyze_group(candidates, options, app_dir)
 
-        self.assertTrue(result["ok"])
         best = result["combinations"][0]
         by_face = {item["face_index"]: item for item in best["profiles"]}
         self.assertEqual(by_face[0]["name"], "Елена")
         self.assertEqual(by_face[1]["name"], "Анна")
-        self.assertGreaterEqual(result["cross_face_filtered"], 1)
+        self.assertGreaterEqual(best["connected_pairs"], 1)
+        self.assertEqual(best["disconnected_pairs"], 0)
 
-    def test_group_analysis_leaves_anna_unmatched_when_only_daryas_elena_face_is_found(self):
-        # Если в базе нет Анны, не выдаём Дарью за совпадение для Анны:
-        # обнаруженное лицо из профиля Дарьи гораздо лучше совпадает с Еленой.
+    def test_unrelated_profile_is_left_unmatched_when_no_social_evidence_exists(self):
+        # Если список друзей подтверждает, что связь отсутствует, нельзя
+        # назначать Дарью Анне только из-за похожести фотографии.
         candidates = [
             [
                 {
                     "face_id": 1001,
                     "name": "Елена",
-                    "profile_url": "https://vk.com/elena",
-                    "similarity": 91.0,
-                },
-                {
-                    "face_id": 1002,
-                    "name": "Дарья",
-                    "profile_url": "https://vk.com/darya",
-                    "similarity": 88.0,
+                    "profile_url": "https://vk.com/id101",
+                    "similarity": 92.0,
                 },
             ],
             [
                 {
-                    "face_id": 1002,
+                    "face_id": 2002,
                     "name": "Дарья",
-                    "profile_url": "https://vk.com/darya",
-                    "similarity": 55.0,
+                    "profile_url": "https://vk.com/id202",
+                    "similarity": 65.0,
                 },
             ],
         ]
+        friends = {101: {8001}, 202: {9001}}
         options = {
             "min_similarity": 43.0,
             "candidates_per_face": 5,
-            "check_vk_friends": False,
+            "friend_weight": 8.0,
+            "common_friend_weight": 2.0,
+            "city_weight": 1.5,
+            "check_vk_friends": True,
         }
-        with tempfile.TemporaryDirectory() as app_dir:
+        with tempfile.TemporaryDirectory() as app_dir, patch(
+            "facesearch.group_analysis._load_friend_sets",
+            return_value=(friends, {"status": "ok", "message": "test"}),
+        ):
             result = analyze_group(candidates, options, app_dir)
 
         best = result["combinations"][0]
         by_face = {item["face_index"]: item for item in best["profiles"]}
         self.assertEqual(by_face[0]["name"], "Елена")
         self.assertTrue(by_face[1]["unmatched"])
-        self.assertEqual(by_face[1]["name"], "Нет отдельного совпадения")
-        self.assertIn("другим лицом", by_face[1]["unmatched_reason"])
-        self.assertGreaterEqual(result["cross_face_filtered"], 1)
+        self.assertEqual(best["disconnected_pairs"], 0)
+        self.assertNotEqual(by_face[1]["name"], "Дарья")
 
     def test_options_are_clamped(self):
         options = normalize_options({
