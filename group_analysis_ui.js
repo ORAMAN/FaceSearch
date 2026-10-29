@@ -263,7 +263,8 @@
       subtitle.textContent =
         "Сходство в среднем: " + Number(combo.visual_average || 0).toFixed(2) +
         "% · оценка связей: " + Number(combo.social_evidence || 0).toFixed(2) +
-        " · суммарный штраф пола: −" + Number(combo.gender_penalty || 0).toFixed(2) +
+        " · штраф пола всего: −" + Number(combo.gender_penalty || 0).toFixed(2) +
+        " (по профилю −" + Number(combo.profile_gender_penalty || 0).toFixed(2) + ")" +
         " · связанные пары: " + Number(combo.connected_pairs || 0) +
         " · пары без подтверждённых связей: " + Number(combo.disconnected_pairs || 0) +
         " · сопоставлено лиц: " + Number(combo.matched_faces || 0) + "/" + (combo.profiles || []).length;
