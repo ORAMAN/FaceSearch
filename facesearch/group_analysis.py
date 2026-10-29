@@ -245,6 +245,16 @@ def _stable_profile_key(candidate: dict[str, Any]) -> str:
     user_id = vk_user_id(candidate)
     if user_id:
         return "vk:" + str(user_id)
+
+    # Идентификатор строки profiles надёжно объединяет разные face.id,
+    # даже когда у старых/импортированных записей отсутствует профильный URL.
+    try:
+        profile_id = int(candidate.get("profile_id") or 0)
+    except (TypeError, ValueError):
+        profile_id = 0
+    if profile_id > 0:
+        return "profile:" + str(profile_id)
+
     for field in ("profile_url", "source_url", "url_source"):
         value = str(candidate.get(field) or "").strip()
         if not value:
