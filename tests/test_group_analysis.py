@@ -188,35 +188,17 @@ class GroupAnalysisTests(unittest.TestCase):
         self.assertGreaterEqual(best["connected_pairs"], 1)
         self.assertEqual(best["disconnected_pairs"], 0)
 
-    def test_unrelated_profile_is_left_unmatched_when_no_social_evidence_exists(self):
-        # Если список друзей подтверждает, что связь отсутствует, нельзя
-        # назначать Дарью Анне только из-за похожести фотографии.
+    def test_strong_visual_match_is_not_discarded_only_for_missing_social_links(self):
+        # Отсутствие дружбы VK не должно отменять сильное индивидуальное совпадение.
         candidates = [
-            [
-                {
-                    "face_id": 1001,
-                    "name": "Елена",
-                    "profile_url": "https://vk.com/id101",
-                    "similarity": 92.0,
-                },
-            ],
-            [
-                {
-                    "face_id": 2002,
-                    "name": "Дарья",
-                    "profile_url": "https://vk.com/id202",
-                    "similarity": 65.0,
-                },
-            ],
+            [{"face_id": 1001, "name": "Елена", "profile_url": "https://vk.com/id101", "similarity": 96.0}],
+            [{"face_id": 2002, "name": "Дарья", "profile_url": "https://vk.com/id202", "similarity": 95.0}],
         ]
         friends = {101: {8001}, 202: {9001}}
         options = {
-            "min_similarity": 43.0,
-            "candidates_per_face": 5,
-            "friend_weight": 8.0,
-            "common_friend_weight": 2.0,
-            "city_weight": 1.5,
-            "check_vk_friends": True,
+            "min_similarity": 43.0, "candidates_per_face": 5,
+            "friend_weight": 8.0, "common_friend_weight": 2.0,
+            "city_weight": 1.5, "check_vk_friends": True,
         }
         with tempfile.TemporaryDirectory() as app_dir, patch(
             "facesearch.group_analysis._load_friend_sets",
@@ -227,11 +209,51 @@ class GroupAnalysisTests(unittest.TestCase):
         best = result["combinations"][0]
         by_face = {item["face_index"]: item for item in best["profiles"]}
         self.assertEqual(by_face[0]["name"], "Елена")
-        self.assertTrue(by_face[1]["unmatched"])
-        self.assertEqual(best["disconnected_pairs"], 0)
-        self.assertNotEqual(by_face[1]["name"], "Дарья")
+        self.assertEqual(by_face[1]["name"], "Дарья")
+        self.assertFalse(by_face[1]["unmatched"])
+        self.assertEqual(best["disconnected_pairs"], 1)
 
-    def test_confident_gender_mismatch_prefers_candidate_compatible_with_source_face(self):
+    def test_profile_sex_mismatch_does_not_beat_gender_compatible_candidate_on_social_bonus(self):
+        # Уверенное определение пола исходного лица важнее социальной связи
+        # с кандидатом, пол которого противоречит исходному.
+        candidates = [
+            [{"face_id": 1001, "name": "Елена", "profile_url": "https://vk.com/id101", "profile_sex": 2, "similarity": 94.0}],
+            [
+                {"face_id": 2002, "name": "Дарья", "profile_url": "https://vk.com/id202", "profile_sex": 1, "similarity": 96.0},
+                {"face_id": 2001, "name": "Алексей", "profile_url": "https://vk.com/id303", "profile_sex": 2, "similarity": 82.0},
+            ],
+        ]
+        friends = {101: {202, 8001}, 202: {101, 8001}, 303: {9002}}
+        predictions = {
+            1001: {"gender": "male", "confidence": 0.99},
+            2002: {"gender": "female", "confidence": 0.99},
+            2001: {"gender": "male", "confidence": 0.99},
+        }
+        with tempfile.TemporaryDirectory() as app_dir, patch(
+            "facesearch.group_analysis._load_friend_sets",
+            return_value=(friends, {"status": "ok", "message": "test"}),
+        ):
+            result = analyze_group(
+                candidates,
+                {
+                    "check_vk_friends": True, "check_gender": True,
+                    "gender_weight": 4.0, "profile_gender_weight": 16.0,
+                    "candidates_per_face": 5,
+                },
+                app_dir,
+                query_genders=[
+                    {"gender": "male", "confidence": 0.99},
+                    {"gender": "male", "confidence": 0.99},
+                ],
+                gender_classifier=lambda candidate: predictions[int(candidate["face_id"])],
+            )
+        best = result["combinations"][0]
+        by_face = {item["face_index"]: item for item in best["profiles"]}
+        self.assertEqual(by_face[1]["name"], "Алексей")
+        self.assertEqual(by_face[1]["profile_gender"], "male")
+        self.assertGreater(by_face[1]["similarity"], 80.0)
+
+        def test_confident_gender_mismatch_prefers_candidate_compatible_with_source_face(self):
         candidates = [
             [{
                 "face_id": 1001,
