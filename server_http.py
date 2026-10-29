@@ -925,8 +925,9 @@ def _predict_face_gender(image, face) -> dict:
             probabilities = exponentials / max(float(exponentials.sum()), 1e-12)
 
         label_index = int(np.argmax(probabilities))
+        # InsightFace genderage class order: 0 = female, 1 = male.
         return {
-            "gender": "male" if label_index == 0 else "female",
+            "gender": "female" if label_index == 0 else "male",
             "confidence": max(0.0, min(1.0, float(probabilities[label_index]))),
             "gender_model": "insightface_genderage",
         }
@@ -936,13 +937,15 @@ def _predict_face_gender(image, face) -> dict:
         raw_gender = getattr(face, "gender", None)
         if raw_gender is None:
             raw_gender = getattr(face, "sex", None)
-        if isinstance(raw_gender, (int, float)):
-            label = "male" if int(raw_gender) == 0 else ("female" if int(raw_gender) == 1 else "unknown")
+        if isinstance(raw_gender, bool):
+            label = "unknown"
+        elif isinstance(raw_gender, (int, float)):
+            label = "female" if int(raw_gender) == 0 else ("male" if int(raw_gender) == 1 else "unknown")
         else:
             text = str(raw_gender or "").strip().casefold()
             label = (
-                "male" if text in ("m", "male", "0", "м", "мужской")
-                else "female" if text in ("f", "female", "1", "ж", "женский")
+                "male" if text in ("m", "male", "1", "м", "мужской")
+                else "female" if text in ("f", "female", "0", "ж", "женский")
                 else "unknown"
             )
         return {
