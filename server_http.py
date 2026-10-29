@@ -1019,10 +1019,13 @@ def _classify_candidate_face_gender(candidate: dict) -> dict:
         except Exception as exc:
             print(f"[HTTP][GENDER] Не удалось определить атрибут face_id={face_id}: {exc}", flush=True)
 
-    with _FACE_GENDER_CACHE_LOCK:
-        _FACE_GENDER_CACHE[face_id] = dict(prediction)
-        while len(_FACE_GENDER_CACHE) > _FACE_GENDER_CACHE_MAX:
-            _FACE_GENDER_CACHE.pop(next(iter(_FACE_GENDER_CACHE)))
+    # Кэшируем только валидную классификацию. Если CROP пока отсутствует,
+    # неизвестный результат не должен блокировать повторную попытку после ремонта файла.
+    if prediction.get("gender") in ("male", "female"):
+        with _FACE_GENDER_CACHE_LOCK:
+            _FACE_GENDER_CACHE[face_id] = dict(prediction)
+            while len(_FACE_GENDER_CACHE) > _FACE_GENDER_CACHE_MAX:
+                _FACE_GENDER_CACHE.pop(next(iter(_FACE_GENDER_CACHE)))
     return prediction
 
 def _looks_like_image_content_type(value: str) -> bool:
