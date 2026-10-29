@@ -191,6 +191,110 @@ class GroupAnalysisTests(unittest.TestCase):
         self.assertEqual(best["disconnected_pairs"], 0)
         self.assertNotEqual(by_face[1]["name"], "Дарья")
 
+    def test_confident_gender_mismatch_prefers_candidate_compatible_with_source_face(self):
+        candidates = [
+            [{
+                "face_id": 1001,
+                "name": "Елена",
+                "profile_url": "https://vk.com/id101",
+                "similarity": 88.0,
+            }],
+            [
+                {
+                    "face_id": 2002,
+                    "name": "Дарья",
+                    "profile_url": "https://vk.com/id202",
+                    "similarity": 94.0,
+                },
+                {
+                    "face_id": 2001,
+                    "name": "Анна",
+                    "profile_url": "https://vk.com/id303",
+                    "similarity": 75.0,
+                },
+            ],
+        ]
+        predictions = {
+            1001: {"gender": "female", "confidence": 0.96},
+            2002: {"gender": "male", "confidence": 0.97},
+            2001: {"gender": "female", "confidence": 0.94},
+        }
+
+        with tempfile.TemporaryDirectory() as app_dir:
+            result = analyze_group(
+                candidates,
+                {
+                    "check_vk_friends": False,
+                    "check_gender": True,
+                    "gender_weight": 4.0,
+                    "candidates_per_face": 5,
+                },
+                app_dir,
+                query_genders=[
+                    {"gender": "female", "confidence": 0.96},
+                    {"gender": "female", "confidence": 0.95},
+                ],
+                gender_classifier=lambda candidate: predictions[int(candidate["face_id"])],
+            )
+
+        best = result["combinations"][0]
+        by_face = {item["face_index"]: item for item in best["profiles"]}
+        self.assertEqual(by_face[0]["name"], "Елена")
+        self.assertEqual(by_face[1]["name"], "Анна")
+        self.assertGreater(by_face[1]["gender_penalty"], 0.0)
+        self.assertEqual(by_face[1]["gender"], "female")
+
+    def test_uncertain_gender_prediction_does_not_penalize_visual_candidate(self):
+        candidates = [
+            [{
+                "face_id": 1001,
+                "name": "Елена",
+                "profile_url": "https://vk.com/id101",
+                "similarity": 88.0,
+            }],
+            [
+                {
+                    "face_id": 2002,
+                    "name": "Дарья",
+                    "profile_url": "https://vk.com/id202",
+                    "similarity": 94.0,
+                },
+                {
+                    "face_id": 2001,
+                    "name": "Анна",
+                    "profile_url": "https://vk.com/id303",
+                    "similarity": 75.0,
+                },
+            ],
+        ]
+        predictions = {
+            1001: {"gender": "female", "confidence": 0.96},
+            2002: {"gender": "male", "confidence": 0.97},
+            2001: {"gender": "female", "confidence": 0.94},
+        }
+
+        with tempfile.TemporaryDirectory() as app_dir:
+            result = analyze_group(
+                candidates,
+                {
+                    "check_vk_friends": False,
+                    "check_gender": True,
+                    "gender_weight": 4.0,
+                    "candidates_per_face": 5,
+                },
+                app_dir,
+                query_genders=[
+                    {"gender": "female", "confidence": 0.96},
+                    {"gender": "female", "confidence": 0.58},
+                ],
+                gender_classifier=lambda candidate: predictions[int(candidate["face_id"])],
+            )
+
+        best = result["combinations"][0]
+        by_face = {item["face_index"]: item for item in best["profiles"]}
+        self.assertEqual(by_face[1]["name"], "Дарья")
+        self.assertEqual(by_face[1]["gender_penalty"], 0.0)
+
     def test_options_are_clamped(self):
         options = normalize_options({
             "min_similarity": 150,
