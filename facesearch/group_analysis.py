@@ -502,11 +502,14 @@ def _rank_combinations(
             float(state["social_score_sum"]) / checked_pairs
             if checked_pairs else 0.0
         )
-        # Сначала согласованность социальных связей, затем полнота, и только затем
-        # визуальный рейтинг. Это предотвращает подстановку постороннего профиля
-        # с высоким сходством вместо связанного кандидата или «нет совпадения».
+        # Сначала согласованность социальных связей с мягкой поправкой на явное
+        # противоречие полу в карточке профиля. Это не жёсткий фильтр: сильные
+        # социальные свидетельства всё ещё могут перевесить штраф.
+        profile_gender_penalty = float(state.get("profile_gender_penalty_sum", 0.0)) / max(
+            1, int(state["matched_faces"])
+        )
         return (
-            social_quality,
+            social_quality - profile_gender_penalty,
             int(state["connected_social_pairs"]),
             -int(state["disconnected_social_pairs"]),
             int(state["matched_faces"]),
@@ -526,6 +529,7 @@ def _rank_combinations(
         "disconnected_social_pairs": 0,
         "matched_faces": 0,
         "gender_penalty_sum": 0.0,
+        "profile_gender_penalty_sum": 0.0,
     }]
     for face_items in candidates_by_face:
         expanded = []
@@ -541,6 +545,7 @@ def _rank_combinations(
                 connected_social_pairs = int(state["connected_social_pairs"])
                 disconnected_social_pairs = int(state["disconnected_social_pairs"])
                 gender_penalty_sum = float(state["gender_penalty_sum"])
+                profile_gender_penalty_sum = float(state.get("profile_gender_penalty_sum", 0.0))
                 current_query_gender = (
                     query_genders[int(candidate.get("face_index", 0))]
                     if query_genders is not None
@@ -559,6 +564,7 @@ def _rank_combinations(
                 )
                 candidate_gender_penalty = face_gender_penalty + profile_gender_penalty
                 gender_penalty_sum += candidate_gender_penalty
+                profile_gender_penalty_sum += profile_gender_penalty
                 for previous in state["chosen"]:
                     if candidate.get("unmatched") or previous.get("unmatched"):
                         continue
@@ -610,6 +616,7 @@ def _rank_combinations(
                     "disconnected_social_pairs": disconnected_social_pairs,
                     "matched_faces": int(state["matched_faces"]) + int(not candidate.get("unmatched")),
                     "gender_penalty_sum": gender_penalty_sum,
+                    "profile_gender_penalty_sum": profile_gender_penalty_sum,
                 })
         expanded.sort(key=state_key, reverse=True)
         states = expanded[:beam_width]
@@ -639,6 +646,7 @@ def _rank_combinations(
             "score": round(visual_average + relation_bonus - float(state["gender_penalty_sum"]) / count, 2),
             "visual_average": round(visual_average, 2),
             "gender_penalty": round(float(state["gender_penalty_sum"]), 2),
+            "profile_gender_penalty": round(float(state.get("profile_gender_penalty_sum", 0.0)), 2),
             "social_bonus": round(relation_bonus, 2),
             "social_evidence": round(social_quality, 2),
             "connected_pairs": int(state["connected_social_pairs"]),
@@ -843,6 +851,8 @@ def analyze_group(
                 "similarity": float(item.get("similarity") or 0.0),
                 "face_id": int(item.get("face_id") or 0),
                 "vk_user_id": item.get("vk_user_id"),
+                "profile_gender": item.get("profile_gender", "unknown"),
+                "profile_gender_confidence": float(item.get("profile_gender_confidence") or 0.0),
             })
 
     social_state = str(friend_status.get("status") or "")
