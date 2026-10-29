@@ -24,6 +24,8 @@ DEFAULTS = {
     "common_friend_weight": 2.0,
     "city_weight": 1.5,
     "check_vk_friends": True,
+    "check_gender": True,
+    "gender_weight": 4.0,
 }
 MAX_CANDIDATES_PER_FACE = 10
 MAX_UNIQUE_FRIEND_LOOKUPS = 80
@@ -51,9 +53,11 @@ def normalize_options(options: dict[str, Any] | None) -> dict[str, Any]:
         result["friend_weight"] = max(0.0, min(20.0, float(raw.get("friend_weight", DEFAULTS["friend_weight"]))))
         result["common_friend_weight"] = max(0.0, min(10.0, float(raw.get("common_friend_weight", DEFAULTS["common_friend_weight"]))))
         result["city_weight"] = max(0.0, min(10.0, float(raw.get("city_weight", DEFAULTS["city_weight"]))))
+        result["gender_weight"] = max(0.0, min(10.0, float(raw.get("gender_weight", DEFAULTS["gender_weight"]))))
     except (TypeError, ValueError) as exc:
         raise ValueError("Параметры группового анализа имеют неверный формат.") from exc
     result["check_vk_friends"] = bool(raw.get("check_vk_friends", DEFAULTS["check_vk_friends"]))
+    result["check_gender"] = bool(raw.get("check_gender", DEFAULTS["check_gender"]))
     return result
 
 
@@ -347,12 +351,66 @@ def _pair_bonus(relation: dict[str, Any], options: dict[str, Any]) -> float:
     return bonus
 
 
+
+def _normalize_gender_prediction(value: Any) -> dict[str, Any]:
+    """Нормализует атрибут InsightFace к male/female/unknown и уверенности 0..1."""
+    if not isinstance(value, dict):
+        return {"gender": "unknown", "confidence": 0.0}
+    raw_gender = value.get("gender")
+    if raw_gender is None:
+        raw_gender = value.get("sex")
+    if isinstance(raw_gender, bool):
+        gender = "female" if raw_gender else "male"
+    elif isinstance(raw_gender, (int, float)):
+        gender = "male" if int(raw_gender) == 0 else ("female" if int(raw_gender) == 1 else "unknown")
+    else:
+        text = str(raw_gender or "").strip().casefold()
+        if text in ("0", "m", "male", "man", "м", "муж", "мужской"):
+            gender = "male"
+        elif text in ("1", "f", "female", "woman", "ж", "жен", "женский"):
+            gender = "female"
+        else:
+            gender = "unknown"
+    try:
+        confidence = max(0.0, min(1.0, float(value.get("confidence", 0.0))))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if gender == "unknown" or not math.isfinite(confidence):
+        return {"gender": "unknown", "confidence": 0.0}
+    return {"gender": gender, "confidence": confidence}
+
+
+def _gender_mismatch_penalty(
+    query_gender: dict[str, Any],
+    candidate: dict[str, Any],
+    options: dict[str, Any],
+) -> float:
+    """Мягко штрафует несовпадение классификации, только когда обе оценки уверенные."""
+    if not options.get("check_gender", True):
+        return 0.0
+    query = _normalize_gender_prediction(query_gender)
+    target = _normalize_gender_prediction(candidate)
+    if query["gender"] == "unknown" or target["gender"] == "unknown":
+        return 0.0
+    if query["gender"] == target["gender"]:
+        return 0.0
+    query_conf = float(query["confidence"])
+    target_conf = float(target["confidence"])
+    # Уверенность ниже 0.65 остаётся нейтральной, чтобы не превращать
+    # неустойчивый атрибут с фотографии в жёсткий фильтр.
+    if query_conf < 0.65 or target_conf < 0.65:
+        return 0.0
+    query_strength = max(0.0, min(1.0, (query_conf - 0.5) * 2.0))
+    target_strength = max(0.0, min(1.0, (target_conf - 0.5) * 2.0))
+    return float(options["gender_weight"]) * query_strength * target_strength
+
 def _rank_combinations(
     candidates_by_face: list[list[dict[str, Any]]],
     friend_ids: dict[int, set[int]],
     options: dict[str, Any],
     limit: int = 10,
     beam_width: int = 120,
+    query_genders: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Ищет согласованный набор профилей: социальные связи важнее небольших различий сходства.
 
@@ -375,6 +433,7 @@ def _rank_combinations(
             social_quality,
             int(state["connected_social_pairs"]),
             -int(state["disconnected_social_pairs"]),
+            -float(state["gender_penalty_sum"]),
             int(state["matched_faces"]),
             float(state["visual_sum"]) + float(state["bonus_sum"]),
         )
@@ -390,6 +449,7 @@ def _rank_combinations(
         "connected_social_pairs": 0,
         "disconnected_social_pairs": 0,
         "matched_faces": 0,
+        "gender_penalty_sum": 0.0,
     }]
     for face_items in candidates_by_face:
         expanded = []
@@ -404,6 +464,19 @@ def _rank_combinations(
                 checked_social_pairs = int(state["checked_social_pairs"])
                 connected_social_pairs = int(state["connected_social_pairs"])
                 disconnected_social_pairs = int(state["disconnected_social_pairs"])
+                gender_penalty_sum = float(state["gender_penalty_sum"])
+                current_query_gender = (
+                    query_genders[int(candidate.get("face_index", 0))]
+                    if query_genders is not None
+                    and 0 <= int(candidate.get("face_index", 0)) < len(query_genders)
+                    else {"gender": "unknown", "confidence": 0.0}
+                )
+                candidate_gender_penalty = (
+                    _gender_mismatch_penalty(current_query_gender, candidate, options)
+                    if not candidate.get("unmatched")
+                    else 0.0
+                )
+                gender_penalty_sum += candidate_gender_penalty
                 for previous in state["chosen"]:
                     if candidate.get("unmatched") or previous.get("unmatched"):
                         continue
@@ -454,6 +527,7 @@ def _rank_combinations(
                     "connected_social_pairs": connected_social_pairs,
                     "disconnected_social_pairs": disconnected_social_pairs,
                     "matched_faces": int(state["matched_faces"]) + int(not candidate.get("unmatched")),
+                    "gender_penalty_sum": gender_penalty_sum,
                 })
         expanded.sort(key=state_key, reverse=True)
         states = expanded[:beam_width]
@@ -480,8 +554,9 @@ def _rank_combinations(
         )
         combinations.append({
             "rank": len(combinations) + 1,
-            "score": round(visual_average + relation_bonus, 2),
+            "score": round(visual_average + relation_bonus - float(state["gender_penalty_sum"]) / count, 2),
             "visual_average": round(visual_average, 2),
+            "gender_penalty": round(float(state["gender_penalty_sum"]), 2),
             "social_bonus": round(relation_bonus, 2),
             "social_evidence": round(social_quality, 2),
             "connected_pairs": int(state["connected_social_pairs"]),
@@ -501,6 +576,25 @@ def _rank_combinations(
                     "vk_user_id": item.get("vk_user_id"),
                     "unmatched": bool(item.get("unmatched")),
                     "unmatched_reason": item.get("unmatched_reason") or "",
+                    "gender": _normalize_gender_prediction(item).get("gender", "unknown"),
+                    "gender_confidence": _normalize_gender_prediction(item).get("confidence", 0.0),
+                    "query_gender": (
+                        query_genders[int(item.get("face_index", index))]
+                        if query_genders is not None
+                        and 0 <= int(item.get("face_index", index)) < len(query_genders)
+                        else {"gender": "unknown", "confidence": 0.0}
+                    ),
+                    "gender_penalty": (
+                        round(_gender_mismatch_penalty(
+                            query_genders[int(item.get("face_index", index))],
+                            item,
+                            options,
+                        ), 2)
+                        if query_genders is not None
+                        and 0 <= int(item.get("face_index", index)) < len(query_genders)
+                        and not item.get("unmatched")
+                        else 0.0
+                    ),
                 }
                 for index, item in enumerate(chosen)
             ],
@@ -536,6 +630,8 @@ def analyze_group(
     options: dict[str, Any] | None,
     app_dir: str | Path,
     progress: Callable[[int, str], None] | None = None,
+    query_genders: list[dict[str, Any]] | None = None,
+    gender_classifier: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Ранжирует наборы кандидатов и создаёт граф связей для лучшего варианта."""
     options = normalize_options(options)
@@ -546,13 +642,83 @@ def analyze_group(
     progress(5, "Подготовка кандидатов для каждого лица…")
     prepared = _prepare_candidates(candidates_by_face, options)
     totals = [sum(1 for item in items if not item.get("unmatched")) for items in prepared]
-    progress(25, "Кандидаты подготовлены: " + ", ".join(str(n) for n in totals) + " на лицо.")
+    progress(22, "Кандидаты подготовлены: " + ", ".join(str(n) for n in totals) + " на лицо.")
 
+    normalized_query_genders = [
+        _normalize_gender_prediction(value)
+        for value in (query_genders or [])
+    ]
+    gender_checked = 0
+    gender_unknown = 0
+    if options["check_gender"]:
+        classifier_cache: dict[int, dict[str, Any]] = {}
+        if gender_classifier is not None:
+            all_face_ids = list(dict.fromkeys(
+                int(item.get("face_id") or 0)
+                for items in prepared for item in items
+                if not item.get("unmatched") and int(item.get("face_id") or 0) > 0
+            ))
+            for index, face_id in enumerate(all_face_ids, start=1):
+                matching = next(
+                    item for items in prepared for item in items
+                    if not item.get("unmatched") and int(item.get("face_id") or 0) == face_id
+                )
+                try:
+                    prediction = _normalize_gender_prediction(gender_classifier(matching))
+                except Exception:
+                    prediction = {"gender": "unknown", "confidence": 0.0}
+                classifier_cache[face_id] = prediction
+                if prediction["gender"] == "unknown":
+                    gender_unknown += 1
+                else:
+                    gender_checked += 1
+                if index % 5 == 0 or index == len(all_face_ids):
+                    progress(22 + int(10 * index / max(1, len(all_face_ids))),
+                             "Определение пола кандидатов: " + str(index) + " / " + str(len(all_face_ids)))
+        for items in prepared:
+            for item in items:
+                if item.get("unmatched"):
+                    continue
+                face_id = int(item.get("face_id") or 0)
+                if face_id in classifier_cache:
+                    item.update(classifier_cache[face_id])
+                else:
+                    prediction = _normalize_gender_prediction(item)
+                    item.update(prediction)
+                    if prediction["gender"] == "unknown":
+                        gender_unknown += 1
+                    else:
+                        gender_checked += 1
+    else:
+        for items in prepared:
+            for item in items:
+                item.update({"gender": "unknown", "confidence": 0.0})
+    query_gender_known = sum(1 for value in normalized_query_genders if value["gender"] != "unknown")
+    gender_status = {
+        "enabled": bool(options["check_gender"]),
+        "query_faces_classified": query_gender_known,
+        "query_faces_total": len(candidates_by_face),
+        "candidate_faces_classified": gender_checked,
+        "candidate_faces_unknown": gender_unknown,
+        "message": (
+            "Оценка пола лиц включена: распознано лиц на исходном фото "
+            + str(query_gender_known) + "/" + str(len(candidates_by_face))
+            + ", лиц-кандидатов " + str(gender_checked)
+            + (", неопределённых " + str(gender_unknown) if gender_unknown else "") + "."
+            if options["check_gender"]
+            else "Оценка пола лиц отключена в параметрах."
+        ),
+    }
+
+    progress(35, "Проверка социальных связей кандидатов…")
     friend_ids, friend_status = _load_friend_sets(
         prepared, app_dir, bool(options["check_vk_friends"]), progress
     )
-    progress(75, "Сопоставление связей и ранжирование комбинаций…")
-    combinations = _rank_combinations(prepared, friend_ids, options, limit=10)
+    progress(75, "Сопоставление связей, пола и сходства…")
+    combinations = _rank_combinations(
+        prepared, friend_ids, options, limit=10,
+        query_genders=normalized_query_genders,
+    )
     best = combinations[0] if combinations else None
     graph = _graph_payload(best) if best else {"nodes": [], "edges": []}
 
@@ -600,6 +766,7 @@ def analyze_group(
         "face_count": len(candidates_by_face),
         "candidate_counts": totals,
         "friend_status": friend_status,
+        "gender_status": gender_status,
         "combinations": combinations,
         "best_graph": graph,
         "candidates": all_candidates,
