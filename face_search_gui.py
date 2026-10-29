@@ -10730,6 +10730,55 @@ class FaceSearchGUI:
 
                     self._update_search_state()
 
+                elif kind == "group_analysis_progress":
+                    percent = max(0, min(100, int(event[1] or 0)))
+                    message = str(event[2] or "Выполняется групповой анализ…")
+                    try:
+                        self.progress.stop()
+                        self.progress.configure(
+                            mode="determinate", maximum=100, value=percent
+                        )
+                    except tk.TclError:
+                        pass
+                    self.status_var.set(message)
+
+                elif kind == "group_analysis_done":
+                    result, face_indices = event[1:3]
+                    try:
+                        self.progress.stop()
+                        self.progress.configure(
+                            mode="determinate", maximum=100, value=100
+                        )
+                    except tk.TclError:
+                        pass
+                    self.operation = None
+                    self._set_busy(False)
+                    self._update_search_state()
+                    best = (result.get("combinations") or [{}])[0]
+                    self.status_var.set(
+                        "Групповой анализ завершён. Назначено профилей: "
+                        + str(int(best.get("matched_faces") or 0))
+                        + " из " + str(len(face_indices)) + "."
+                    )
+                    self._show_group_analysis_results(result, list(face_indices))
+
+                elif kind == "group_analysis_error":
+                    error = str(event[1] or "Неизвестная ошибка группового анализа.")
+                    try:
+                        self.progress.stop()
+                        self.progress.configure(
+                            mode="determinate", maximum=100, value=0
+                        )
+                    except tk.TclError:
+                        pass
+                    self.operation = None
+                    self._set_busy(False)
+                    self._update_search_state()
+                    self.status_var.set("Групповой анализ завершился с ошибкой.")
+                    messagebox.showerror(
+                        "Групповой анализ", error, parent=self.root
+                    )
+
                 elif kind == "fatal":
                     self.progress.stop()
                     self.progress.config(
