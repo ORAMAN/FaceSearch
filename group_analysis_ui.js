@@ -248,8 +248,14 @@
         const penalty = Number(profile.gender_penalty || 0);
         const facePenalty = Number(profile.face_gender_penalty || 0);
         const profilePenalty = Number(profile.profile_gender_penalty || 0);
+        const confidenceLabels = { high: "высокая", medium: "средняя", low: "низкая" };
+        const confidenceText = confidenceLabels[String(profile.assignment_confidence || "")] || "не рассчитана";
+        const margin = profile.visual_margin;
+        meta.title = String(profile.confidence_reason || "");
         meta.textContent =
           "Сходство лица: " + Number(profile.similarity || 0).toFixed(2) + "%" +
+          " · уверенность назначения: " + confidenceText +
+          (margin !== null && margin !== undefined ? " (отрыв " + Number(margin).toFixed(2) + " п.п.)" : "") +
           " · пол по фото — " + candidateGenderText +
           " · пол профиля — " + profileGenderText +
           " · " + queryGenderText +
