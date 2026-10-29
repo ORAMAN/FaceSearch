@@ -10,6 +10,7 @@ from facesearch.group_analysis import (
     normalize_options,
     _load_friend_sets,
     _request_vk_friends,
+    _gender_mismatch_penalty,
 )
 
 
@@ -242,8 +243,16 @@ class GroupAnalysisTests(unittest.TestCase):
         by_face = {item["face_index"]: item for item in best["profiles"]}
         self.assertEqual(by_face[0]["name"], "Елена")
         self.assertEqual(by_face[1]["name"], "Анна")
-        self.assertGreater(by_face[1]["gender_penalty"], 0.0)
+        self.assertEqual(by_face[1]["gender_penalty"], 0.0)
         self.assertEqual(by_face[1]["gender"], "female")
+        self.assertGreater(
+            _gender_mismatch_penalty(
+                {"gender": 0, "confidence": 0.96},
+                {"gender": 1, "confidence": 0.97},
+                {"check_gender": True, "gender_weight": 4.0},
+            ),
+            0.0,
+        )
 
     def test_uncertain_gender_prediction_does_not_penalize_visual_candidate(self):
         candidates = [
