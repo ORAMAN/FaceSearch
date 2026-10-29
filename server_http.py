@@ -2327,6 +2327,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     if(!dataUrl||busy)return;
     faceIdentificationRun++;
     faceMatchResults=[];
+    groupAnalysisMatches=null;
+    if(window.FaceSearchGroupUI)window.FaceSearchGroupUI.reset();
     identificationInProgress=false;
     faceLinkOverlay.replaceChildren();
     identifyFacesButton.textContent="Определить";
@@ -2352,6 +2354,21 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 
   async function identifyAllFaces(){
     if(!queryId||!faces.length||busy||identificationInProgress)return;
+    if(groupAnalysisMatches&&groupAnalysisMatches.queryId===queryId){
+      faceIdentificationRun++;
+      faceMatchResults=groupAnalysisMatches.matches.map(function(match){
+        return match?Object.assign({},match):null;
+      });
+      drawFaces();
+      const identified=faceMatchResults.filter(function(item){
+        return item&&item.name&&item.name!=="Нет совпадения";
+      }).length;
+      setStatus(
+        "Использованы имена из выбранного варианта группового анализа: "+
+        identified+" из "+faces.length+" лиц. Повторный поиск не выполнялся."
+      );
+      return;
+    }
     const runId=++faceIdentificationRun;
     const activeQueryId=queryId;
     const faceCount=faces.length;
@@ -2723,7 +2740,31 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     getFaceCount:function(){return faces.length;},
     isBusy:function(){return busy;},
     postJson:postJson,
-    setStatus:setStatus
+    setStatus:setStatus,
+    setGroupAnalysisMatches:function(resultQueryId,profiles){
+      if(!resultQueryId||resultQueryId!==queryId){
+        groupAnalysisMatches=null;
+        return;
+      }
+      const mapped=Array(faces.length).fill(null);
+      (Array.isArray(profiles)?profiles:[]).forEach(function(profile){
+        const index=Number(profile&&profile.face_index);
+        if(!Number.isInteger(index)||index<0||index>=mapped.length)return;
+        const queryGender=profile&&profile.query_gender&&typeof profile.query_gender==="object"
+          ?profile.query_gender:{};
+        const unmatched=Boolean(profile&&profile.unmatched);
+        mapped[index]={
+          name:unmatched?"Нет совпадения":String(profile.name||"").trim(),
+          profileUrl:unmatched?"":safeLink(profile.profile_url||""),
+          similarity:Number(profile&&profile.similarity||0),
+          gender:String(queryGender.gender||"unknown"),
+          genderConfidence:Number(queryGender.confidence||0),
+          unmatched:unmatched
+        };
+      });
+      groupAnalysisMatches={queryId:resultQueryId,matches:mapped};
+      drawFaces();
+    }
   };
 })();
 </script>
