@@ -129,8 +129,10 @@
       const friend = Boolean(edge.friend) || types.includes("friend");
       const common = Number(edge.common_friends || 0) > 0 || types.includes("common_friends");
       const sameCity = Boolean(edge.same_city) || types.includes("same_city");
-      const color = friend ? "#16a34a" : (common ? "#8b5cf6" : "#d97706");
-      const dash = friend ? "" : (common ? "6 5" : "2 5");
+      const sameEducation = Boolean(edge.same_education) || types.includes("education");
+      const sameWorkplace = Boolean(edge.same_workplace) || types.includes("workplace");
+      const color = friend ? "#16a34a" : (common ? "#8b5cf6" : (sameWorkplace ? "#0891b2" : (sameEducation ? "#7c3aed" : "#d97706")));
+      const dash = friend ? "" : (common ? "6 5" : (sameWorkplace ? "4 3" : (sameEducation ? "8 4" : "2 5")));
       const line = svgNode("line", {
         x1: a.x, y1: a.y, x2: b.x, y2: b.y,
         stroke: color, "stroke-width": friend ? 3 : 2,
@@ -140,6 +142,10 @@
       if (friend) details.push("Есть связь в друзьях VK");
       if (common) details.push("Общие друзья: " + Number(edge.common_friends || 0));
       if (sameCity) details.push("Совпадает город");
+      const educationMatches = Array.isArray(edge.education_matches) ? edge.education_matches : [];
+      const workplaceMatches = Array.isArray(edge.workplace_matches) ? edge.workplace_matches : [];
+      if (sameEducation) details.push("Общее учебное заведение: " + (educationMatches.join(", ") || "совпадение в данных профиля"));
+      if (sameWorkplace) details.push("Общее место работы: " + (workplaceMatches.join(", ") || "совпадение в данных профиля"));
       line.appendChild(svgNode("title", {}, details.join(" · ")));
       graph.appendChild(line);
     });
@@ -264,6 +270,19 @@
       }
       card.appendChild(meta);
 
+      const relationshipDetails = [
+        ["Учебное заведение", profile.education],
+        ["Место работы", profile.workplaces]
+      ];
+      relationshipDetails.forEach(function (entry) {
+        const values = Array.isArray(entry[1]) ? entry[1].filter(Boolean) : [];
+        if (!values.length) return;
+        const line = document.createElement("div");
+        line.className = "group-profile-meta";
+        line.textContent = entry[0] + ": " + Array.from(new Set(values.map(String))).join(" · ");
+        card.appendChild(line);
+      });
+
       const value = String(profile.profile_url || profile.source_url || "").trim();
       if (value) {
         try {
@@ -279,6 +298,33 @@
         } catch (error) {
           // Не показываем непроверенные ссылки.
         }
+      }
+      const sourceProfiles = Array.isArray(profile.source_profiles) ? profile.source_profiles : [];
+      if (sourceProfiles.length > 1 || profile.cross_source_merged) {
+        const line = document.createElement("div");
+        line.className = "group-profile-meta";
+        const prefix = document.createElement("span");
+        prefix.textContent = "Источники: ";
+        line.appendChild(prefix);
+        const seenUrls = new Set();
+        sourceProfiles.forEach(function (source) {
+          const sourceUrl = String((source && (source.profile_url || source.url_source)) || "").trim();
+          if (!sourceUrl) return;
+          try {
+            const url = new URL(sourceUrl, window.location.href);
+            if (url.protocol !== "http:" && url.protocol !== "https:") return;
+            if (seenUrls.has(url.href)) return;
+            seenUrls.add(url.href);
+            if (line.childNodes.length > 1) line.appendChild(document.createTextNode(" · "));
+            const link = document.createElement("a");
+            link.href = url.href;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.textContent = String((source && (source.name || source.source || source.database)) || url.hostname || "Источник");
+            line.appendChild(link);
+          } catch (error) { /* Не показываем некорректные ссылки. */ }
+        });
+        if (line.childNodes.length > 1) card.appendChild(line);
       }
       profileList.appendChild(card);
     });
@@ -353,7 +399,8 @@
     }
     const friendStatus = result.friend_status || {};
     const genderStatus = result.gender_status || {};
-    notice.textContent = [friendStatus.message || "", genderStatus.message || "", result.notice || ""].filter(Boolean).join(" ");
+    const mergeStatus = result.merge_status || {};
+    notice.textContent = [friendStatus.message || "", genderStatus.message || "", mergeStatus.message || "", result.notice || ""].filter(Boolean).join(" ");
     setProgress(100, "Анализ завершён.");
     panel.scrollIntoView({ behavior: "smooth", block: "start" });
   }
