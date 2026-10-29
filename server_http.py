@@ -619,6 +619,7 @@ def _initialize_runtime() -> None:
         "check_vk_friends": gui_settings.get("group_check_vk_friends", True),
         "check_gender": gui_settings.get("group_check_gender", True),
         "gender_weight": gui_settings.get("group_gender_weight", 4.0),
+        "profile_gender_weight": gui_settings.get("group_profile_gender_weight", 16.0),
     })
     CREATE_CROPS_ON_HTML = bool(gui_settings.get("create_crops_on_html", False))
     try:
@@ -1497,16 +1498,20 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
           <input id="group-city-weight" type="number" min="0" max="10" step="0.5" value="__GROUP_CITY_WEIGHT__">
         </div>
         <div class="field">
-          <label for="group-gender-weight">Штраф за несовпадение пола</label>
+          <label for="group-gender-weight">Штраф за несовпадение пола лица по фото</label>
           <input id="group-gender-weight" type="number" min="0" max="10" step="0.5" value="__GROUP_GENDER_WEIGHT__">
+        </div>
+        <div class="field">
+          <label for="group-profile-gender-weight">Штраф за несовпадение пола профиля</label>
+          <input id="group-profile-gender-weight" type="number" min="0" max="30" step="1" value="__GROUP_PROFILE_GENDER_WEIGHT__">
         </div>
         <div class="field toggle-field">
           <label class="toggle-label" for="group-check-vk-friends"><input id="group-check-vk-friends" type="checkbox" __GROUP_CHECK_VK_FRIENDS__> Проверять друзей VK</label>
           <span class="hint">Используются токены, настроенные в загрузчике VK.</span>
         </div>
         <div class="field toggle-field">
-          <label class="toggle-label" for="group-check-gender"><input id="group-check-gender" type="checkbox" __GROUP_CHECK_GENDER__> Учитывать оценку пола лица</label>
-          <span class="hint">Используется модель InsightFace только при уверенной оценке; несовпадение мягко снижает рейтинг кандидата.</span>
+          <label class="toggle-label" for="group-check-gender"><input id="group-check-gender" type="checkbox" __GROUP_CHECK_GENDER__> Учитывать пол лица и пол профиля</label>
+          <span class="hint">Сопоставляются оценка InsightFace и поле пола в карточке профиля. Пол профиля учитывается отдельно и сильнее; это мягкий штраф, не жёсткий фильтр.</span>
         </div>
       </div>
     </details>
@@ -2891,6 +2896,8 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 "__GROUP_CHECK_GENDER__", "checked" if DEFAULT_GROUP_ANALYSIS_OPTIONS["check_gender"] else ""
             ).replace(
                 "__GROUP_GENDER_WEIGHT__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["gender_weight"])
+            ).replace(
+                "__GROUP_PROFILE_GENDER_WEIGHT__", str(DEFAULT_GROUP_ANALYSIS_OPTIONS["profile_gender_weight"])
             )
             self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             return
@@ -3126,6 +3133,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                             "path": str(candidate.get("path") or ""),
                             "similarity": score,
                             "vk_user_id": vk_id,
+                            "profile_sex": candidate.get("sex"),
                         })
                     candidates_by_face.append(face_candidates)
                     update_job(
