@@ -5911,10 +5911,10 @@ class FaceSearchGUI:
             style="Muted.TLabel",
             wraplength=430,
             justify="left",
-        ).grid(row=len(fields) + 2, column=0, columnspan=2, sticky="w", pady=(7, 12))
+        ).grid(row=len(fields) + 3, column=0, columnspan=2, sticky="w", pady=(7, 12))
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=len(fields) + 3, column=0, columnspan=2, sticky="e")
+        buttons.grid(row=len(fields) + 4, column=0, columnspan=2, sticky="e")
         ttk.Button(buttons, text="Отмена", command=dialog.destroy).pack(side="right", padx=(8, 0))
 
         def save():
