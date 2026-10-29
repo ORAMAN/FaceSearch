@@ -1275,6 +1275,14 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .group-progress-message{font-size:13px;color:var(--muted);overflow-wrap:anywhere}
 .group-graph-wrap{margin-top:14px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--drop)}
 .group-graph{display:block;width:100%;height:auto;max-height:440px}
+.group-gender-legend{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding:10px 14px 0;font-size:12px;color:var(--muted)}
+.group-gender-legend-item{display:inline-flex;align-items:center;gap:6px}
+.group-gender-swatch{display:inline-block;width:11px;height:11px;border-radius:50%;border:2px solid transparent;flex:0 0 auto}
+.group-gender-swatch.female{background:#fce7f3;border-color:#db2777}
+.group-gender-swatch.male{background:#dbeafe;border-color:#0284c7}
+.group-gender-swatch.unknown{background:#e5e7eb;border-color:#9ca3af}
+.group-gender-swatch.mismatch{background:#dbeafe;border:3px solid #dc2626}
+.group-gender-swatch.unmatched{background:#e5e7eb;border:2px dashed #6b7280}
 .group-combinations{display:grid;gap:8px;margin-top:14px}
 .group-combination{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;text-align:left;width:100%;min-height:auto;background:var(--secondary);color:var(--button-text);border:1px solid var(--button-line);padding:11px 13px}
 .group-combination[aria-pressed=true]{border-color:var(--accent);box-shadow:inset 3px 0 var(--accent)}
@@ -1579,7 +1587,14 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     <div id="group-progress-message" class="group-progress-message">Ожидание запуска анализа.</div>
     <div id="group-analysis-summary"></div>
     <div id="group-graph-wrap" class="group-graph-wrap" hidden>
-      <svg id="group-graph" class="group-graph" viewBox="0 0 600 360" role="img" aria-label="Граф связей выбранной комбинации"></svg>
+      <div class="group-gender-legend" aria-label="Обозначения пола на графе">
+        <span class="group-gender-legend-item"><span class="group-gender-swatch female" aria-hidden="true"></span>Женский класс исходного лица</span>
+        <span class="group-gender-legend-item"><span class="group-gender-swatch male" aria-hidden="true"></span>Мужской класс исходного лица</span>
+        <span class="group-gender-legend-item"><span class="group-gender-swatch unknown" aria-hidden="true"></span>Пол не определён</span>
+        <span class="group-gender-legend-item"><span class="group-gender-swatch mismatch" aria-hidden="true"></span>Пол кандидата не совпадает</span>
+        <span class="group-gender-legend-item"><span class="group-gender-swatch unmatched" aria-hidden="true"></span>Пунктир — профиль не назначен</span>
+      </div>
+      <svg id="group-graph" class="group-graph" viewBox="0 0 600 360" role="img" aria-label="Граф связей выбранной комбинации; цвет узла отражает оценку пола исходного лица"></svg>
     </div>
     <div id="group-profile-list" class="group-profile-list"></div>
     <div id="group-combinations" class="group-combinations"></div>
