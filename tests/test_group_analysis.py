@@ -305,6 +305,8 @@ class GroupAnalysisTests(unittest.TestCase):
             "common_friend_weight": 100,
             "city_weight": 2.5,
             "check_vk_friends": False,
+            "gender_weight": 99,
+            "check_gender": False,
         })
         self.assertEqual(options["min_similarity"], 100.0)
         self.assertEqual(options["candidates_per_face"], 10)
@@ -312,6 +314,8 @@ class GroupAnalysisTests(unittest.TestCase):
         self.assertEqual(options["common_friend_weight"], 10.0)
         self.assertEqual(options["city_weight"], 2.5)
         self.assertFalse(options["check_vk_friends"])
+        self.assertEqual(options["gender_weight"], 10.0)
+        self.assertFalse(options["check_gender"])
 
     def test_city_evidence_ranks_a_coherent_unique_pair_higher(self):
         candidates = [
