@@ -512,17 +512,20 @@ def _rank_combinations(
             float(state["social_score_sum"]) / checked_pairs
             if checked_pairs else 0.0
         )
-        # Сначала согласованность социальных связей с мягкой поправкой на явное
-        # противоречие полу в карточке профиля. Это не жёсткий фильтр: сильные
-        # социальные свидетельства всё ещё могут перевесить штраф.
-        profile_gender_penalty = float(state.get("profile_gender_penalty_sum", 0.0)) / max(
-            1, int(state["matched_faces"])
+        matched_faces = int(state["matched_faces"])
+        # Сначала максимизируем число сопоставленных исходных лиц. Отсутствие
+        # VK-связей не должно само по себе превращать хороший face-match в
+        # «нет кандидата». Далее учитываем уверенные противоречия по полу,
+        # а социальные связи используем для выбора между оставшимися вариантами.
+        gender_penalty = float(state.get("gender_penalty_sum", 0.0)) / max(
+            1, matched_faces
         )
         return (
-            social_quality - profile_gender_penalty,
+            matched_faces,
+            -gender_penalty,
+            social_quality,
             int(state["connected_social_pairs"]),
             -int(state["disconnected_social_pairs"]),
-            int(state["matched_faces"]),
             float(state["visual_sum"]) + float(state["bonus_sum"])
             - float(state["gender_penalty_sum"]),
         )
@@ -651,6 +654,40 @@ def _rank_combinations(
             float(state["social_score_sum"]) / checked_pairs
             if checked_pairs else 0.0
         )
+        used_profile_keys = {
+            item["profile_key"] for item in chosen
+            if not item.get("unmatched")
+        }
+
+        def explain_unmatched(item: dict[str, Any], face_index: int) -> str:
+            original_reason = str(item.get("unmatched_reason") or "").strip()
+            face_candidates = (
+                candidates_by_face[face_index]
+                if 0 <= face_index < len(candidates_by_face) else []
+            )
+            available = [
+                candidate for candidate in face_candidates
+                if isinstance(candidate, dict) and not candidate.get("unmatched")
+            ]
+            if not available:
+                return original_reason or (
+                    "В активном индексе нет кандидата выше заданного порога сходства."
+                )
+            keys = {
+                str(candidate.get("profile_key") or _stable_profile_key(candidate))
+                for candidate in available
+            }
+            if keys and keys.issubset(used_profile_keys):
+                return (
+                    "Все доступные профили-кандидаты уже назначены другим лицам "
+                    "в этой комбинации. Проверьте другие комбинации или увеличьте "
+                    "параметр «Кандидатов на лицо»."
+                )
+            return (
+                "Кандидат не выбран в этой комбинации. Проверьте другие варианты "
+                "группы и индивидуальные результаты поиска."
+            )
+
         combinations.append({
             "rank": len(combinations) + 1,
             "score": round(visual_average + relation_bonus - float(state["gender_penalty_sum"]) / count, 2),
@@ -675,7 +712,10 @@ def _rank_combinations(
                     "profile_key": item["profile_key"],
                     "vk_user_id": item.get("vk_user_id"),
                     "unmatched": bool(item.get("unmatched")),
-                    "unmatched_reason": item.get("unmatched_reason") or "",
+                    "unmatched_reason": (
+                        explain_unmatched(item, int(item.get("face_index", index)))
+                        if item.get("unmatched") else ""
+                    ),
                     "gender": _normalize_gender_prediction(item).get("gender", "unknown"),
                     "gender_confidence": _normalize_gender_prediction(item).get("confidence", 0.0),
                     "profile_gender": item.get("profile_gender", "unknown"),
