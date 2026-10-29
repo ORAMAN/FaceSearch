@@ -147,19 +147,46 @@
     positions.forEach(function (position, index) {
       const profile = position.profile;
       const unmatched = Boolean(profile.unmatched) || !Number(profile.face_id || 0);
+      const queryGender = String((profile.query_gender || {}).gender || "unknown").toLowerCase();
+      const queryConfidence = Number((profile.query_gender || {}).confidence || 0);
+      const candidateGender = String(profile.gender || "unknown").toLowerCase();
+      const candidateConfidence = Number(profile.gender_confidence || 0);
+      const profileGender = String(profile.profile_gender || "unknown").toLowerCase();
+      const profileGenderConfidence = Number(profile.profile_gender_confidence || 0);
+      const colors = {
+        female: { fill: "#fce7f3", stroke: "#db2777", text: "#831843", label: "женский" },
+        male: { fill: "#dbeafe", stroke: "#0284c7", text: "#075985", label: "мужской" },
+        unknown: { fill: "#e5e7eb", stroke: "#9ca3af", text: "#374151", label: "не определён" }
+      };
+      const style = colors[queryGender] || colors.unknown;
+      const targetGender = profileGender !== "unknown" ? profileGender : candidateGender;
+      const targetConfidence = profileGender !== "unknown" ? profileGenderConfidence : candidateConfidence;
+      const genderMismatch = !unmatched && queryGender !== "unknown" &&
+        queryConfidence >= 0.65 && targetGender !== "unknown" &&
+        targetConfidence >= 0.65 && queryGender !== targetGender;
       const circle = svgNode("circle", {
         cx: position.x, cy: position.y, r: 24,
-        fill: unmatched ? "#6b7280" : "#dbeafe",
-        stroke: unmatched ? "#9ca3af" : "#2563eb",
-        "stroke-width": 2
+        fill: style.fill,
+        stroke: genderMismatch ? "#dc2626" : style.stroke,
+        "stroke-width": genderMismatch ? 4 : 2,
+        "stroke-dasharray": unmatched ? "4 3" : "none"
       });
+      const genderDetails = "Исходное лицо: " + style.label +
+        (queryGender !== "unknown" ? " (" + Math.round(queryConfidence * 100) + "%)" : "");
+      const candidateDetails = unmatched
+        ? "Нет назначенного профиля"
+        : "Кандидат: " + (colors[candidateGender] || colors.unknown).label +
+          (candidateGender !== "unknown" ? " (" + Math.round(candidateConfidence * 100) + "%)" : "") +
+          " · пол профиля: " + (colors[profileGender] || colors.unknown).label;
       circle.appendChild(svgNode("title", {},
-        String(profile.name || "Без имени") + " · сходство " + Number(profile.similarity || 0).toFixed(2) + "%"
+        String(profile.name || "Без имени") + " · " + genderDetails + " · " + candidateDetails +
+        " · сходство " + Number(profile.similarity || 0).toFixed(2) + "%" +
+        (genderMismatch ? " · ВНИМАНИЕ: пол кандидата не совпадает с исходным лицом" : "")
       ));
       graph.appendChild(circle);
       graph.appendChild(svgNode("text", {
         x: position.x, y: position.y + 5, "text-anchor": "middle",
-        "font-size": 14, "font-weight": 700, fill: unmatched ? "#ffffff" : "#1e3a8a"
+        "font-size": 14, "font-weight": 700, fill: style.text
       }, "Л" + (Number(profile.face_index || index) + 1)));
       let label = String(profile.name || "Без имени");
       if (label.length > 25) label = label.slice(0, 23) + "…";
@@ -169,8 +196,10 @@
       }, label));
       graph.appendChild(svgNode("text", {
         x: position.x, y: position.y + 56, "text-anchor": "middle",
-        "font-size": 10, fill: "var(--muted)"
-      }, unmatched ? "нет кандидата" : Number(profile.similarity || 0).toFixed(1) + "%"));
+        "font-size": 10, fill: genderMismatch ? "#dc2626" : "var(--muted)",
+        "font-weight": genderMismatch ? 700 : 400
+      }, unmatched ? "нет кандидата" : (genderMismatch ? "проверьте пол · " : "") +
+        Number(profile.similarity || 0).toFixed(1) + "%"));
     });
   }
 
