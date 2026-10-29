@@ -1241,6 +1241,12 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .preview-controls #identify-faces-button{min-width:112px;font-weight:650;margin-right:4px}
 .preview-zoom-value{min-width:54px;text-align:center;font-size:12px;font-variant-numeric:tabular-nums;color:var(--text)}
 .preview-zoom-hint{grid-column:3;justify-self:end;color:var(--muted);font-size:12px;margin-left:0;text-align:right}
+  .gender-legend{grid-column:1/-1;justify-self:start;display:flex;flex-wrap:wrap;gap:10px;margin-top:3px}
+  .gender-legend-item{display:inline-flex;align-items:center;gap:5px}
+  .gender-legend-dot{width:9px;height:9px;display:inline-block;border-radius:50%;border:1px solid rgba(255,255,255,.72)}
+  .gender-legend-dot.female{background:#f472b6}
+  .gender-legend-dot.male{background:#38bdf8}
+  .gender-legend-dot.unknown{background:#94a3b8}
 .preview-stage{position:relative;display:block;flex:0 0 auto;margin:0 auto;line-height:0;max-width:none}
 #preview-canvas{margin:0}
 .face-link-overlay{position:absolute;inset:0;z-index:4;pointer-events:none;overflow:hidden}
@@ -1521,6 +1527,11 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
         <button type="button" id="zoom-fit-button" class="secondary">Вписать</button>
       </div>
       <span class="preview-zoom-hint">Ctrl — масштаб · Shift — вверх/вниз · Alt — влево/вправо · колесо — страница</span>
+      <span class="preview-zoom-hint gender-legend" aria-label="Цвет обнаруженного лица по оценке модели">
+        <span class="gender-legend-item"><span class="gender-legend-dot female"></span>Женский класс</span>
+        <span class="gender-legend-item"><span class="gender-legend-dot male"></span>Мужской класс</span>
+        <span class="gender-legend-item"><span class="gender-legend-dot unknown"></span>Не определён / низкая уверенность</span>
+      </span>
     </div>
     <div id="preview-viewport" class="preview-viewport" hidden>
       <div id="preview-stage" class="preview-stage">
