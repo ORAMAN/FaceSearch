@@ -26,6 +26,7 @@ DEFAULTS = {
     "check_vk_friends": True,
     "check_gender": True,
     "gender_weight": 4.0,
+    "profile_gender_weight": 16.0,
 }
 MAX_CANDIDATES_PER_FACE = 10
 MAX_UNIQUE_FRIEND_LOOKUPS = 80
@@ -54,6 +55,7 @@ def normalize_options(options: dict[str, Any] | None) -> dict[str, Any]:
         result["common_friend_weight"] = max(0.0, min(10.0, float(raw.get("common_friend_weight", DEFAULTS["common_friend_weight"]))))
         result["city_weight"] = max(0.0, min(10.0, float(raw.get("city_weight", DEFAULTS["city_weight"]))))
         result["gender_weight"] = max(0.0, min(10.0, float(raw.get("gender_weight", DEFAULTS["gender_weight"]))))
+        result["profile_gender_weight"] = max(0.0, min(30.0, float(raw.get("profile_gender_weight", DEFAULTS["profile_gender_weight"]))))
     except (TypeError, ValueError) as exc:
         raise ValueError("Параметры группового анализа имеют неверный формат.") from exc
     result["check_vk_friends"] = bool(raw.get("check_vk_friends", DEFAULTS["check_vk_friends"]))
@@ -284,6 +286,13 @@ def _prepare_candidates(
             candidate = dict(item)
             candidate["similarity"] = round(max(0.0, min(100.0, score)), 2)
             candidate["city"] = str(candidate.get("city") or "").strip()
+            profile_gender = _normalize_profile_gender_prediction({
+                "profile_gender": candidate.get("profile_gender"),
+                "profile_gender_confidence": candidate.get("profile_gender_confidence"),
+                "profile_sex": candidate.get("profile_sex", candidate.get("sex")),
+            })
+            candidate["profile_gender"] = profile_gender["gender"]
+            candidate["profile_gender_confidence"] = profile_gender["confidence"]
             candidate["profile_key"] = _stable_profile_key(candidate)
             if candidate["profile_key"] in seen:
                 continue
@@ -382,6 +391,71 @@ def _normalize_gender_prediction(value: Any) -> dict[str, Any]:
     return {"gender": gender, "confidence": confidence}
 
 
+def _normalize_profile_gender_prediction(value: Any) -> dict[str, Any]:
+    """Нормализует пол владельца профиля; VK sex=1 означает Ж, sex=2 — М."""
+    if isinstance(value, dict):
+        raw_gender = value.get("profile_gender")
+        if raw_gender is None:
+            raw_gender = value.get("profile_sex", value.get("sex"))
+        raw_confidence = value.get("profile_gender_confidence")
+    else:
+        raw_gender = value
+        raw_confidence = None
+
+    if isinstance(raw_gender, bool) or raw_gender is None:
+        gender = "unknown"
+    elif isinstance(raw_gender, (int, float)):
+        # VK API sex values differ from InsightFace labels:
+        # VK: 1=female, 2=male; InsightFace: 0=female, 1=male.
+        code = int(raw_gender)
+        gender = "female" if code == 1 else ("male" if code == 2 else "unknown")
+    else:
+        text = str(raw_gender or "").strip().casefold()
+        if text in ("1", "f", "female", "woman", "ж", "жен", "женский", "девушка"):
+            gender = "female"
+        elif text in ("2", "m", "male", "man", "м", "муж", "мужской", "мужчина"):
+            gender = "male"
+        else:
+            gender = "unknown"
+
+    if gender == "unknown":
+        return {"gender": "unknown", "confidence": 0.0}
+    try:
+        confidence = 0.95 if raw_confidence is None else max(0.0, min(1.0, float(raw_confidence)))
+    except (TypeError, ValueError):
+        confidence = 0.95
+    if not math.isfinite(confidence):
+        confidence = 0.0
+    return {"gender": gender, "confidence": confidence}
+
+
+def _profile_gender_mismatch_penalty(
+    query_gender: dict[str, Any],
+    candidate: dict[str, Any],
+    options: dict[str, Any],
+) -> float:
+    """Мягко штрафует противоречие пола исходного лица и явного пола в карточке профиля."""
+    if not options.get("check_gender", True):
+        return 0.0
+    query = _normalize_gender_prediction(query_gender)
+    profile = _normalize_profile_gender_prediction({
+        "profile_gender": candidate.get("profile_gender"),
+        "profile_gender_confidence": candidate.get("profile_gender_confidence"),
+        "profile_sex": candidate.get("profile_sex", candidate.get("sex")),
+    })
+    if query["gender"] == "unknown" or profile["gender"] == "unknown":
+        return 0.0
+    if query["gender"] == profile["gender"]:
+        return 0.0
+    query_conf = float(query["confidence"])
+    profile_conf = float(profile["confidence"])
+    if query_conf < 0.65 or profile_conf < 0.65:
+        return 0.0
+    query_strength = max(0.0, min(1.0, (query_conf - 0.5) * 2.0))
+    profile_strength = max(0.0, min(1.0, (profile_conf - 0.5) * 2.0))
+    return float(options.get("profile_gender_weight", DEFAULTS["profile_gender_weight"])) * query_strength * profile_strength
+
+
 def _gender_mismatch_penalty(
     query_gender: dict[str, Any],
     candidate: dict[str, Any],
@@ -473,11 +547,17 @@ def _rank_combinations(
                     and 0 <= int(candidate.get("face_index", 0)) < len(query_genders)
                     else {"gender": "unknown", "confidence": 0.0}
                 )
-                candidate_gender_penalty = (
+                face_gender_penalty = (
                     _gender_mismatch_penalty(current_query_gender, candidate, options)
                     if not candidate.get("unmatched")
                     else 0.0
                 )
+                profile_gender_penalty = (
+                    _profile_gender_mismatch_penalty(current_query_gender, candidate, options)
+                    if not candidate.get("unmatched")
+                    else 0.0
+                )
+                candidate_gender_penalty = face_gender_penalty + profile_gender_penalty
                 gender_penalty_sum += candidate_gender_penalty
                 for previous in state["chosen"]:
                     if candidate.get("unmatched") or previous.get("unmatched"):
@@ -580,23 +660,44 @@ def _rank_combinations(
                     "unmatched_reason": item.get("unmatched_reason") or "",
                     "gender": _normalize_gender_prediction(item).get("gender", "unknown"),
                     "gender_confidence": _normalize_gender_prediction(item).get("confidence", 0.0),
+                    "profile_gender": item.get("profile_gender", "unknown"),
+                    "profile_gender_confidence": float(item.get("profile_gender_confidence") or 0.0),
                     "query_gender": (
                         query_genders[int(item.get("face_index", index))]
                         if query_genders is not None
                         and 0 <= int(item.get("face_index", index)) < len(query_genders)
                         else {"gender": "unknown", "confidence": 0.0}
                     ),
-                    "gender_penalty": (
+                    "face_gender_penalty": (
                         round(_gender_mismatch_penalty(
-                            query_genders[int(item.get("face_index", index))],
-                            item,
-                            options,
+                            query_genders[int(item.get("face_index", index))], item, options
                         ), 2)
                         if query_genders is not None
                         and 0 <= int(item.get("face_index", index)) < len(query_genders)
                         and not item.get("unmatched")
                         else 0.0
                     ),
+                    "profile_gender_penalty": (
+                        round(_profile_gender_mismatch_penalty(
+                            query_genders[int(item.get("face_index", index))], item, options
+                        ), 2)
+                        if query_genders is not None
+                        and 0 <= int(item.get("face_index", index)) < len(query_genders)
+                        and not item.get("unmatched")
+                        else 0.0
+                    ),
+                    "gender_penalty": round(
+                        (
+                            _gender_mismatch_penalty(
+                                query_genders[int(item.get("face_index", index))], item, options
+                            )
+                            + _profile_gender_mismatch_penalty(
+                                query_genders[int(item.get("face_index", index))], item, options
+                            )
+                        ), 2
+                    ) if query_genders is not None
+                    and 0 <= int(item.get("face_index", index)) < len(query_genders)
+                    and not item.get("unmatched") else 0.0,
                 }
                 for index, item in enumerate(chosen)
             ],
