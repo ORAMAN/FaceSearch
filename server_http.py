@@ -3514,6 +3514,12 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 ).strip()
             profile_url = str(result.get("profile_url") or "").strip()
 
+            gender_prediction = {"gender": "unknown", "confidence": 0.0}
+            include_gender = bool(data.get("include_gender"))
+            if include_gender:
+                # Используем уже имеющийся классификатор CROP. В обычном поиске
+                # дополнительные инференсы не выполняются, чтобы не замедлять выдачу.
+                gender_prediction = _classify_candidate_face_gender(result)
             cards.append({
                 "rank": int(result.get("rank") or len(cards) + 1),
                 "face_id": face_id,
@@ -3528,6 +3534,11 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 "info": profile_info,
                 "metadata_name": metadata_name,
                 "metadata": metadata_info,
+                **({
+                    "gender": str(gender_prediction.get("gender") or "unknown"),
+                    "gender_confidence": max(0.0, min(1.0, float(gender_prediction.get("confidence") or 0.0))),
+                    "gender_model": str(gender_prediction.get("gender_model") or ""),
+                } if include_gender else {}),
             })
         if CREATE_CROPS_ON_HTML and cards:
             _start_crop_repair(card["face_id"] for card in cards)
