@@ -34,12 +34,12 @@ class GroupAnalysisTests(unittest.TestCase):
             },
             {
                 "face_id": 103, "profile_id": 501,
-                "profile_url": "https://example.test/photo/3",
+                "profile_url": "https://example.test/profile/501",
                 "name": "Тот же профиль, лицо 3", "similarity": 94.0,
             },
             {
                 "face_id": 201, "profile_id": 502,
-                "profile_url": "", "source_url": "",
+                "profile_url": "https://example.test/profile/502",
                 "name": "Другой профиль", "similarity": 90.0,
             },
         ]]
@@ -54,6 +54,39 @@ class GroupAnalysisTests(unittest.TestCase):
             [item["profile_key"] for item in selected],
             ["profile:501", "profile:502"],
         )
+
+    def test_local_face_without_online_profile_is_excluded_even_with_higher_similarity(self):
+        candidates = [[
+            {
+                "face_id": 99, "profile_id": 900,
+                "profile_url": "", "source_url": "https://images.example.test/local-copy.jpg",
+                "name": "Локальное лицо без интернет-профиля", "similarity": 99.5,
+            },
+            {
+                "face_id": 100, "profile_id": 901,
+                "profile_url": "https://social.example.test/profile/901",
+                "name": "Профиль из интернета", "similarity": 91.0,
+            },
+        ]]
+        prepared = _prepare_candidates(
+            candidates,
+            normalize_options({"candidates_per_face": 5, "min_similarity": 0}),
+        )
+        selected = [item for item in prepared[0] if not item.get("unmatched")]
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["face_id"], 100)
+        self.assertEqual(selected[0]["name"], "Профиль из интернета")
+
+    def test_face_with_vk_id_is_treated_as_online_profile(self):
+        prepared = _prepare_candidates([[
+            {
+                "face_id": 12, "vk_user_id": 123456,
+                "profile_url": "", "name": "Профиль VK", "similarity": 89.0,
+            },
+        ]], normalize_options({"candidates_per_face": 5, "min_similarity": 0}))
+        selected = [item for item in prepared[0] if not item.get("unmatched")]
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["vk_user_id"], 123456)
 
     def test_friend_lookup_uses_public_vk_loader_api_helper(self):
         class FakeSession:
