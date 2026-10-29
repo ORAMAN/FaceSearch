@@ -1,15 +1,21 @@
-name: Experimental group analysis tests
+name: Group analysis tests
 
 on:
   push:
     branches:
+      - main
       - experiment/group-face-analysis
   pull_request:
     branches:
       - main
     paths:
+      - "face_search_gui.py"
+      - "server_http.py"
       - "facesearch/group_analysis.py"
       - "facesearch/config.py"
+      - "facesearch/settings.py"
+      - "loaders/vk/vk_downloader.py"
+      - "group_analysis_ui.js"
       - "tests/test_group_analysis.py"
       - ".github/workflows/group-analysis-tests.yml"
 
