@@ -184,7 +184,7 @@
       }
       const name = document.createElement("div");
       name.className = "group-profile-name";
-      name.textContent = "Лицо " + (Number(profile.face_index || index) + 1) + ": " + String(profile.name || "Без имени");
+      name.textContent = "Кандидат для лица " + (Number(profile.face_index || index) + 1) + ": " + String(profile.name || "Без надёжного совпадения");
       card.appendChild(name);
 
       const meta = document.createElement("div");
