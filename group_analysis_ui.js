@@ -174,7 +174,8 @@
       const genderDetails = "Исходное лицо: " + style.label +
         (queryGender !== "unknown" ? " (" + Math.round(queryConfidence * 100) + "%)" : "");
       const candidateDetails = unmatched
-        ? "Нет назначенного профиля"
+        ? "Нет назначенного профиля" +
+          (profile.unmatched_reason ? " · " + String(profile.unmatched_reason) : "")
         : "Кандидат: " + (colors[candidateGender] || colors.unknown).label +
           (candidateGender !== "unknown" ? " (" + Math.round(candidateConfidence * 100) + "%)" : "") +
           " · пол профиля: " + (colors[profileGender] || colors.unknown).label;
