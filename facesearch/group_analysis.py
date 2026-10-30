@@ -600,6 +600,10 @@ def _merge_candidates_across_sources(
 
     groups: dict[tuple[str, str], list[str]] = {}
     for key, candidate in catalog.items():
+        # Явно выбранный профиль не должен сливаться с другой учётной записью
+        # только по совпадению имени и пола: ручное назначение точнее эвристики.
+        if candidate.get("pinned"):
+            continue
         name_key = _normalise_person_name(_candidate_name(candidate))
         gender = _candidate_gender_for_merge(candidate)
         if name_key and gender in ("male", "female"):
