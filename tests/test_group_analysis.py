@@ -803,6 +803,49 @@ class GroupAnalysisTests(unittest.TestCase):
         self.assertEqual(by_face[1]["name"], "Дарья")
         self.assertEqual(by_face[1]["gender_penalty"], 0.0)
 
+    def test_api_only_pinned_vk_profile_is_not_misreported_as_zero_similarity(self):
+        candidates = [
+            [{
+                "face_id": 101,
+                "vk_user_id": 10101,
+                "profile_url": "https://vk.com/id10101",
+                "name": "Локальный кандидат",
+                "similarity": 90.0,
+            }],
+            [{
+                "face_id": 0,
+                "profile_id": None,
+                "vk_user_id": 20202,
+                "profile_url": "https://vk.com/id20202",
+                "name": "Профиль получен через VK API",
+                "similarity": 0.0,
+                "similarity_unknown": True,
+                "profile_gender": "female",
+                "pinned": True,
+            }],
+        ]
+        with tempfile.TemporaryDirectory() as app_dir:
+            result = analyze_group(
+                candidates,
+                {
+                    "min_similarity": 0,
+                    "candidates_per_face": 5,
+                    "check_vk_friends": False,
+                    "check_gender": False,
+                },
+                app_dir,
+            )
+
+        best = result["combinations"][0]
+        by_face = {item["face_index"]: item for item in best["profiles"]}
+        api_profile = by_face[1]
+        self.assertFalse(api_profile["unmatched"])
+        self.assertEqual(api_profile["vk_user_id"], 20202)
+        self.assertFalse(api_profile["similarity_known"])
+        self.assertEqual(api_profile["assignment_confidence"], "certain")
+        self.assertIn("визуальное сходство не рассчитывалось", api_profile["confidence_reason"])
+        self.assertEqual(best["visual_average"], 90.0)
+
     def test_options_are_clamped(self):
         options = normalize_options({
             "min_similarity": 150,
@@ -816,7 +859,7 @@ class GroupAnalysisTests(unittest.TestCase):
             "check_gender": False,
         })
         self.assertEqual(options["min_similarity"], 100.0)
-        self.assertEqual(options["candidates_per_face"], 10)
+        self.assertEqual(options["candidates_per_face"], 50)
         self.assertEqual(options["friend_weight"], 0.0)
         self.assertEqual(options["common_friend_weight"], 10.0)
         self.assertEqual(options["city_weight"], 2.5)
