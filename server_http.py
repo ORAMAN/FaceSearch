@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, urlparse
 
 import face_search_gui as face_search
 from facesearch import group_analysis
+from facesearch.indexing.embeddings import embedding_blob_to_view
 from facesearch.settings import _load_gui_settings
 from facesearch.database_profiles import _load_db_profiles, _default_profile
 from facesearch.card_text_filter import (
@@ -2884,6 +2885,162 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 </body>
 </html>
 """
+
+
+def _resolve_group_pin_candidate(
+    conn,
+    identifier: str,
+    query_embedding,
+    face_index: int,
+) -> dict:
+    """Разрешает ручное назначение по face.id, profiles.id или VK ID."""
+    value = str(identifier or "").strip()
+    match = __import__("re").fullmatch(r"(?:(face|profile|vk):)?([1-9]\\d*)", value, __import__("re").IGNORECASE)
+    if not match:
+        raise ValueError(
+            "ID должен быть числом (ID лица) либо иметь префикс profile: или vk:."
+        )
+    identifier_kind = (match.group(1) or "face").lower()
+    numeric_id = int(match.group(2))
+
+    if identifier_kind == "face":
+        sql = (
+            "SELECT f.id, f.embedding, f.embedding_dim "
+            "FROM faces f WHERE f.id = ? LIMIT 1"
+        )
+    elif identifier_kind == "profile":
+        sql = (
+            "SELECT f.id, f.embedding, f.embedding_dim "
+            "FROM faces f JOIN images i ON i.id = f.image_id "
+            "WHERE i.profile_id = ? ORDER BY f.id DESC LIMIT 5000"
+        )
+    else:
+        sql = (
+            "SELECT f.id, f.embedding, f.embedding_dim "
+            "FROM faces f JOIN images i ON i.id = f.image_id "
+            "JOIN profiles p ON p.id = i.profile_id "
+            "WHERE p.vk_user_id = ? ORDER BY f.id DESC LIMIT 5000"
+        )
+
+    rows = conn.execute(sql, (numeric_id,)).fetchall()
+    if not rows:
+        label = {
+            "face": "лицо",
+            "profile": "профиль БД",
+            "vk": "VK ID",
+        }[identifier_kind]
+        raise ValueError(f"Не найдено лицо или профиль для {label} {numeric_id}.")
+
+    np = face_search.np
+    query = np.asarray(query_embedding, dtype=np.float32).reshape(-1)
+    query_norm = float(np.linalg.norm(query))
+    if query_norm <= 0:
+        raise ValueError("Embedding исходного лица имеет нулевую норму.")
+    query /= query_norm
+
+    best_face_id = 0
+    best_similarity = -2.0
+    for row in rows:
+        try:
+            face_id = int(row[0])
+            dimension = int(row[2])
+            if dimension != int(query.shape[0]):
+                continue
+            stored = embedding_blob_to_view(
+                row[1], dimension, numpy_module=np
+            )
+            stored_norm = float(np.linalg.norm(stored))
+            if stored_norm <= 0:
+                continue
+            similarity = float(np.dot(query, stored / stored_norm))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if similarity > best_similarity:
+            best_similarity = similarity
+            best_face_id = face_id
+
+    if best_face_id <= 0:
+        raise ValueError(
+            "Для выбранного профиля не найдено embedding совместимой размерности."
+        )
+
+    result = face_search._result_row(conn, best_face_id)
+    if not isinstance(result, dict):
+        raise ValueError("Не удалось прочитать карточку выбранного профиля из БД.")
+
+    raw_meta = {}
+    try:
+        parsed = json.loads(str(result.get("raw_json") or ""))
+        if isinstance(parsed, dict):
+            raw_meta = parsed
+    except (TypeError, ValueError):
+        pass
+    metadata_doc = {}
+    try:
+        parsed = json.loads(str(result.get("metadata_json") or ""))
+        if isinstance(parsed, dict):
+            metadata_doc = parsed
+    except (TypeError, ValueError):
+        pass
+
+    raw_info = raw_meta.get("info") if isinstance(raw_meta.get("info"), dict) else {}
+    metadata_info = (
+        metadata_doc.get("info")
+        if isinstance(metadata_doc.get("info"), dict)
+        else {}
+    )
+    vk_id = result.get("vk_user_id")
+    try:
+        vk_id = int(vk_id) if vk_id is not None and int(vk_id) > 0 else None
+    except (TypeError, ValueError):
+        vk_id = None
+
+    profile_url = str(
+        result.get("profile_url") or raw_meta.get("url_source") or ""
+    ).strip()
+    if not profile_url and vk_id:
+        profile_url = "https://vk.com/id" + str(vk_id)
+    full_name = " ".join(
+        part for part in (
+            str(result.get("first_name") or "").strip(),
+            str(result.get("last_name") or "").strip(),
+        ) if part
+    ).strip()
+    if not full_name:
+        full_name = str(
+            result.get("screen_name")
+            or result.get("domain")
+            or raw_meta.get("name")
+            or profile_url
+            or ("Профиль #" + str(result.get("profile_id") or numeric_id))
+        ).strip()
+
+    candidate = {
+        "profile_id": result.get("profile_id"),
+        "face_id": best_face_id,
+        "name": full_name,
+        "profile_url": profile_url,
+        "source_url": str(result.get("source_url") or ""),
+        "city": str(result.get("city_title") or "").strip(),
+        "path": str(result.get("path") or ""),
+        "similarity": max(0.0, min(100.0, best_similarity * 100.0)),
+        "vk_user_id": vk_id,
+        "profile_sex": result.get("sex"),
+        "raw_meta": raw_meta,
+        "metadata": metadata_doc,
+        "info": raw_info,
+        "metadata_info": metadata_info,
+        "pinned": True,
+        "pinned_identifier": value,
+        "face_index": int(face_index),
+    }
+    candidate["profile_key"] = group_analysis._stable_profile_key(candidate)
+    if not group_analysis._has_internet_profile(candidate):
+        raise ValueError(
+            "Выбранная запись не связана с интернет-профилем. "
+            "Закреплять можно только найденные профили."
+        )
+    return candidate
 
 
 class FaceSearchRequestHandler(BaseHTTPRequestHandler):
