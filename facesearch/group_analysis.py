@@ -581,11 +581,22 @@ def _merge_candidates_across_sources(
             existing["workplaces"] = _merge_value_lists(existing.get("workplaces"), candidate.get("workplaces"))
             if not existing.get("birthdate") and candidate.get("birthdate"):
                 existing["birthdate"] = candidate["birthdate"]
-            if float(candidate.get("similarity") or 0.0) > float(existing.get("similarity") or 0.0):
+            candidate_overrides_pin = bool(candidate.get("pinned")) and not bool(existing.get("pinned"))
+            replace_metadata = candidate_overrides_pin or (
+                not existing.get("pinned")
+                and float(candidate.get("similarity") or 0.0) > float(existing.get("similarity") or 0.0)
+            )
+            if replace_metadata:
                 for field in ("name", "profile_name", "profile_url", "url_source", "image_url", "url_image", "city", "source_type", "database", "record", "info", "metadata"):
                     if candidate.get(field) not in (None, "", {}):
                         existing[field] = candidate[field]
-                existing["similarity"] = candidate.get("similarity")
+                if candidate_overrides_pin:
+                    existing["pinned"] = True
+                    existing["pinned_identifier"] = candidate.get("pinned_identifier")
+                    existing["face_id"] = candidate.get("face_id")
+                    existing["profile_id"] = candidate.get("profile_id")
+                else:
+                    existing["similarity"] = candidate.get("similarity")
 
     groups: dict[tuple[str, str], list[str]] = {}
     for key, candidate in catalog.items():
@@ -645,11 +656,22 @@ def _merge_candidates_across_sources(
         for field in ("birthdate", "profile_gender", "profile_gender_confidence", "gender", "gender_confidence", "gender_model", "vk_user_id"):
             if target.get(field) in (None, "", "unknown", 0) and candidate.get(field) not in (None, "", "unknown", 0):
                 target[field] = candidate[field]
-        if float(candidate.get("similarity") or 0.0) > float(target.get("similarity") or 0.0):
+        candidate_overrides_pin = bool(candidate.get("pinned")) and not bool(target.get("pinned"))
+        replace_metadata = candidate_overrides_pin or (
+            not target.get("pinned")
+            and float(candidate.get("similarity") or 0.0) > float(target.get("similarity") or 0.0)
+        )
+        if replace_metadata:
             for field in ("name", "profile_name", "profile_url", "url_source", "image_url", "url_image", "city", "source_type", "database", "record", "info", "metadata"):
                 if candidate.get(field) not in (None, "", {}):
                     target[field] = candidate[field]
-            target["similarity"] = candidate.get("similarity")
+            if candidate_overrides_pin:
+                target["pinned"] = True
+                target["pinned_identifier"] = candidate.get("pinned_identifier")
+                target["face_id"] = candidate.get("face_id")
+                target["profile_id"] = candidate.get("profile_id")
+            else:
+                target["similarity"] = candidate.get("similarity")
 
     output: list[list[dict[str, Any]]] = []
     for candidates in prepared:
@@ -682,10 +704,17 @@ def _merge_candidates_across_sources(
                 )
                 current["education"] = _merge_value_lists(current.get("education"), enriched.get("education"))
                 current["workplaces"] = _merge_value_lists(current.get("workplaces"), enriched.get("workplaces"))
-                if float(enriched.get("similarity") or 0.0) > float(current.get("similarity") or 0.0):
-                    for field in ("face_id", "name", "profile_name", "profile_url", "url_source", "image_url", "url_image", "city", "similarity", "source_type", "database"):
+                enriched_overrides_pin = bool(enriched.get("pinned")) and not bool(current.get("pinned"))
+                replace_metadata = enriched_overrides_pin or (
+                    not current.get("pinned")
+                    and float(enriched.get("similarity") or 0.0) > float(current.get("similarity") or 0.0)
+                )
+                if replace_metadata:
+                    for field in ("face_id", "profile_id", "name", "profile_name", "profile_url", "url_source", "image_url", "url_image", "city", "similarity", "source_type", "database", "pinned_identifier"):
                         if enriched.get(field) not in (None, "", {}):
                             current[field] = enriched[field]
+                    if enriched_overrides_pin:
+                        current["pinned"] = True
         output.append(sorted(unique.values(), key=lambda item: float(item.get("similarity") or 0.0), reverse=True) + unmatched)
     message = (
         f"Объединено групп профилей из разных источников: {merged_groups}."
