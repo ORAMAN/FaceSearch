@@ -94,7 +94,7 @@
   function readOptions() {
     return {
       min_similarity: numberFrom(minSimilarityInput, "Минимальное сходство", 0, 100),
-      candidates_per_face: Math.trunc(numberFrom(candidatesInput, "Количество кандидатов", 1, 10)),
+      candidates_per_face: Math.trunc(numberFrom(candidatesInput, "Количество кандидатов", 1, 50)),
       friend_weight: numberFrom(friendWeightInput, "Вес дружбы", 0, 20),
       common_friend_weight: numberFrom(commonWeightInput, "Вес общих друзей", 0, 10),
       city_weight: numberFrom(cityWeightInput, "Вес города", 0, 10),
