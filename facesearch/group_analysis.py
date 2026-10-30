@@ -708,22 +708,34 @@ def _prepare_candidates(
         seen: set[str] = set()
         current: list[dict[str, Any]] = []
         original_items = [item for item in original if isinstance(item, dict)]
-        ordered = sorted(
-            (item for item in original_items if _has_internet_profile(item)),
+        pinned_items = [
+            item for item in original_items
+            if item.get("pinned") and _has_internet_profile(item)
+        ]
+        ordered = pinned_items + sorted(
+            (
+                item for item in original_items
+                if not item.get("pinned") and _has_internet_profile(item)
+            ),
             key=lambda item: float(item.get("similarity") or 0.0),
             reverse=True,
         )
         had_local_only_candidates = any(
             not _has_internet_profile(item) for item in original_items
         )
+        regular_count = 0
         for item in ordered:
+            is_pinned = bool(item.get("pinned"))
             try:
                 score = float(item.get("similarity") or 0.0)
             except (TypeError, ValueError):
                 continue
-            if not math.isfinite(score) or score < minimum:
+            if not math.isfinite(score) or (not is_pinned and score < minimum):
+                continue
+            if not is_pinned and regular_count >= limit:
                 continue
             candidate = dict(item)
+            candidate["pinned"] = is_pinned
             candidate["similarity"] = round(max(0.0, min(100.0, score)), 2)
             candidate["city"] = str(candidate.get("city") or "").strip()
             candidate["name_key"] = _normalise_person_name(_candidate_name(candidate))
@@ -742,14 +754,21 @@ def _prepare_candidates(
             candidate["profile_gender_confidence"] = profile_gender["confidence"]
             candidate["profile_key"] = _stable_profile_key(candidate)
             if candidate["profile_key"] in seen:
+                existing_index = next(
+                    (index for index, existing in enumerate(current)
+                     if existing.get("profile_key") == candidate["profile_key"]),
+                    None,
+                )
+                if is_pinned and existing_index is not None:
+                    current[existing_index].update(candidate)
                 continue
             seen.add(candidate["profile_key"])
             candidate["face_index"] = face_index
             candidate["candidate_rank"] = len(current) + 1
             candidate["vk_user_id"] = vk_user_id(candidate)
             current.append(candidate)
-            if len(current) >= limit:
-                break
+            if not is_pinned:
+                regular_count += 1
         current.append({
             "profile_key": "unmatched:" + str(face_index),
             "face_index": face_index,
@@ -1054,6 +1073,31 @@ def _rank_combinations(
         unmatched_by_face.append(unmatched)
         candidate_maps.append(mapping)
 
+    pinned_by_face: dict[int, dict[str, Any]] = {}
+    locked_profile_keys: dict[str, int] = {}
+    for face_index, mapping in enumerate(candidate_maps):
+        pinned_candidates = [
+            candidate for candidate in mapping.values()
+            if candidate.get("pinned")
+        ]
+        if len(pinned_candidates) > 1:
+            raise ValueError(
+                f"Для лица {face_index + 1} закреплено несколько профилей. "
+                "Оставьте только одно назначение."
+            )
+        if not pinned_candidates:
+            continue
+        pinned_candidate = pinned_candidates[0]
+        pinned_key = str(pinned_candidate.get("profile_key") or "")
+        previous_face = locked_profile_keys.get(pinned_key)
+        if previous_face is not None and previous_face != face_index:
+            raise ValueError(
+                f"Один профиль нельзя закрепить одновременно за лицами "
+                f"{previous_face + 1} и {face_index + 1}."
+            )
+        pinned_by_face[face_index] = pinned_candidate
+        locked_profile_keys[pinned_key] = face_index
+
     global_profile_keys = sorted(profile_keys)
     profile_column = {key: idx for idx, key in enumerate(global_profile_keys)}
     face_count = len(candidates_by_face)
@@ -1082,6 +1126,8 @@ def _rank_combinations(
     penalty_cache: dict[tuple[int, str], tuple[float, float, float]] = {}
 
     def candidate_penalties(face_index: int, candidate: dict[str, Any]) -> tuple[float, float, float]:
+        if candidate.get("pinned"):
+            return 0.0, 0.0, 0.0
         key = str(candidate.get("profile_key") or "")
         cache_key = (face_index, key)
         if cache_key in penalty_cache:
@@ -1098,9 +1144,14 @@ def _rank_combinations(
         return value
 
     def row_choices(face_index: int, forbidden: set[tuple[int, str]]) -> list[dict[str, Any]]:
+        pinned_candidate = pinned_by_face.get(face_index)
+        if pinned_candidate is not None:
+            # Закреплённое назначение не может быть отменено альтернативным поиском.
+            return [pinned_candidate]
         choices = [
             candidate for key, candidate in candidate_maps[face_index].items()
             if (face_index, key) not in forbidden
+            and key not in locked_profile_keys
         ]
         choices.sort(
             key=lambda item: (float(item.get("similarity") or 0.0), str(item.get("profile_key") or "")),
@@ -1114,9 +1165,18 @@ def _rank_combinations(
         column_count = len(global_profile_keys) + face_count
         weights = [[invalid_weight] * column_count for _ in range(face_count)]
         for face_index, mapping in enumerate(candidate_maps):
-            for key, candidate in mapping.items():
-                if (face_index, key) in forbidden:
-                    continue
+            pinned_candidate = pinned_by_face.get(face_index)
+            allowed_items = (
+                [(str(pinned_candidate.get("profile_key") or ""), pinned_candidate)]
+                if pinned_candidate is not None
+                else [
+                    (key, candidate)
+                    for key, candidate in mapping.items()
+                    if key not in locked_profile_keys
+                    and (face_index, key) not in forbidden
+                ]
+            )
+            for key, candidate in allowed_items:
                 penalty = candidate_penalties(face_index, candidate)[0]
                 similarity = float(candidate.get("similarity") or 0.0)
                 penalty_units = int(round(penalty * 1000.0))
@@ -1158,6 +1218,8 @@ def _rank_combinations(
             gender_penalty_sum += total
             face_gender_penalty_sum += face_penalty
             profile_gender_penalty_sum += profile_penalty
+            # Ручное закрепление — аксиома назначения (100% уверенности),
+            # но фактическое визуальное сходство сохраняем отдельно и не подменяем.
             visual_sum += float(candidate.get("similarity") or 0.0)
 
         social_score_sum = 0.0
@@ -1437,7 +1499,12 @@ def _rank_combinations(
                     if best_alternative_similarity is not None else None
                 )
                 strong_gender_conflict = penalty > 0.0
-                if strong_gender_conflict:
+                if item.get("pinned"):
+                    assignment_confidence = "certain"
+                    confidence_reason = (
+                        "Профиль закреплён пользователем. Назначение принято как аксиома (100%)."
+                    )
+                elif strong_gender_conflict:
                     assignment_confidence = "low"
                     confidence_reason = "Есть уверенное противоречие по полу; проверьте результат вручную."
                 elif similarity >= 90.0 and (visual_margin is None or visual_margin >= 5.0):
@@ -1459,8 +1526,11 @@ def _rank_combinations(
                 "workplaces": list(item.get("workplaces") or []),
                 "similarity": similarity,
                 "face_id": face_id,
+                "profile_id": int(item.get("profile_id") or 0) or None,
                 "profile_key": profile_key,
                 "vk_user_id": item.get("vk_user_id"),
+                "pinned": bool(item.get("pinned")),
+                "assignment_confidence_percent": 100 if item.get("pinned") else None,
                 "unmatched": unmatched,
                 "unmatched_reason": unmatched_reason,
                 "gender": candidate_gender.get("gender", "unknown"),
@@ -1645,7 +1715,9 @@ def analyze_group(
                 "city": item.get("city") or "",
                 "similarity": float(item.get("similarity") or 0.0),
                 "face_id": int(item.get("face_id") or 0),
+                "profile_id": int(item.get("profile_id") or 0) or None,
                 "vk_user_id": item.get("vk_user_id"),
+                "pinned": bool(item.get("pinned")),
                 "profile_gender": item.get("profile_gender", "unknown"),
                 "profile_gender_confidence": float(item.get("profile_gender_confidence") or 0.0),
                 "birthdate": item.get("birthdate") or "",
