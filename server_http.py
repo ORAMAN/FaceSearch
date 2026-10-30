@@ -1551,7 +1551,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
         </div>
         <div class="field">
           <label for="group-candidates">Кандидатов на лицо</label>
-          <input id="group-candidates" type="number" min="1" max="10" step="1" value="__GROUP_CANDIDATES_PER_FACE__">
+          <input id="group-candidates" type="number" min="1" max="50" step="1" value="__GROUP_CANDIDATES_PER_FACE__">
         </div>
         <div class="field">
           <label for="group-friend-weight">Вес дружбы</label>
