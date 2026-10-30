@@ -202,6 +202,7 @@
       identifier: normalized,
       profileKey: profileKey,
       label: label,
+      similarityKnown: candidate ? candidate.similarity_known !== false : undefined,
       source: source || "manual"
     };
     renderPinnedControls(lastResult);
@@ -475,7 +476,9 @@
 
     positions.forEach(function (position, index) {
       const profile = position.profile;
-      const unmatched = Boolean(profile.unmatched) || !Number(profile.face_id || 0);
+      const hasProfile = Number(profile.face_id || 0) > 0 ||
+        Number(profile.vk_user_id || 0) > 0 || Boolean(profile.profile_url);
+      const unmatched = Boolean(profile.unmatched) || !hasProfile;
       const queryGender = String((profile.query_gender || {}).gender || "unknown").toLowerCase();
       const queryConfidence = Number((profile.query_gender || {}).confidence || 0);
       const candidateGender = String(profile.gender || "unknown").toLowerCase();
@@ -508,9 +511,12 @@
         : "Кандидат: " + (colors[candidateGender] || colors.unknown).label +
           (candidateGender !== "unknown" ? " (" + Math.round(candidateConfidence * 100) + "%)" : "") +
           " · пол профиля: " + (colors[profileGender] || colors.unknown).label;
+      const similarityLabel = profile.similarity_known === false
+        ? "визуальное сходство не рассчитывалось"
+        : "сходство " + Number(profile.similarity || 0).toFixed(2) + "%";
       circle.appendChild(svgNode("title", {},
         String(profile.name || "Без имени") + " · " + genderDetails + " · " + candidateDetails +
-        " · сходство " + Number(profile.similarity || 0).toFixed(2) + "%" +
+        " · " + similarityLabel +
         (genderMismatch ? " · ВНИМАНИЕ: пол кандидата не совпадает с исходным лицом" : "")
       ));
       graph.appendChild(circle);
@@ -528,8 +534,9 @@
         x: position.x, y: position.y + 56, "text-anchor": "middle",
         "font-size": 10, fill: genderMismatch ? "#dc2626" : "var(--muted)",
         "font-weight": genderMismatch ? 700 : 400
-      }, unmatched ? "нет кандидата" : (genderMismatch ? "проверьте пол · " : "") +
-        Number(profile.similarity || 0).toFixed(1) + "%"));
+      }, unmatched ? "нет кандидата" : (profile.similarity_known === false
+        ? "VK API · сходство неизвестно"
+        : (genderMismatch ? "проверьте пол · " : "") + Number(profile.similarity || 0).toFixed(1) + "%"));
     });
   }
 
@@ -540,11 +547,14 @@
       const card = document.createElement("article");
       card.className = "group-profile-card";
       const faceId = Number(profile.face_id || 0);
-      if (faceId > 0) {
+      const avatarUrl = String(profile.avatar_url || "").trim();
+      if (faceId > 0 || /^https?:\/\//i.test(avatarUrl)) {
         const image = document.createElement("img");
         image.loading = "lazy";
         image.alt = "Фото кандидата: " + String(profile.name || "");
-        image.src = "/api/face/" + encodeURIComponent(faceId) + "/image?crop=1";
+        image.src = faceId > 0
+          ? "/api/face/" + encodeURIComponent(faceId) + "/image?crop=1"
+          : avatarUrl;
         image.onerror = function () { image.style.display = "none"; };
         card.appendChild(image);
       }
@@ -585,7 +595,9 @@
         const margin = profile.visual_margin;
         meta.title = String(profile.confidence_reason || "");
         meta.textContent =
-          "Сходство лица: " + Number(profile.similarity || 0).toFixed(2) + "%" +
+          (profile.similarity_known === false
+            ? "Визуальное сходство: не рассчитывалось (профиль получен через VK API; нет локального эмбеддинга)"
+            : "Сходство лица: " + Number(profile.similarity || 0).toFixed(2) + "%") +
           " · уверенность назначения: " + confidenceText +
           (margin !== null && margin !== undefined ? " (отрыв " + Number(margin).toFixed(2) + " п.п.)" : "") +
           " · пол по фото — " + candidateGenderText +
@@ -595,6 +607,18 @@
           (profile.city ? " · " + profile.city : "");
       }
       card.appendChild(meta);
+
+      const apiInfo = profile.profile_info && typeof profile.profile_info === "object"
+        ? profile.profile_info : {};
+      ["Дата рождения", "Страна", "Родной город", "Статус", "Подписчиков", "Текст статуса", "О себе"].forEach(function (key) {
+        const rawValue = apiInfo[key];
+        if (rawValue === undefined || rawValue === null || rawValue === "") return;
+        const line = document.createElement("div");
+        line.className = "group-profile-meta";
+        const valueText = Array.isArray(rawValue) ? rawValue.join(" · ") : String(rawValue);
+        line.textContent = key + ": " + valueText.slice(0, 320);
+        card.appendChild(line);
+      });
 
       const relationshipDetails = [
         ["Учебное заведение", profile.education],
