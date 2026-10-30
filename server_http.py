@@ -1661,7 +1661,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     <div id="group-analysis-summary"></div>
     <details id="group-pins-wrap" class="group-pins" hidden>
       <summary class="group-pins-heading">Закрепление профилей за лицами</summary>
-      <div class="hint">Каждая строка «Лицо N» соответствует рамке №N на фотографии. Наведите курсор на строку или переведите на неё фокус, чтобы выделить рамку; нажмите на номер, чтобы выбрать лицо. Текущее назначение показано под полями строки. Выберите найденный профиль или укажите ID лица, profile:ID (ID профиля БД) либо vk:ID. Если VK ID отсутствует в локальной БД, профиль будет запрошен через VK API (users.get) при пересчёте.</div>
+      <div class="hint">Каждая строка «Лицо N» соответствует рамке №N на фотографии. Наведите курсор на строку или переведите на неё фокус, чтобы выделить рамку; нажмите на номер, чтобы выбрать лицо. Текущее назначение показано под полями строки. Можно выбрать найденный профиль, ввести ID лица, profile:ID, vk:ID, короткое имя VK или вставить ссылку вида https://vk.ru/username. Короткое имя разрешается через VK API; если профиля нет в локальной БД, данные будут получены через users.get.</div>
       <div id="group-pin-rows" class="group-pin-rows"></div>
       <div class="group-pin-actions">
         <button type="button" id="group-pins-recalculate">Пересчитать с закреплёнными профилями</button>
@@ -3088,13 +3088,77 @@ def _resolve_group_pin_candidate(
 ) -> dict:
     """Разрешает ручное назначение по face.id, profiles.id или VK ID."""
     value = str(identifier or "").strip()
-    match = re.fullmatch(r"(?:(face|profile|vk):)?(0*[1-9]\d*)", value, re.IGNORECASE)
-    if not match:
+    identifier_match = re.fullmatch(
+        r"(?:(face|profile|vk):)?([1-9]\d*|[A-Za-z][A-Za-z0-9_.]{1,63})",
+        value,
+        re.IGNORECASE,
+    )
+
+    # Допускаем прямую ссылку VK даже при вызове API без браузерного UI.
+    if not identifier_match:
+        try:
+            parsed_url = urlparse(value if "://" in value else "https://" + value)
+            host = (parsed_url.hostname or "").lower().removeprefix("www.").removeprefix("m.")
+            segments = [part for part in parsed_url.path.split("/") if part]
+            if host in {"vk.com", "vk.ru"} and len(segments) == 1:
+                value = "vk:" + segments[0]
+                identifier_match = re.fullmatch(
+                    r"(vk):([1-9]\d*|[A-Za-z][A-Za-z0-9_.]{1,63})",
+                    value,
+                    re.IGNORECASE,
+                )
+        except (TypeError, ValueError):
+            identifier_match = None
+
+    if not identifier_match:
         raise ValueError(
-            "ID должен быть числом (ID лица) либо иметь префикс profile: или vk:."
+            "Введите ID лица, profile:ID, vk:ID, vk:короткое_имя "
+            "или ссылку VK вида https://vk.ru/username."
         )
-    identifier_kind = (match.group(1) or "face").lower()
-    numeric_id = int(match.group(2))
+
+    identifier_kind = (identifier_match.group(1) or "face").lower()
+    raw_identifier = identifier_match.group(2)
+    if identifier_kind != "vk" and not raw_identifier.isdigit():
+        raise ValueError("Для лиц и профилей БД допускаются только числовые ID.")
+
+    if identifier_kind == "vk" and not raw_identifier.isdigit():
+        vk_client, loader_error = group_analysis._get_vk_loader()
+        if vk_client is None:
+            raise ValueError(
+                "Не удалось разрешить короткое имя VK: "
+                + str(loader_error or "VK API-клиент недоступен.")
+            )
+        try:
+            resolved_entity = vk_client.get_vk_entity(raw_identifier)
+        except Exception as exc:
+            message = str(exc).strip()
+            for token in list(getattr(vk_client, "_TOKEN_LIST", []) or []):
+                if token:
+                    message = message.replace(str(token), "[токен скрыт]")
+            raise ValueError(
+                "VK API не смог разрешить короткое имя «"
+                + raw_identifier + "»: " + (message[:240] or type(exc).__name__)
+            ) from exc
+
+        if not isinstance(resolved_entity, dict) or resolved_entity.get("type") != "user":
+            resolved_type = (
+                str(resolved_entity.get("type") or "неизвестный объект")
+                if isinstance(resolved_entity, dict) else "неизвестный объект"
+            )
+            raise ValueError(
+                "Ссылка VK не разрешилась в личный профиль пользователя "
+                + "(получен тип: " + resolved_type + "). "
+                "Проверьте короткое имя и используйте ссылку именно на страницу человека."
+            )
+        try:
+            numeric_id = int(resolved_entity.get("id") or 0)
+        except (TypeError, ValueError, OverflowError):
+            numeric_id = 0
+        if numeric_id <= 0:
+            raise ValueError("VK API разрешил ссылку, но не вернул корректный ID пользователя.")
+        value = "vk:" + str(numeric_id)
+    else:
+        numeric_id = int(raw_identifier)
 
     if identifier_kind == "face":
         sql = (
