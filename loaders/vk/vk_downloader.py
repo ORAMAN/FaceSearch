@@ -5038,7 +5038,7 @@ def main():
     all_albums_check.grid(row=2, column=0, columnspan=3, sticky="w", padx=(18, 8), pady=1)
 
     ttk.Label(album_settings_frame, text="Системные альбомы:").grid(row=3, column=0, sticky="nw", padx=(18, 8), pady=(4, 1))
-    system_album_frame = ttk.Frame(settings_frame)
+    system_album_frame = ttk.Frame(album_settings_frame)
     system_album_frame.grid(row=3, column=1, columnspan=2, sticky="ew", pady=(4, 1))
     system_album_frame.columnconfigure(0, weight=1)
     system_album_frame.columnconfigure(1, weight=1)
