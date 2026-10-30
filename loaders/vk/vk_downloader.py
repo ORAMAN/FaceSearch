@@ -3332,7 +3332,10 @@ def run_vkontakte24_job(
                     "photo_max_orig": entry["image_url"],
                     "photo_200": entry["image_url"],
                     "_facesearch_url_source": entry["vk_url"],
-                    "_facesearch_referer": page_url if page_mode else CATALOG24_BASE + "/",
+                    "_facesearch_referer": (
+                        current_page_url if search_mode else
+                        (page_url if page_mode else CATALOG24_BASE + "/")
+                    ),
                     "_facesearch_catalog_url": entry["catalog_url"],
                     "_facesearch_extra_info": dict(entry.get("info") or {}),
                 }
@@ -3534,7 +3537,11 @@ def run_vkontakte24_job(
                             page_finished += 1
                             post_ui_event(
                                 "progress", page_finished, len(page_tasks),
-                                f"Каталог {page_cursor} | профили: {page_finished}/{len(page_tasks)} | "
+                                (
+                                    f"Поиск, страница {search_page_number}"
+                                    if search_mode else f"Каталог {page_cursor}"
+                                )
+                                + f" | профили: {page_finished}/{len(page_tasks)} | "
                                 f"импортировано файлов: {totals['files_imported']:,} | ошибок: "
                                 f"{totals['download_errors'] + totals['import_errors']:,}.",
                             )
