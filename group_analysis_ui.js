@@ -112,9 +112,38 @@
 
   function normalisePinIdentifier(raw) {
     const value = String(raw || "").trim();
-    const match = value.match(/^(?:(face|profile|vk):)?0*([1-9]\d*)$/i);
-    if (!match) return "";
-    return (match[1] ? match[1].toLowerCase() : "face") + ":" + match[2];
+    if (!value) return "";
+
+    // Принимаем прямые ссылки VK (включая короткий домен vk.ru),
+    // а не только числовые ID. URL сводится к vk:<screen_name>.
+    let vkScreenName = "";
+    try {
+      const url = new URL(/^https?:\/\//i.test(value) ? value : "https://" + value);
+      const host = String(url.hostname || "").toLowerCase().replace(/^(www|m)\./, "");
+      if (host === "vk.com" || host === "vk.ru") {
+        const segments = url.pathname.split("/").filter(Boolean);
+        if (segments.length !== 1) return "";
+        vkScreenName = decodeURIComponent(segments[0]).trim();
+      }
+    } catch (error) {
+      vkScreenName = "";
+    }
+    if (vkScreenName) {
+      if (/^id[1-9]\d*$/i.test(vkScreenName)) {
+        return "vk:" + vkScreenName.slice(2);
+      }
+      if (/^[a-z][a-z0-9_.]{1,63}$/i.test(vkScreenName)) {
+        return "vk:" + vkScreenName;
+      }
+      return "";
+    }
+
+    const match = value.match(/^(?:(face|profile|vk):)?(0*[1-9]\d*)$/i);
+    if (match) {
+      return (match[1] ? match[1].toLowerCase() : "face") + ":" + match[2];
+    }
+    const vkName = value.match(/^vk:([a-z][a-z0-9_.]{1,63})$/i);
+    return vkName ? "vk:" + vkName[1] : "";
   }
 
   function findPinCandidate(faceIndex, identifier) {
@@ -174,7 +203,7 @@
   function savePin(faceIndex, identifier, source) {
     const normalized = normalisePinIdentifier(identifier);
     if (!normalized) {
-      updatePinMessage("Введите положительный ID лица или ID с префиксом profile: либо vk:.");
+      updatePinMessage("Введите ID лица, profile:ID, vk:ID или ссылку VK вида https://vk.ru/username.");
       return false;
     }
     const candidate = findPinCandidate(faceIndex, normalized);
@@ -198,7 +227,7 @@
       : (normalized.startsWith("profile:")
         ? "Профиль БД #" + normalized.slice(8)
         : normalized.startsWith("vk:")
-          ? "VK ID " + normalized.slice(3) + " (данные будут запрошены через API, если профиля нет в БД)"
+          ? "VK " + normalized.slice(3) + " (будет разрешён через VK API, если профиля нет в БД)"
           : "ID лица " + normalized.slice(5));
     pinnedAssignments[faceIndex] = {
       identifier: normalized,
@@ -302,7 +331,7 @@
       input.type = "text";
       input.autocomplete = "off";
       input.spellcheck = false;
-      input.placeholder = "ID лица, profile:ID или vk:ID";
+      input.placeholder = "ID лица, profile:ID, vk:ID или ссылка VK";
       input.setAttribute("aria-label", "Ввести ID профиля для лица " + (faceIndex + 1));
       input.value = assignment && assignment.source === "manual" ? assignment.identifier : "";
 
