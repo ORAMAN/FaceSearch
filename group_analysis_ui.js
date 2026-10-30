@@ -292,8 +292,17 @@
       }
     }
     pinsWrap.hidden = !faceCount;
-    if (pinsRecalculateButton) pinsRecalculateButton.disabled = running || !faceCount;
-    if (pinsClearButton) pinsClearButton.disabled = running || !Object.keys(pinnedAssignments).length;
+    if (pinsWrap) pinsWrap.open = false;
+    const busy = Boolean(core.isBusy());
+    if (pinsRecalculateButton) {
+      pinsRecalculateButton.disabled = running || busy || !faceCount;
+      pinsRecalculateButton.title = busy
+        ? "Дождитесь завершения текущего поиска."
+        : "Запустить групповой анализ с закреплёнными профилями.";
+    }
+    if (pinsClearButton) {
+      pinsClearButton.disabled = running || busy || !Object.keys(pinnedAssignments).length;
+    }
   }
 
   function svgNode(name, attrs, text) {
@@ -700,6 +709,7 @@
       if (!response.ok) throw new Error(data.error || ("Ошибка HTTP " + response.status));
 
       setProgress(data.progress || 0, data.message || "Анализ выполняется…");
+      if (pinsMessage && data.message) pinsMessage.textContent = data.message;
       if (data.state === "done") {
         renderResult(data.result || {});
         finish();
@@ -714,12 +724,30 @@
       message.className = "group-empty";
       message.textContent = error.message || String(error);
       summary.replaceChildren(message);
+      updatePinMessage("Ошибка пересчёта: " + (error.message || String(error)));
       finish();
     }
   }
 
   async function start() {
-    if (running || !core.getQueryId() || core.getFaceCount() < 2 || core.isBusy()) return;
+    if (running) {
+      updatePinMessage("Групповой анализ уже выполняется.");
+      return;
+    }
+    const queryId = core.getQueryId();
+    const faceCount = core.getFaceCount();
+    if (!queryId) {
+      updatePinMessage("Сеанс поиска отсутствует. Загрузите фотографию и определите лица повторно.");
+      return;
+    }
+    if (faceCount < 2) {
+      updatePinMessage("Для группового анализа необходимо не менее двух обнаруженных лиц.");
+      return;
+    }
+    if (core.isBusy()) {
+      updatePinMessage("Сейчас выполняется другой поиск. Дождитесь его завершения и повторите пересчёт.");
+      return;
+    }
     let options;
     try {
       options = readOptions();
@@ -728,7 +756,6 @@
       return;
     }
 
-    const queryId = core.getQueryId();
     if (core.setGroupAnalysisMatches) core.setGroupAnalysisMatches("", []);
     running = true;
     activeJobId = "";
@@ -742,6 +769,11 @@
     combinationsBox.replaceChildren();
     notice.textContent = "";
     setProgress(0, "Запуск группового анализа…");
+    updatePinMessage(
+      Object.keys(pinnedAssignments).length
+        ? "Пересчёт с " + Object.keys(pinnedAssignments).length + " закреплёнными назначениями…"
+        : "Запуск анализа без ручных закреплений…"
+    );
     sync();
     button.textContent = "Анализ запускается…";
     const sequence = ++pollSequence;
@@ -761,6 +793,7 @@
       activeJobId = String(response.job_id || "");
       if (!activeJobId) throw new Error("Сервер не вернул идентификатор задачи.");
       setProgress(1, "Задача запущена. Поиск кандидатов и проверка связей могут занять некоторое время.");
+      updatePinMessage("Задача принята сервером. Ожидание результата группового анализа…");
       window.setTimeout(function () { poll(activeJobId, sequence, queryId); }, 250);
     } catch (error) {
       setProgress(100, "Не удалось запустить анализ.");
@@ -768,6 +801,7 @@
       message.className = "group-empty";
       message.textContent = error.message || String(error);
       summary.replaceChildren(message);
+      updatePinMessage("Ошибка запуска: " + (error.message || String(error)));
       finish();
     }
   }
