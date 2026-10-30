@@ -1330,8 +1330,12 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .group-pins[hidden]{display:none!important}
 .group-pins-heading{font-weight:700;margin-bottom:4px}
 .group-pin-rows{display:grid;gap:8px;margin-top:10px}
-.group-pin-row{display:grid;grid-template-columns:78px minmax(190px,1fr) minmax(170px,230px) auto;align-items:center;gap:8px}
-.group-pin-face{font-weight:650;font-size:13px}
+.group-pin-row{display:grid;grid-template-columns:78px minmax(190px,1fr) minmax(170px,230px) auto;align-items:center;gap:8px;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.group-pin-row.is-pinned{border-color:#d97706;box-shadow:inset 3px 0 #d97706}
+.group-pin-face{font-weight:700;font-size:13px;line-height:1.35}
+.group-pin-face-trigger{cursor:pointer;border-radius:5px;padding:5px}
+.group-pin-face-trigger:hover{background:var(--secondary)}
+.group-pin-face-trigger:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .group-pins-heading{cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;user-select:none}
 .group-pins-heading::-webkit-details-marker{display:none}
 .group-pins-heading::before{content:"▸";display:inline-block;color:var(--accent);transition:transform .15s ease}
@@ -1342,7 +1346,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .group-pin-row select,.group-pin-row input{width:100%;min-width:0;max-width:100%}
 .group-pin-row button{width:auto;min-height:36px;white-space:nowrap}
 .group-pin-status{grid-column:2/-1}
-.group-pin-status{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.group-pin-status{font-size:12px;color:var(--muted);overflow-wrap:anywhere;line-height:1.4}
+.group-pin-status.active{padding:5px 8px;border-radius:6px;background:var(--drop)}
 .group-pin-status.active{color:var(--success,var(--accent));font-weight:600}
 .group-pin-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .group-pin-actions button{width:auto;min-height:36px}
@@ -1656,7 +1661,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     <div id="group-analysis-summary"></div>
     <details id="group-pins-wrap" class="group-pins" hidden>
       <summary class="group-pins-heading">Закрепление профилей за лицами</summary>
-      <div class="hint">Выберите найденный профиль или укажите ID лица, profile:ID (ID профиля БД) либо vk:ID. Если VK ID отсутствует в локальной БД, профиль будет запрошен через VK API (users.get) при пересчёте. Для такого профиля визуальное сходство недоступно, пока в БД нет его фотографий и эмбеддинга.</div>
+      <div class="hint">Каждая строка «Лицо N» соответствует рамке №N на фотографии. Наведите курсор на строку или переведите на неё фокус, чтобы выделить рамку; нажмите на номер, чтобы выбрать лицо. Текущее назначение показано под полями строки. Выберите найденный профиль или укажите ID лица, profile:ID (ID профиля БД) либо vk:ID. Если VK ID отсутствует в локальной БД, профиль будет запрошен через VK API (users.get) при пересчёте.</div>
       <div id="group-pin-rows" class="group-pin-rows"></div>
       <div class="group-pin-actions">
         <button type="button" id="group-pins-recalculate">Пересчитать с закреплёнными профилями</button>
@@ -1762,6 +1767,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   let cameraOpening=false;
   let lastResults=[];
   let groupAnalysisMatches=null;
+  let pinnedFaceAssignments=Object.create(null);
+  let hoveredPinnedFace=-1;
 
   const indexStatusBox=document.getElementById("index-status");
   const indexMetaBox=document.getElementById("index-meta");
@@ -2290,16 +2297,31 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       const face=entry.face,index=entry.index,b=face.bbox;
       const match=faceMatchResults[index]||null;
       const style=markerStyle(face,match);
+      const pinnedLabel=String(pinnedFaceAssignments[index]||"").trim();
+      const isPinnedHover=index===hoveredPinnedFace;
       ctx.lineWidth=index===selectedFace?selectedLineWidth:lineWidth;
       ctx.strokeStyle=style.stroke;
       ctx.strokeRect(b[0],b[1],b[2]-b[0],b[3]-b[1]);
+      if(pinnedLabel){
+        // Закреплённые назначения получают отдельную янтарную рамку поверх
+        // цветовой маркировки пола. Наведение на строку делает её ярче и толще.
+        const pad=(isPinnedHover?4:2)/displayScale;
+        ctx.save();
+        ctx.lineWidth=(isPinnedHover?4.5:3)/displayScale;
+        ctx.strokeStyle=isPinnedHover?"#fde047":"#f59e0b";
+        ctx.shadowColor="rgba(0,0,0,.9)";
+        ctx.shadowBlur=(isPinnedHover?8:4)/displayScale;
+        ctx.setLineDash(isPinnedHover?[]:[6/displayScale,3/displayScale]);
+        ctx.strokeRect(b[0]-pad,b[1]-pad,(b[2]-b[0])+pad*2,(b[3]-b[1])+pad*2);
+        ctx.restore();
+      }
       // Круг на рамке помогает распознать класс даже при короткой подписи.
       const radius=5/displayScale;
       const cx=Math.min(canvas.width-radius,Math.max(radius,b[2]));
       const cy=Math.min(canvas.height-radius,Math.max(radius,b[1]));
       ctx.beginPath();
       ctx.arc(cx,cy,radius,0,Math.PI*2);
-      ctx.fillStyle=style.stroke;
+      ctx.fillStyle=pinnedLabel?"#f59e0b":style.stroke;
       ctx.fill();
       ctx.lineWidth=1.5/displayScale;
       ctx.strokeStyle="#ffffff";
@@ -2310,7 +2332,10 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       const match=faceMatchResults[index]||null;
       const style=markerStyle(face,match);
       const fullName=String(match&&match.name||"").trim();
-      const labelSource=fullName||"#"+(index+1);
+      const pinnedLabel=String(pinnedFaceAssignments[index]||"").trim();
+      const labelSource=pinnedLabel
+        ?("Л"+(index+1)+" → "+pinnedLabel)
+        :(fullName||"#"+(index+1));
       ctx.font="600 "+fontSize+"px sans-serif";
       const maxLabelWidth=Math.min(220/displayScale,Math.max(72/displayScale,(b[2]-b[0])+44/displayScale));
       let label=labelSource;
@@ -2322,7 +2347,9 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       let labelY=b[1]-labelHeight-2/displayScale;
       if(labelY<0)labelY=Math.min(canvas.height-labelHeight,b[3]+2/displayScale);
       ctx.globalAlpha=index===selectedFace?0.84:0.58;
-      ctx.fillStyle=style.fill;
+      ctx.fillStyle=pinnedLabel
+        ?(index===hoveredPinnedFace?"#b45309":"#92400e")
+        :style.fill;
       if(index===selectedFace)ctx.globalAlpha=0.94;
       ctx.fillRect(labelX,labelY,labelWidth,labelHeight);
       ctx.globalAlpha=1;
@@ -2880,6 +2907,29 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     isBusy:function(){return busy;},
     postJson:postJson,
     setStatus:setStatus,
+    setPinnedFaceAssignments:function(assignments,activeFaceIndex){
+      pinnedFaceAssignments=Object.create(null);
+      if(assignments&&typeof assignments==="object"){
+        Object.keys(assignments).forEach(function(key){
+          const index=Number(key);
+          const label=String(assignments[key]||"").trim();
+          if(Number.isInteger(index)&&index>=0&&index<faces.length&&label)
+            pinnedFaceAssignments[index]=label;
+        });
+      }
+      hoveredPinnedFace=Number.isInteger(activeFaceIndex)&&activeFaceIndex>=0&&activeFaceIndex<faces.length
+        ?activeFaceIndex:-1;
+      drawFaces();
+    },
+    selectFace:function(faceIndex){
+      const index=Number(faceIndex);
+      if(!Number.isInteger(index)||index<0||index>=faces.length)return false;
+      selectedFace=index;
+      drawFaces();
+      setBusy(false);
+      setStatus("Выбрано лицо "+(index+1)+". Ему соответствует строка «Лицо "+(index+1)+"» в закреплениях.");
+      return true;
+    },
     setGroupAnalysisMatches:function(resultQueryId,profiles){
       if(!resultQueryId||resultQueryId!==queryId){
         groupAnalysisMatches=null;
