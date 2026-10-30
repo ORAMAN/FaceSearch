@@ -400,7 +400,9 @@
         " · сопоставлено лиц: " + Number(combo.matched_faces || 0) + "/" + (combo.profiles || []).length;
       const tabLabel = "Вариант №" + (index + 1);
       const scoreText = "Оценка: " + Number(combo.score || 0).toFixed(2);
-      buttonEl.title = tabLabel + " · " + scoreText + " · " + details;
+      const strategyText = String(combo.strategy_label || "").trim();
+      buttonEl.title = tabLabel + " · " + scoreText +
+        (strategyText ? " · " + strategyText : "") + " · " + details;
       buttonEl.setAttribute("aria-label", buttonEl.title);
 
       const label = document.createElement("span");
@@ -408,7 +410,7 @@
       label.textContent = tabLabel;
       const score = document.createElement("small");
       score.className = "group-combination-score";
-      score.textContent = scoreText;
+      score.textContent = scoreText + (strategyText ? " · " + strategyText : "");
       buttonEl.append(label, score);
 
       buttonEl.addEventListener("click", function () {
