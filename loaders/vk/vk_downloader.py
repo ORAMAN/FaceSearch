@@ -4522,6 +4522,20 @@ def main():
         style.map("TButton", background=[("disabled", palette["button_disabled"]),
                       ("pressed", palette["button_pressed"]), ("active", palette["button_active"])],
                   foreground=[("disabled", palette["disabled_text"])])
+        style.configure(
+            "Section.TButton",
+            background=palette["panel"],
+            foreground=palette["accent"],
+            padding=(6, 6),
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            relief="flat",
+        )
+        style.map(
+            "Section.TButton",
+            background=[("active", palette["button_active"])],
+            foreground=[("disabled", palette["disabled_text"])],
+        )
         style.configure("Accent.TButton", background=palette["accent"], foreground=palette["accent_text"],
                         bordercolor=palette["accent"], padding=(14, 8), font=("Segoe UI", 10, "bold"), relief="flat")
         style.map("Accent.TButton", background=[("disabled", palette["accent_disabled"]),
@@ -4672,7 +4686,10 @@ def main():
     form_host.columnconfigure(0, weight=1)
     form_host.rowconfigure(0, weight=1)
 
-    form_canvas = tk.Canvas(form_host, highlightthickness=0, borderwidth=0, bg=palette["app"])
+    form_canvas = tk.Canvas(
+        form_host, highlightthickness=0, borderwidth=0, bg=palette["app"],
+        yscrollincrement=28,
+    )
     form_scrollbar = ttk.Scrollbar(form_host, orient="vertical", command=form_canvas.yview)
     form_canvas.configure(yscrollcommand=form_scrollbar.set)
     form_canvas.grid(row=0, column=0, sticky="nsew")
@@ -4692,19 +4709,28 @@ def main():
     outer.bind("<Configure>", update_form_scrollregion)
     form_canvas.bind("<Configure>", resize_form_content)
 
+    wheel_remainder = {"value": 0.0}
+
     def scroll_form_mousewheel(event):
-        # Не перехватываем прокрутку журнала и других элементов нижней панели.
+        # Прокручиваем только верхнюю форму под указателем, не перехватывая журнал.
         widget = root.winfo_containing(event.x_root, event.y_root)
         while widget is not None and widget is not form_canvas:
             widget = getattr(widget, "master", None)
         if widget is not form_canvas:
             return None
+
         delta = getattr(event, "delta", 0)
         if delta:
-            units = int(-delta / 120)
-            if units == 0:
+            if sys.platform == "darwin":
                 units = -1 if delta > 0 else 1
-            form_canvas.yview_scroll(units, "units")
+            else:
+                # На тачпадах delta часто меньше 120: накапливаем дробную часть,
+                # чтобы прокрутка не превращалась в резкие скачки по одному шагу.
+                wheel_remainder["value"] += -float(delta) / 120.0
+                units = int(wheel_remainder["value"])
+                wheel_remainder["value"] -= units
+            if units:
+                form_canvas.yview_scroll(units, "units")
         elif getattr(event, "num", None) == 4:
             form_canvas.yview_scroll(-1, "units")
         elif getattr(event, "num", None) == 5:
@@ -4714,6 +4740,38 @@ def main():
     root.bind_all("<MouseWheel>", scroll_form_mousewheel, add="+")
     root.bind_all("<Button-4>", scroll_form_mousewheel, add="+")
     root.bind_all("<Button-5>", scroll_form_mousewheel, add="+")
+
+    def make_collapsible_section(parent, title, expanded=True):
+        """Создаёт компактную секцию с заголовком-переключателем и содержимым."""
+        section = ttk.Frame(parent, style="TFrame")
+        header = ttk.Frame(section, style="TFrame")
+        header.pack(fill="x")
+        content = ttk.Frame(section, style="TFrame")
+        state = {"expanded": bool(expanded)}
+
+        def set_expanded(value):
+            state["expanded"] = bool(value)
+            if state["expanded"]:
+                content.pack(fill="x", expand=True, padx=(8, 0), pady=(1, 4))
+                toggle_button.configure(text=f"▾  {title}")
+            else:
+                content.pack_forget()
+                toggle_button.configure(text=f"▸  {title}")
+            try:
+                root.after_idle(update_form_scrollregion)
+            except tk.TclError:
+                pass
+
+        toggle_button = ttk.Button(
+            header,
+            text=f"▾  {title}" if state["expanded"] else f"▸  {title}",
+            style="Section.TButton",
+            command=lambda: set_expanded(not state["expanded"]),
+        )
+        toggle_button.pack(fill="x", expand=True)
+        if state["expanded"]:
+            content.pack(fill="x", expand=True, padx=(8, 0), pady=(1, 4))
+        return section, content, set_expanded
 
     header_frame = ttk.Frame(outer, style="App.TFrame")
     header_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
@@ -4895,11 +4953,15 @@ def main():
         row=5, column=0, columnspan=4, sticky="w", pady=(5, 0)
     )
 
-    settings_frame = ttk.LabelFrame(outer, text="Параметры загрузки", padding=8)
-    settings_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
+    settings_section, settings_content, _set_settings_expanded = make_collapsible_section(
+        outer, "Параллельность и параметры VK API", expanded=True
+    )
+    settings_section.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(0, 10))
+    settings_frame = ttk.Frame(settings_content, padding=8)
+    settings_frame.pack(fill="x", expand=True)
     settings_frame.columnconfigure(2, weight=1)
     settings_frame.columnconfigure(3, weight=1)
-    ttk.Label(settings_frame, text="Потоков загрузки:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+    ttk.Label(settings_frame, text="Одновременных сетевых задач:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
     workers_var = tk.StringVar(value="8")
     workers_spinbox = ttk.Spinbox(
         settings_frame, from_=1, to=64, textvariable=workers_var, width=8,
@@ -4924,8 +4986,27 @@ def main():
     # Информационная строка занимает всю ширину группы; перенос рассчитывается
     # по доступной ширине, а не по фиксированным 560 пикселям.
     workers_status_label.grid(
-        row=6, column=0, columnspan=4, sticky="ew", pady=(8, 1)
+        row=1, column=0, columnspan=4, sticky="ew", pady=(2, 1)
     )
+    ttk.Label(
+        settings_frame,
+        text=(
+            "Число потоков регулирует параллельные сетевые операции загрузчика. "
+            "Настройки альбомов ниже относятся только к источникам VK API; "
+            "каталог и отдельная HTML-страница сайта их не используют. "
+            "Импорт FaceSearch и построение FAISS настраиваются отдельно."
+        ),
+        style="Muted.TLabel",
+        wraplength=560,
+        justify="left",
+    ).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(3, 5))
+
+    album_settings_section, album_settings_content, _set_album_settings_expanded = make_collapsible_section(
+        settings_frame, "Дополнительные фотографии и альбомы (только VK API)", expanded=False
+    )
+    album_settings_section.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(2, 0))
+    album_settings_frame = ttk.Frame(album_settings_content, padding=(4, 2, 0, 2))
+    album_settings_frame.pack(fill="x", expand=True)
 
     def resize_workers_status_label(event=None):
         width = getattr(event, "width", 0) or settings_frame.winfo_width()
@@ -4942,21 +5023,21 @@ def main():
         for album_id, _label in SYSTEM_ALBUM_OPTIONS
     }
     download_albums_check = ttk.Checkbutton(
-        settings_frame,
+        album_settings_frame,
         text="Дополнительно скачивать фотографии из альбомов пользователя",
         variable=download_albums_var,
         command=lambda: (update_album_settings_state(), save_gui_settings()),
     )
     download_albums_check.grid(row=1, column=0, columnspan=3, sticky="w", pady=(5, 1))
     all_albums_check = ttk.Checkbutton(
-        settings_frame,
+        album_settings_frame,
         text="Все альбомы, включая пользовательские (также фото с отметками)",
         variable=all_albums_var,
         command=lambda: (update_album_settings_state(), save_gui_settings()),
     )
     all_albums_check.grid(row=2, column=0, columnspan=3, sticky="w", padx=(18, 8), pady=1)
 
-    ttk.Label(settings_frame, text="Системные альбомы:").grid(row=3, column=0, sticky="nw", padx=(18, 8), pady=(4, 1))
+    ttk.Label(album_settings_frame, text="Системные альбомы:").grid(row=3, column=0, sticky="nw", padx=(18, 8), pady=(4, 1))
     system_album_frame = ttk.Frame(settings_frame)
     system_album_frame.grid(row=3, column=1, columnspan=2, sticky="ew", pady=(4, 1))
     system_album_frame.columnconfigure(0, weight=1)
@@ -4973,20 +5054,20 @@ def main():
         system_album_checks[album_id] = check
 
     download_tagged_check = ttk.Checkbutton(
-        settings_frame,
+        album_settings_frame,
         text="Дополнительно загружать «Фото с отметками»",
         variable=download_tagged_photos_var,
         command=lambda: save_gui_settings(),
     )
     download_tagged_check.grid(row=4, column=0, columnspan=3, sticky="w", padx=(18, 8), pady=1)
-    ttk.Label(settings_frame, text="Фото на альбом:").grid(row=5, column=0, sticky="w", padx=(18, 8), pady=1)
+    ttk.Label(album_settings_frame, text="Фото на альбом:").grid(row=5, column=0, sticky="w", padx=(18, 8), pady=1)
     album_photo_limit_spin = ttk.Spinbox(
-        settings_frame, from_=0, to=100000, increment=1,
+        album_settings_frame, from_=0, to=100000, increment=1,
         textvariable=album_photo_limit_var, width=9,
     )
     album_photo_limit_spin.grid(row=5, column=1, sticky="w", pady=1)
     ttk.Label(
-        settings_frame,
+        album_settings_frame,
         text="0 — все фотографии; положительное число — максимум фотографий из каждого выбранного альбома.",
         wraplength=540,
     ).grid(row=5, column=2, sticky="w", padx=(12, 0), pady=1)
@@ -5057,8 +5138,12 @@ def main():
     )
     delete_processed_check.grid(row=4, column=0, columnspan=3, sticky="w", pady=1)
 
-    auth_frame = ttk.LabelFrame(outer, text="Токены VK API v1", padding=8)
-    auth_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+    auth_section, auth_content, _set_auth_expanded = make_collapsible_section(
+        outer, "Токены VK API v1", expanded=False
+    )
+    auth_section.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+    auth_frame = ttk.Frame(auth_content, padding=8)
+    auth_frame.pack(fill="x", expand=True)
     auth_frame.columnconfigure(0, weight=1)
     token_count_var = tk.StringVar(value=f"Рабочих токенов v1 в {VK_TOKEN_FILE.name}: {len(_read_token_file())}")
     auth_status_var = tk.StringVar(value="Добавляйте только пользовательские токены с префиксом vk1.a… .")
@@ -5173,7 +5258,10 @@ def main():
             control.configure(state=state)
 
     def update_album_settings_state():
-        enabled = bool(download_albums_var.get())
+        # Сбор альбомов и отмеченных фотографий реализован только для VK API.
+        api_source = acquisition_mode_var.get() not in ("catalog24", "catalog24_page")
+        download_albums_check.configure(state="normal" if api_source else "disabled")
+        enabled = api_source and bool(download_albums_var.get())
         all_albums_check.configure(state="normal" if enabled else "disabled")
         album_photo_limit_spin.configure(state="normal" if enabled else "disabled")
         # При выборе «все альбомы» точечные чекбоксы не ограничивают выборку.
@@ -5231,6 +5319,7 @@ def main():
                 "VK users.search сообщает общее количество совпадений, но доступно не более первых 1000 результатов. "
                 "Для большей выдачи уточните фильтры; смещение сохраняется при остановке."
             )
+        update_album_settings_state()
 
     def open_city_picker():
         country_id = country_id_from_selection(search_country_var.get())
@@ -5641,19 +5730,36 @@ def main():
     progress_frame.columnconfigure(0, weight=1)
     status_var = tk.StringVar(value="Готово к запуску.")
     ttk.Label(progress_frame, textvariable=status_var, wraplength=980).grid(row=0, column=0, sticky="ew", pady=(0, 4))
-    overall_progress_text_var = tk.StringVar(value="Общий прогресс поиска: применяется только в режиме поиска.")
-    ttk.Label(progress_frame, textvariable=overall_progress_text_var).grid(row=1, column=0, sticky="w", pady=(0, 3))
-    overall_progress_bar = ttk.Progressbar(progress_frame, mode="determinate", maximum=100, value=0)
-    overall_progress_bar.grid(row=2, column=0, sticky="ew", pady=(0, 5))
-    progress_text_var = tk.StringVar(value="Текущий пакет: ожидание")
-    ttk.Label(progress_frame, textvariable=progress_text_var).grid(row=3, column=0, sticky="w", pady=(0, 3))
-    progress_bar = ttk.Progressbar(progress_frame, mode="determinate", maximum=100, value=0)
-    progress_bar.grid(row=4, column=0, sticky="ew")
+    overall_progress_frame = ttk.Frame(progress_frame)
+    overall_progress_frame.grid(row=1, column=0, sticky="ew", pady=(0, 5))
+    overall_progress_frame.columnconfigure(0, weight=1)
+    overall_progress_text_var = tk.StringVar(value="Общий прогресс поиска")
+    ttk.Label(overall_progress_frame, textvariable=overall_progress_text_var).pack(anchor="w", pady=(0, 3))
+    overall_progress_bar = ttk.Progressbar(
+        overall_progress_frame, mode="determinate", maximum=100, value=0
+    )
+    overall_progress_bar.pack(fill="x")
+    overall_progress_frame.grid_remove()
+
+    task_progress_frame = ttk.Frame(progress_frame)
+    task_progress_frame.grid(row=2, column=0, sticky="ew")
+    task_progress_frame.columnconfigure(0, weight=1)
+    progress_text_var = tk.StringVar(value="Текущий пакет")
+    ttk.Label(task_progress_frame, textvariable=progress_text_var).pack(anchor="w", pady=(0, 3))
+    progress_bar = ttk.Progressbar(
+        task_progress_frame, mode="determinate", maximum=100, value=0
+    )
+    progress_bar.pack(fill="x")
+    task_progress_frame.grid_remove()
 
     # Постоянная компактная таблица итогов: каждая пара колонок обновляется
     # по мере завершения профилей, не заменяя собой подробный журнал событий.
-    stats_frame = ttk.LabelFrame(footer, text="Статистика обработки", padding=6)
-    stats_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+    stats_section, stats_content, _set_stats_expanded = make_collapsible_section(
+        footer, "Статистика обработки", expanded=False
+    )
+    stats_section.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+    stats_frame = ttk.Frame(stats_content, padding=6)
+    stats_frame.pack(fill="x", expand=True)
     stats_frame.columnconfigure(0, weight=1)
     stats_specs = [
         ("profiles_taken", "ID взято к проверке", "profiles_completed", "Получен результат"),
@@ -5852,8 +5958,11 @@ def main():
         # обработанным: стартовая позиция могла быть введена вручную.
         last_processed_id_var.set("Последний завершённый подряд ID: —")
         set_running(True)
-        progress_bar.configure(mode="indeterminate")
-        progress_bar.start(10)
+        overall_progress_frame.grid_remove()
+        task_progress_frame.grid_remove()
+        progress_bar.stop()
+        progress_bar.configure(mode="indeterminate", maximum=100)
+        progress_bar["value"] = 0
         progress_text_var.set("Текущий пакет: подготовка задания…")
         if source_mode == "search":
             overall_progress_bar.configure(mode="determinate", maximum=1)
@@ -6011,6 +6120,7 @@ def main():
                     log_text.configure(state="disabled")
                 elif kind == "progress":
                     current, total, message = event[1], event[2], event[3]
+                    task_progress_frame.grid()
                     progress_text_var.set(message)
                     if total and total > 0:
                         if str(progress_bar.cget("mode")) != "determinate":
@@ -6025,6 +6135,7 @@ def main():
                             progress_bar.start(10)
                 elif kind == "overall_progress":
                     current, total, message = event[1], event[2], event[3]
+                    overall_progress_frame.grid()
                     overall_progress_text_var.set(message)
                     safe_total = max(1, int(total or 0))
                     overall_progress_bar.configure(maximum=safe_total)
@@ -6128,6 +6239,9 @@ def main():
                 elif kind == "job_finished":
                     progress_bar.stop()
                     progress_bar.configure(mode="determinate")
+                    progress_bar["value"] = 0
+                    task_progress_frame.grid_remove()
+                    overall_progress_frame.grid_remove()
                     set_running(False)
                     workers_status_var.set("")
                     progress_text_var.set("Задание остановлено" if event[1] else "Задание завершено")
