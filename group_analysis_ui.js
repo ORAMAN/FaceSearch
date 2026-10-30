@@ -591,7 +591,9 @@
           certain: "100% — закреплено вручную",
           high: "высокая", medium: "средняя", low: "низкая"
         };
-        const confidenceText = confidenceLabels[String(profile.assignment_confidence || "")] || "не рассчитана";
+        const confidenceText = profile.similarity_known === false
+          ? "закреплено вручную; визуально не проверено"
+          : (confidenceLabels[String(profile.assignment_confidence || "")] || "не рассчитана");
         const margin = profile.visual_margin;
         meta.title = String(profile.confidence_reason || "");
         meta.textContent =
