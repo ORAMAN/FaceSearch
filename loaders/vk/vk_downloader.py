@@ -2879,7 +2879,10 @@ def parse_vkontakte24_search_page(html: str, current_url: str) -> tuple[list[dic
             "image_url": image_url,
             "catalog_url": profile_url,
             "vk_url": f"https://vk.ru/id{user_id}",
-            "info": _catalog24_text_info(card_text),
+            "info": {
+                **_catalog24_text_info(card_text),
+                **({"Описание в поисковой выдаче": card_text} if card_text else {}),
+            },
             "search_snippet": card_text,
         })
 
@@ -3190,7 +3193,9 @@ def run_vkontakte24_job(
     publish_stats()
     print("=" * 68)
     print("[SOURCE] Каталог аватарок: вконтакте24.рф.")
-    if page_mode:
+    if search_mode:
+        print(f"[CATALOG24-SEARCH] Поисковая выдача: {page_url}; включён обход пагинации; потоков: {worker_count}.")
+    elif page_mode:
         print(f"[CATALOG24-PAGE-URL] Страница: {page_url}; будут обработаны только карточки этой страницы.")
     else:
         print(f"[CATALOG24] Стартовый курсор: {cursor}; каталог: {CATALOG24_BASE}; потоков: {worker_count}.")
@@ -3289,12 +3294,14 @@ def run_vkontakte24_job(
                                 if details.get("name") and (
                                     not entry.get("name")
                                     or entry.get("name") == str(entry.get("id"))
+                                    or len(str(details["name"])) > len(str(entry.get("name") or ""))
                                 ):
                                     entry["name"] = details["name"]
                                 if details.get("image_url") and not entry.get("image_url"):
                                     entry["image_url"] = details["image_url"]
                                 merged_info = dict(entry.get("info") or {})
                                 merged_info.update(details.get("info") or {})
+                                merged_info["Страница профиля каталога"] = entry.get("catalog_url", "")
                                 if entry.get("search_snippet"):
                                     merged_info["Описание в поисковой выдаче"] = entry["search_snippet"]
                                 entry["info"] = merged_info
