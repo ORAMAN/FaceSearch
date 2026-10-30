@@ -424,8 +424,9 @@
         event.preventDefault();
         const nextTab = combinationsBox.children[nextIndex];
         if (nextTab) {
-          nextTab.focus();
           nextTab.click();
+          const activeTab = combinationsBox.children[nextIndex];
+          if (activeTab) activeTab.focus();
         }
       });
       combinationsBox.appendChild(buttonEl);
