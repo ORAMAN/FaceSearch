@@ -2302,16 +2302,18 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       ctx.lineWidth=index===selectedFace?selectedLineWidth:lineWidth;
       ctx.strokeStyle=style.stroke;
       ctx.strokeRect(b[0],b[1],b[2]-b[0],b[3]-b[1]);
-      if(pinnedLabel){
-        // Закреплённые назначения получают отдельную янтарную рамку поверх
-        // цветовой маркировки пола. Наведение на строку делает её ярче и толще.
+      if(pinnedLabel||isPinnedHover){
+        // Закреплённые лица всегда отмечены янтарным контуром.
+        // Наведение на любую строку временно выделяет её рамку даже до назначения.
         const pad=(isPinnedHover?4:2)/displayScale;
         ctx.save();
         ctx.lineWidth=(isPinnedHover?4.5:3)/displayScale;
-        ctx.strokeStyle=isPinnedHover?"#fde047":"#f59e0b";
+        ctx.strokeStyle=pinnedLabel
+          ?(isPinnedHover?"#fde047":"#f59e0b")
+          :"#22d3ee";
         ctx.shadowColor="rgba(0,0,0,.9)";
         ctx.shadowBlur=(isPinnedHover?8:4)/displayScale;
-        ctx.setLineDash(isPinnedHover?[]:[6/displayScale,3/displayScale]);
+        ctx.setLineDash(pinnedLabel&&!isPinnedHover?[6/displayScale,3/displayScale]:[]);
         ctx.strokeRect(b[0]-pad,b[1]-pad,(b[2]-b[0])+pad*2,(b[3]-b[1])+pad*2);
         ctx.restore();
       }
@@ -2321,7 +2323,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       const cy=Math.min(canvas.height-radius,Math.max(radius,b[1]));
       ctx.beginPath();
       ctx.arc(cx,cy,radius,0,Math.PI*2);
-      ctx.fillStyle=pinnedLabel?"#f59e0b":style.stroke;
+      ctx.fillStyle=pinnedLabel?"#f59e0b":(isPinnedHover?"#22d3ee":style.stroke);
       ctx.fill();
       ctx.lineWidth=1.5/displayScale;
       ctx.strokeStyle="#ffffff";
