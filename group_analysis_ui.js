@@ -16,6 +16,11 @@
   const profileList = document.getElementById("group-profile-list");
   const combinationsBox = document.getElementById("group-combinations");
   const notice = document.getElementById("group-analysis-notice");
+  const pinsWrap = document.getElementById("group-pins-wrap");
+  const pinRows = document.getElementById("group-pin-rows");
+  const pinsMessage = document.getElementById("group-pins-message");
+  const pinsRecalculateButton = document.getElementById("group-pins-recalculate");
+  const pinsClearButton = document.getElementById("group-pins-clear");
 
   const minSimilarityInput = document.getElementById("group-min-similarity");
   const candidatesInput = document.getElementById("group-candidates");
@@ -35,6 +40,8 @@
   let activeJobId = "";
   let pollSequence = 0;
   let lastResult = null;
+  let pinnedAssignments = Object.create(null);
+  let candidateOptionsByFace = [];
 
   function sync() {
     const queryId = core.getQueryId();
@@ -48,8 +55,13 @@
     running = false;
     pollSequence += 1;
     lastResult = null;
+    pinnedAssignments = Object.create(null);
+    candidateOptionsByFace = [];
     if (core.setGroupAnalysisMatches) core.setGroupAnalysisMatches("", []);
     panel.hidden = true;
+    if (pinsWrap) pinsWrap.hidden = true;
+    if (pinRows) pinRows.replaceChildren();
+    if (pinsMessage) pinsMessage.textContent = "";
     summary.replaceChildren();
     graph.replaceChildren();
     if (relationsList) relationsList.replaceChildren();
