@@ -6,6 +6,7 @@ import sys
 import json
 import time
 import queue
+import html as html_module
 import threading
 import webbrowser
 import importlib
@@ -60,10 +61,13 @@ CATALOG24_BASE = "https://xn--24-6kchq2abwi5bc.xn--p1ai"
 # Воспроизводим User-Agent из проверенного пользователем рабочего запроса.
 # Некоторые сайты фильтруют автоматические запросы по полному набору браузерных заголовков.
 CATALOG24_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Upgrade-Insecure-Requests": "1",
 }
 CATALOG24_CS_VALUE_RE = re.compile(r"^\d+x\d+$")
-CATALOG24_ID_RE = re.compile(r"-(\d+)\.html$")
+CATALOG24_ID_RE = re.compile(r"-(\d+)\.html/?$", re.IGNORECASE)
 CATALOG24_SEARCH_ID = "14138302"
 CATALOG24_SEARCH_PATH = "/search"
 CATALOG24_PLACEHOLDER = "l5w5aIHioYc.jpg"
@@ -2720,7 +2724,7 @@ def parse_vkontakte24_catalog_page(html: str) -> tuple[list[dict], int, int]:
         if img:
             raw_src = img.get("src") or img.get("data-src") or img.get("data-original")
             if not raw_src and img.get("srcset"):
-                raw_src = str(img.get("srcset")).split(",")[0].strip().split()[0]
+                raw_src = str(img.get("srcset") or img.get("data-srcset")).split(",")[0].strip().split()[0]
         if not isinstance(raw_src, str) or not raw_src.strip() or CATALOG24_PLACEHOLDER in raw_src:
             skipped += 1
             continue
@@ -2776,8 +2780,14 @@ def _catalog24_image_url(img, base_url: str) -> str:
     """Возвращает пригодный URL изображения из тега img."""
     if img is None:
         return ""
-    raw_src = img.get("src") or img.get("data-src") or img.get("data-original")
-    if not raw_src and img.get("srcset"):
+    raw_src = (
+        img.get("src")
+        or img.get("data-src")
+        or img.get("data-original")
+        or img.get("data-lazy-src")
+        or img.get("data-echo")
+    )
+    if not raw_src and (img.get("srcset") or img.get("data-srcset")):
         try:
             raw_src = str(img.get("srcset")).split(",")[0].strip().split()[0]
         except (IndexError, AttributeError):
@@ -2811,14 +2821,29 @@ def _catalog24_text_info(text: str) -> dict:
     return result
 
 
+def _catalog24_allowed_host(hostname: str) -> bool:
+    """Разрешает основной домен каталога и его www-вариант."""
+    try:
+        host = (hostname or "").encode("idna").decode("ascii").lower().rstrip(".")
+    except UnicodeError:
+        return False
+    expected = (urlsplit(CATALOG24_BASE).hostname or "").lower()
+    return host in {expected, f"www.{expected}"}
+
+
+def _catalog24_normalize_page_url(url: str) -> str:
+    """Нормализует URL поисковой страницы для защиты от повторных переходов."""
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme.lower(), (parts.netloc or "").lower(), parts.path or "/", parts.query, ""))
+
+
 def parse_vkontakte24_search_page(html: str, current_url: str) -> tuple[list[dict], list[str], int, int]:
-    """Извлекает все карточки профилей и ссылки пагинации из поисковой выдачи."""
+    """Извлекает карточки профилей и ссылки на следующие страницы выдачи."""
     soup = BeautifulSoup(html, "html.parser")
     entries = []
     seen_ids = set()
     skipped = 0
     result_link_count = 0
-    expected_host = (urlsplit(CATALOG24_BASE).hostname or "").lower()
 
     for anchor in soup.find_all("a", href=True):
         href = str(anchor.get("href") or "").strip()
@@ -2826,13 +2851,12 @@ def parse_vkontakte24_search_page(html: str, current_url: str) -> tuple[list[dic
             continue
         profile_url = urljoin(current_url, href)
         parts = urlsplit(profile_url)
-        try:
-            host = (parts.hostname or "").encode("idna").decode("ascii").lower().rstrip(".")
-        except UnicodeError:
+        if not _catalog24_allowed_host(parts.hostname or ""):
             continue
-        match = CATALOG24_ID_RE.search(parts.path)
-        if host != expected_host or not match:
+        match = CATALOG24_ID_RE.search(unquote(parts.path))
+        if not match:
             continue
+
         result_link_count += 1
         try:
             user_id = int(match.group(1))
@@ -2843,11 +2867,10 @@ def parse_vkontakte24_search_page(html: str, current_url: str) -> tuple[list[dic
             continue
         seen_ids.add(user_id)
 
-        # Ищем ближайший контейнер результата, не поднимаясь до всей страницы.
         container = anchor
         chosen_container = anchor
         img = anchor.find("img")
-        for _ in range(5):
+        for _ in range(7):
             if img:
                 break
             parent = getattr(container, "parent", None)
@@ -2865,13 +2888,12 @@ def parse_vkontakte24_search_page(html: str, current_url: str) -> tuple[list[dic
         if not title and img:
             title = str(img.get("alt") or img.get("title") or "").strip()
         card_text = chosen_container.get_text(" | ", strip=True)
-        if len(card_text) > 1800:
-            card_text = card_text[:1800]
+        if len(card_text) > 2200:
+            card_text = card_text[:2200]
         if not title:
-            title = re.sub(r"-\d+\.html$", "", parts.path.rsplit("/", 1)[-1]).replace("-", " ").strip()
+            title = re.sub(r"-\d+\.html/?$", "", unquote(parts.path.rsplit("/", 1)[-1]), flags=re.IGNORECASE).replace("-", " ").strip()
         if not title:
-            skipped += 1
-            continue
+            title = f"Профиль {user_id}"
 
         entries.append({
             "id": user_id,
@@ -2886,43 +2908,57 @@ def parse_vkontakte24_search_page(html: str, current_url: str) -> tuple[list[dic
             "search_snippet": card_text,
         })
 
-    # Ссылки пагинации сохраняют searchid и исходный текст поиска.
     current_parts = urlsplit(current_url)
     current_query = dict(parse_qsl(current_parts.query, keep_blank_values=True))
     search_id = current_query.get("searchid", CATALOG24_SEARCH_ID)
     search_text = current_query.get("text", "")
-    current_normalized = urlunsplit((
-        current_parts.scheme, current_parts.netloc, current_parts.path,
-        current_parts.query, "",
-    ))
-    seen_pages = {current_normalized}
+    seen_pages = {_catalog24_normalize_page_url(current_url)}
     pagination_urls = []
-    for anchor in soup.find_all("a", href=True):
-        href = str(anchor.get("href") or "").strip()
-        if not href or href.startswith(("javascript:", "mailto:", "#")):
-            continue
-        target = urljoin(current_url, href)
-        target_parts = urlsplit(target)
-        if target_parts.path.rstrip("/").lower() != CATALOG24_SEARCH_PATH:
-            continue
-        try:
-            target_host = (target_parts.hostname or "").encode("idna").decode("ascii").lower().rstrip(".")
-        except UnicodeError:
-            continue
-        if target_host != expected_host:
-            continue
-        target_params = dict(parse_qsl(target_parts.query, keep_blank_values=True))
-        if target_params.get("searchid", search_id) != search_id:
-            continue
-        if target_params.get("text", search_text) != search_text:
-            continue
-        normalized = urlunsplit((
-            target_parts.scheme, target_parts.netloc, target_parts.path,
-            target_parts.query, "",
-        ))
+
+    def add_page(candidate: str) -> None:
+        candidate = html_module.unescape(str(candidate or "").strip().replace("\\/", "/"))
+        if not candidate:
+            return
+        target = urljoin(current_url, candidate)
+        parts = urlsplit(target)
+        if not _catalog24_allowed_host(parts.hostname or ""):
+            return
+        if parts.path.rstrip("/").lower() != CATALOG24_SEARCH_PATH:
+            return
+        params = dict(parse_qsl(parts.query, keep_blank_values=True))
+        if params.get("searchid", search_id) != search_id:
+            return
+        if params.get("text", search_text) != search_text:
+            return
+        normalized = _catalog24_normalize_page_url(target)
         if normalized not in seen_pages:
             seen_pages.add(normalized)
             pagination_urls.append(normalized)
+
+    for node in soup.find_all(["a", "link", "area"], href=True):
+        href = str(node.get("href") or "").strip()
+        if not href:
+            continue
+        target_parts = urlsplit(urljoin(current_url, href))
+        rel = node.get("rel") or []
+        if isinstance(rel, str):
+            rel = rel.split()
+        if "next" in [str(x).lower() for x in rel] or target_parts.path.rstrip("/").lower() == CATALOG24_SEARCH_PATH:
+            add_page(href)
+
+    for node in soup.find_all(True):
+        for attr in ("data-href", "data-url", "data-next", "onclick"):
+            value = node.get(attr)
+            if not value:
+                continue
+            raw = html_module.unescape(str(value)).replace("\\/", "/")
+            for candidate in re.findall(r"""(?:https?://[^\s"'<>]+)?/search\?[^\s"'<>]+""", raw, flags=re.IGNORECASE):
+                add_page(candidate.replace("&amp;", "&").rstrip(");,]"))
+
+    raw_html = html_module.unescape(html)
+    for match in re.finditer(r"""(?:https?://[^\s"'<>]+)?/search\?[^\s"'<>]+""", raw_html, flags=re.IGNORECASE):
+        candidate = match.group(0).replace("&amp;", "&").replace("\\/", "/").rstrip(");,]")
+        add_page(candidate)
 
     return entries, pagination_urls, result_link_count, skipped
 
@@ -3001,15 +3037,40 @@ def fetch_vkontakte24_profile_details(entry: dict) -> dict:
 
 
 def build_vkontakte24_search_url(query: str) -> str:
-    """Формирует адрес поиска по параметрам поисковой строки сайта."""
-    query = re.sub(r"\s+", " ", str(query or "")).strip()
-    if not query:
-        raise ValueError("Введите текст для поиска на вконтакте24.рф.")
-    if len(query) > 500:
+    """Принимает текст запроса либо готовую ссылку на поисковую выдачу."""
+    raw = str(query or "").strip()
+    if not raw:
+        raise ValueError("Введите текст поиска или полный URL поисковой выдачи.")
+
+    if re.match(r"^https?://", raw, flags=re.IGNORECASE):
+        parts = urlsplit(raw)
+        if parts.scheme.lower() != "https" or not _catalog24_allowed_host(parts.hostname or ""):
+            raise ValueError("Для поиска разрешён только HTTPS-адрес домена вконтакте24.рф.")
+        if parts.path.rstrip("/").lower() != CATALOG24_SEARCH_PATH:
+            raise ValueError("Вставьте URL именно поисковой выдачи /search, а не карточки профиля.")
+        params = dict(parse_qsl(parts.query, keep_blank_values=True))
+        if params.get("searchid") not in (None, "", CATALOG24_SEARCH_ID):
+            raise ValueError("В URL указан неизвестный searchid поисковой системы.")
+        text_value = re.sub(r"\s+", " ", params.get("text", "")).strip()
+        if not text_value:
+            raise ValueError("В URL поиска отсутствует параметр text.")
+        params["searchid"] = CATALOG24_SEARCH_ID
+        params["text"] = text_value
+        params["web"] = "0"
+        return urlunsplit((
+            "https",
+            urlsplit(CATALOG24_BASE).netloc,
+            CATALOG24_SEARCH_PATH,
+            urlencode(params, doseq=True),
+            "",
+        ))
+
+    text_value = re.sub(r"\s+", " ", raw).strip()
+    if len(text_value) > 500:
         raise ValueError("Поисковый запрос не должен превышать 500 символов.")
     return f"{CATALOG24_BASE}{CATALOG24_SEARCH_PATH}?" + urlencode({
         "searchid": CATALOG24_SEARCH_ID,
-        "text": query,
+        "text": text_value,
         "web": "0",
     })
 
@@ -3246,6 +3307,11 @@ def run_vkontakte24_job(
                     entries, next_search_pages, card_count, skipped_count = parse_vkontakte24_search_page(
                         response.text, response.url or current_page_url
                     )
+                    print(
+                        f"[CATALOG24-SEARCH-HTTP] HTTP {response.status_code}; URL={response.url}; "
+                        f"HTML={len(response.content)} байт; профилей={len(entries)}; "
+                        f"ссылок пагинации={len(next_search_pages)}."
+                    )
                 else:
                     entries, card_count, skipped_count = parse_vkontakte24_catalog_page(response.text)
             except Exception as exc:
@@ -3260,9 +3326,32 @@ def run_vkontakte24_job(
                 break
 
             if card_count == 0:
+                if search_mode and next_search_pages:
+                    print(
+                        f"[CATALOG24-SEARCH-WARN] На странице {current_page_url} профили не распознаны, "
+                        f"но найдено ссылок пагинации: {len(next_search_pages)}. Перехожу дальше."
+                    )
+                    for next_url in next_search_pages:
+                        if next_url not in seen_search_pages:
+                            seen_search_pages.add(next_url)
+                            search_page_queue.append(next_url)
+                    cursor = page_cursor
+                    continue
                 if search_mode:
-                    print(f"[CATALOG24-SEARCH-END] На странице поиска {current_page_url} не найдены карточки профилей.")
-                    post_ui_event("status", "В поисковой выдаче не найдены ссылки на профили.")
+                    title_node = BeautifulSoup(response.text, "html.parser").find("title")
+                    page_title = title_node.get_text(" ", strip=True) if title_node else "(без title)"
+                    href_preview = [
+                        str(node.get("href") or "")[:180]
+                        for node in BeautifulSoup(response.text, "html.parser").find_all("a", href=True)
+                        if ".html" in str(node.get("href") or "").lower()
+                    ][:8]
+                    print(
+                        f"[CATALOG24-SEARCH-END] Профили не распознаны. HTTP={response.status_code}; "
+                        f"Content-Type={response.headers.get('content-type', '')}; "
+                        f"размер HTML={len(response.content)}; title={page_title!r}; "
+                        f"ссылки .html (первые 8): {href_preview!r}."
+                    )
+                    post_ui_event("status", "Поисковая страница открылась, но ссылки на карточки профилей не распознаны. Подробности — в журнале.")
                 else:
                     print(f"[CATALOG24-END] На странице {page_cursor} карточки не найдены; обход остановлен.")
                     post_ui_event("status", "На указанной странице не найдены карточки профилей." if page_mode else f"Каталог вконтакте24.рф: на странице {page_cursor} нет карточек.")
