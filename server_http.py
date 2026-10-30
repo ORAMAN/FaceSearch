@@ -1331,6 +1331,13 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .group-pin-rows{display:grid;gap:8px;margin-top:10px}
 .group-pin-row{display:grid;grid-template-columns:78px minmax(190px,1fr) minmax(170px,230px) auto;align-items:center;gap:8px}
 .group-pin-face{font-weight:650;font-size:13px}
+.group-pins-heading{cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;user-select:none}
+.group-pins-heading::-webkit-details-marker{display:none}
+.group-pins-heading::before{content:"▸";display:inline-block;color:var(--accent);transition:transform .15s ease}
+.group-pins[open]>.group-pins-heading::before{transform:rotate(90deg)}
+.group-pins:not([open])>.group-pins-heading{margin-bottom:0}
+.group-pins[open]>.group-pins-heading{margin-bottom:8px}
+.group-pins[hidden]{display:none!important}
 .group-pin-row select,.group-pin-row input{width:100%;min-width:0;max-width:100%}
 .group-pin-row button{width:auto;min-height:36px;white-space:nowrap}
 .group-pin-status{grid-column:2/-1}
@@ -1646,16 +1653,16 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     </div>
     <div id="group-progress-message" class="group-progress-message">Ожидание запуска анализа.</div>
     <div id="group-analysis-summary"></div>
-    <section id="group-pins-wrap" class="group-pins" hidden aria-label="Закреплённые профили">
-      <div class="group-pins-heading">Закрепление профилей за лицами</div>
+    <details id="group-pins-wrap" class="group-pins" hidden>
+      <summary class="group-pins-heading">Закрепление профилей за лицами</summary>
       <div class="hint">Выберите найденный профиль или укажите ID лица, profile:ID (ID профиля БД) либо vk:ID. Закреплённое назначение считается аксиомой с уверенностью 100%: оно не меняется при подборе вариантов, не ограничивается порогом сходства и не получает автоматические штрафы пола. Фактическое визуальное сходство показывается отдельно.</div>
       <div id="group-pin-rows" class="group-pin-rows"></div>
       <div class="group-pin-actions">
         <button type="button" id="group-pins-recalculate">Пересчитать с закреплёнными профилями</button>
         <button type="button" id="group-pins-clear" class="secondary">Сбросить закрепления</button>
       </div>
-      <div id="group-pins-message" class="group-pins-message" role="status"></div>
-    </section>
+      <div id="group-pins-message" class="group-pins-message" role="status" aria-live="polite"></div>
+    </details>
     <div id="group-graph-wrap" class="group-graph-wrap" hidden>
       <div class="group-gender-legend" aria-label="Обозначения типов связей и лиц на графе">
         <strong class="group-gender-legend-heading">Типы связей:</strong>
