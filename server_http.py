@@ -1512,8 +1512,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
   </section>
 
   <section class="group-options" aria-label="Параметры группового анализа">
-    <details open>
-      <summary>Параметры анализа связей группы — только для текущего сеанса</summary>
+    <details>
+      <summary>Параметры анализа связей группы</summary>
       <div class="group-options-note">Эти изменения не записываются в settings.xml. Постоянные значения задаются в окне FaceSearch → «Параметры группового анализа». Токены добавляются только через загрузчик VK; на этой странице их вводить не нужно.</div>
       <div class="group-options-grid">
         <div class="field">
