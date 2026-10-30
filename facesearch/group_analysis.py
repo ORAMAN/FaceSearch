@@ -1703,9 +1703,12 @@ def analyze_group(
     for face_index, items in enumerate(prepared):
         for item in items:
             key = item["profile_key"]
-            if key in seen or item.get("unmatched"):
+            # Один профиль может быть кандидатом для разных исходных лиц.
+            # Храним его один раз в пределах каждого лица, а не глобально.
+            candidate_slot = (face_index, key)
+            if candidate_slot in seen or item.get("unmatched"):
                 continue
-            seen.add(key)
+            seen.add(candidate_slot)
             all_candidates.append({
                 "face_index": face_index,
                 "profile_key": key,
