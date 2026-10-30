@@ -3001,14 +3001,17 @@ def _resolve_vk_pin_candidate_from_api(
             + " через API: " + (message[:260] or type(exc).__name__)
         ) from exc
 
-    user = next(
-        (
-            item for item in users
-            if isinstance(item, dict)
-            and int(item.get("id") or 0) == int(vk_user_id)
-        ),
-        None,
-    )
+    user = None
+    for item in users:
+        if not isinstance(item, dict):
+            continue
+        try:
+            returned_id = int(item.get("id") or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if returned_id == int(vk_user_id):
+            user = item
+            break
     if user is None:
         raise ValueError(
             "VK API не вернул профиль для ID " + str(vk_user_id)
