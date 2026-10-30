@@ -485,6 +485,44 @@ class GroupAnalysisTests(unittest.TestCase):
             ]
             self.assertEqual(len(matched_keys), len(set(matched_keys)))
 
+    def test_distinct_user_pinned_profiles_are_not_cross_source_merged(self):
+        candidates = [
+            [{
+                "face_id": 1001,
+                "profile_id": 501,
+                "name": "Алексей Иванов",
+                "profile_url": "https://vk.com/id101",
+                "profile_gender": "male",
+                "similarity": 70.0,
+                "pinned": True,
+            }],
+            [{
+                "face_id": 2001,
+                "profile_id": 502,
+                "name": "Алексей Иванов",
+                "profile_url": "https://ok.ru/profile/202",
+                "profile_gender": "male",
+                "similarity": 68.0,
+                "pinned": True,
+            }],
+        ]
+        with tempfile.TemporaryDirectory() as app_dir, patch(
+            "facesearch.group_analysis._load_friend_sets",
+            return_value=({}, {"status": "disabled", "message": "test"}),
+        ):
+            result = analyze_group(
+                candidates,
+                {"check_vk_friends": False, "check_gender": False},
+                app_dir,
+            )
+
+        selected = result["combinations"][0]["profiles"]
+        self.assertTrue(all(item["pinned"] for item in selected))
+        self.assertEqual(
+            len({item["profile_key"] for item in selected}),
+            2,
+        )
+
     def test_same_profile_cannot_be_pinned_to_two_faces(self):
         candidates = [
             [{
