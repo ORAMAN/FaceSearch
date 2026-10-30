@@ -5280,7 +5280,7 @@ def main():
     catalog24_search_frame = ttk.Frame(source_frame)
     catalog24_search_frame.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(4, 0))
     catalog24_search_frame.columnconfigure(1, weight=1)
-    ttk.Label(catalog24_search_frame, text="Поисковый запрос:").grid(
+    ttk.Label(catalog24_search_frame, text="Поисковый запрос или полный URL выдачи:").grid(
         row=0, column=0, sticky="w", padx=(0, 8), pady=3
     )
     catalog24_search_query_var = tk.StringVar(value="")
