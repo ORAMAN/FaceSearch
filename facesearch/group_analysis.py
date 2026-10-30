@@ -1246,6 +1246,7 @@ def _rank_combinations(
         face_gender_penalty_sum = 0.0
         profile_gender_penalty_sum = 0.0
         visual_sum = 0.0
+        visual_known_count = 0
         for face_index, candidate in matched:
             total, face_penalty, profile_penalty = candidate_penalties(face_index, candidate)
             gender_penalty_sum += total
@@ -1255,6 +1256,7 @@ def _rank_combinations(
             # но фактическое визуальное сходство сохраняем отдельно и не подменяем.
             if not candidate.get("similarity_unknown"):
                 visual_sum += float(candidate.get("similarity") or 0.0)
+                visual_known_count += 1
 
         social_score_sum = 0.0
         checked_social_pairs = 0
@@ -1309,6 +1311,7 @@ def _rank_combinations(
             "face_gender_penalty_sum": face_gender_penalty_sum,
             "profile_gender_penalty_sum": profile_gender_penalty_sum,
             "visual_sum": visual_sum,
+            "visual_known_count": visual_known_count,
             "social_score_sum": social_score_sum,
             "checked_social_pairs": checked_social_pairs,
             "connected_social_pairs": connected_social_pairs,
@@ -1450,8 +1453,9 @@ def _rank_combinations(
     pair_count = max(1, face_count * (face_count - 1) / 2)
     for assignment, metrics, strategy_label in solutions[:max(1, int(limit))]:
         matched_count = int(metrics["matched_faces"])
+        visual_known_count = int(metrics.get("visual_known_count", matched_count))
         visual_average = (
-            float(metrics["visual_sum"]) / matched_count if matched_count else 0.0
+            float(metrics["visual_sum"]) / visual_known_count if visual_known_count else 0.0
         )
         relation_bonus = float(metrics["social_score_sum"]) / pair_count
         checked_pairs = int(metrics["checked_social_pairs"])
