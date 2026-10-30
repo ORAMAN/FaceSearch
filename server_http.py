@@ -1325,6 +1325,18 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .group-combination[aria-selected=true]{background:var(--panel);color:var(--text);border-color:var(--accent);box-shadow:inset 0 3px var(--accent)}
 .group-combination-label{font-size:13px;font-weight:650}
 .group-combination-score{display:block;color:var(--muted);font-size:11px;font-weight:400}
+.group-pins{margin:14px 0;padding:12px;border:1px solid var(--accent);border-radius:10px;background:var(--drop)}
+.group-pins[hidden]{display:none!important}
+.group-pins-heading{font-weight:700;margin-bottom:4px}
+.group-pin-rows{display:grid;gap:8px;margin-top:10px}
+.group-pin-row{display:grid;grid-template-columns:78px minmax(190px,1fr) minmax(170px,230px) auto;align-items:center;gap:8px}
+.group-pin-face{font-weight:650;font-size:13px}
+.group-pin-row select,.group-pin-row input{width:100%;min-width:0;max-width:100%}
+.group-pin-status{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.group-pin-status.active{color:var(--success,var(--accent));font-weight:600}
+.group-pin-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.group-pin-actions button{width:auto;min-height:36px}
+.group-pins-message{font-size:12px;color:var(--muted);margin-top:8px}
 .group-profile-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:12px;margin-top:14px}
 .group-profile-card{border:1px solid var(--line);border-radius:10px;padding:10px;min-width:0;background:var(--panel)}
 .group-profile-card img{display:block;width:100%;height:150px;object-fit:contain;background:var(--image-bg);border-radius:6px;margin-bottom:8px}
@@ -1333,7 +1345,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .group-profile-card a{color:var(--link);overflow-wrap:anywhere}
 .group-notice{font-size:12px;color:var(--muted);margin-top:12px;line-height:1.45}
 .group-empty{padding:14px;border:1px dashed var(--line);border-radius:8px;color:var(--muted)}
-@media(max-width:700px){.group-panel{padding:12px}.group-graph{min-height:190px}.group-combination{padding:10px}.group-profile-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:700px){.group-panel{padding:12px}.group-graph{min-height:190px}.group-combination{padding:10px}.group-profile-list{grid-template-columns:repeat(2,minmax(0,1fr))}.group-pin-row{grid-template-columns:72px minmax(0,1fr)}.group-pin-row select,.group-pin-row input,.group-pin-row button{grid-column:2}.group-pin-face{grid-row:1/4;align-self:start;padding-top:10px}}
 @media(max-width:380px){.group-profile-list{grid-template-columns:minmax(0,1fr)}}
 .index-meta{margin:4px 0 9px;color:var(--muted);font-size:12px;line-height:1.35;overflow-wrap:anywhere}
 .index-status{margin:8px 0 12px;padding:11px 14px;border:1px solid var(--line);border-radius:9px;font-size:14px;line-height:1.45;overflow-wrap:anywhere}
@@ -1632,6 +1644,16 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     </div>
     <div id="group-progress-message" class="group-progress-message">Ожидание запуска анализа.</div>
     <div id="group-analysis-summary"></div>
+    <section id="group-pins-wrap" class="group-pins" hidden aria-label="Закреплённые профили">
+      <div class="group-pins-heading">Закрепление профилей за лицами</div>
+      <div class="hint">Выберите найденный профиль или укажите ID лица, profile:ID (ID профиля БД) либо vk:ID. Закреплённое назначение считается аксиомой с уверенностью 100% и не может быть переназначено другому лицу.</div>
+      <div id="group-pin-rows" class="group-pin-rows"></div>
+      <div class="group-pin-actions">
+        <button type="button" id="group-pins-recalculate">Пересчитать с закреплёнными профилями</button>
+        <button type="button" id="group-pins-clear" class="secondary">Сбросить закрепления</button>
+      </div>
+      <div id="group-pins-message" class="group-pins-message" role="status"></div>
+    </section>
     <div id="group-graph-wrap" class="group-graph-wrap" hidden>
       <div class="group-gender-legend" aria-label="Обозначения типов связей и лиц на графе">
         <strong class="group-gender-legend-heading">Типы связей:</strong>
