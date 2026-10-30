@@ -57,6 +57,7 @@
     lastResult = null;
     pinnedAssignments = Object.create(null);
     candidateOptionsByFace = [];
+    if (core.setPinnedFaceAssignments) core.setPinnedFaceAssignments({}, -1);
     if (core.setGroupAnalysisMatches) core.setGroupAnalysisMatches("", []);
     panel.hidden = true;
     if (pinsWrap) pinsWrap.hidden = true;
@@ -129,18 +130,43 @@
 
   function pinCandidateLabel(candidate) {
     const name = String(candidate.name || "Без имени");
-    const similarity = Number(candidate.similarity || 0).toFixed(2);
     const faceId = Number(candidate.face_id || 0);
     const profileId = Number(candidate.profile_id || 0);
+    const vkUserId = Number(candidate.vk_user_id || 0);
     const discoveredFor = Number(candidate.face_index);
-    return name + " · " + similarity + "% · ID лица " + faceId +
+    const sourceLabel = faceId > 0
+      ? "ID лица " + faceId
+      : (vkUserId > 0 ? "VK ID " + vkUserId : "ID профиля " + profileId);
+    const similarityLabel = candidate.similarity_known === false
+      ? "визуальное сходство не рассчитано"
+      : Number(candidate.similarity || 0).toFixed(2) + "%";
+    return name + " · " + sourceLabel + " · " + similarityLabel +
       (Number.isInteger(discoveredFor) && discoveredFor >= 0
-        ? " · найден для лица " + (discoveredFor + 1) : "") +
-      (profileId ? " · ID профиля " + profileId : "");
+        ? " · найден для лица " + (discoveredFor + 1) : "");
   }
 
   function updatePinMessage(message) {
     if (pinsMessage) pinsMessage.textContent = String(message || "");
+  }
+
+  function syncPinnedFaceHighlights(activeFaceIndex) {
+    if (!core.setPinnedFaceAssignments) return;
+    const assignments = Object.create(null);
+    Object.entries(pinnedAssignments).forEach(function (entry) {
+      const faceIndex = Number(entry[0]);
+      const assignment = entry[1] || {};
+      assignments[faceIndex] = String(assignment.label || assignment.identifier || "Закреплённый профиль");
+    });
+    core.setPinnedFaceAssignments(assignments, Number.isInteger(activeFaceIndex) ? activeFaceIndex : -1);
+  }
+
+  function setPinnedFaceHover(faceIndex) {
+    syncPinnedFaceHighlights(Number.isInteger(faceIndex) ? faceIndex : -1);
+  }
+
+  function selectSourceFace(faceIndex) {
+    if (core.selectFace) core.selectFace(faceIndex);
+    setPinnedFaceHover(faceIndex);
   }
 
   function savePin(faceIndex, identifier, source) {
@@ -170,7 +196,7 @@
       : (normalized.startsWith("profile:")
         ? "Профиль БД #" + normalized.slice(8)
         : normalized.startsWith("vk:")
-          ? "VK ID " + normalized.slice(3)
+          ? "VK ID " + normalized.slice(3) + " (данные будут запрошены через API, если профиля нет в БД)"
           : "ID лица " + normalized.slice(5));
     pinnedAssignments[faceIndex] = {
       identifier: normalized,
@@ -180,8 +206,8 @@
     };
     renderPinnedControls(lastResult);
     updatePinMessage(
-      "Для лица " + (faceIndex + 1) + " закреплён профиль: " + label +
-      ". Назначение будет зафиксировано на уровне 100% при пересчёте."
+      "Для лица " + (faceIndex + 1) + " задано текущее назначение: " + label +
+      ". Оно будет зафиксировано при нажатии «Пересчитать»."
     );
     return true;
   }
@@ -194,8 +220,10 @@
     // Дубликаты объединяем по profile_key, сохраняя вариант с лучшим сходством.
     const byKey = new Map();
     allCandidates.forEach(function (candidate) {
-      if (Number(candidate.face_id || 0) <= 0) return;
-      const key = String(candidate.profile_key || candidate.face_id);
+      const faceId = Number(candidate.face_id || 0);
+      const vkUserId = Number(candidate.vk_user_id || 0);
+      if (faceId <= 0 && vkUserId <= 0) return;
+      const key = String(candidate.profile_key || (faceId > 0 ? "face:" + faceId : "vk:" + vkUserId));
       const previous = byKey.get(key);
       if (!previous || Number(candidate.similarity || 0) > Number(previous.similarity || 0)) {
         byKey.set(key, candidate);
@@ -207,6 +235,16 @@
     candidateOptionsByFace = Array.from({ length: faceCount }, function () {
       return sharedCandidates.slice();
     });
+    Object.entries(pinnedAssignments).forEach(function (entry) {
+      const faceIndex = Number(entry[0]);
+      const assignment = entry[1];
+      const candidate = findPinCandidate(faceIndex, assignment.identifier);
+      if (candidate) {
+        assignment.profileKey = String(candidate.profile_key || "");
+        assignment.label = pinCandidateLabel(candidate);
+        assignment.similarityKnown = candidate.similarity_known !== false;
+      }
+    });
 
     pinRows.replaceChildren();
     for (let faceIndex = 0; faceIndex < faceCount; faceIndex += 1) {
@@ -214,8 +252,18 @@
       row.className = "group-pin-row";
 
       const faceLabel = document.createElement("div");
-      faceLabel.className = "group-pin-face";
-      faceLabel.textContent = "Лицо " + (faceIndex + 1);
+      faceLabel.className = "group-pin-face group-pin-face-trigger";
+      faceLabel.textContent = "Лицо " + (faceIndex + 1) + " · рамка №" + (faceIndex + 1);
+      faceLabel.tabIndex = 0;
+      faceLabel.setAttribute("role", "button");
+      faceLabel.title = "Выделить соответствующую рамку на фотографии";
+      faceLabel.addEventListener("click", function () { selectSourceFace(faceIndex); });
+      faceLabel.addEventListener("keydown", function (event) {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          selectSourceFace(faceIndex);
+        }
+      });
 
       const select = document.createElement("select");
       select.setAttribute("aria-label", "Выбрать профиль для лица " + (faceIndex + 1));
@@ -226,7 +274,12 @@
 
       (candidateOptionsByFace[faceIndex] || []).forEach(function (candidate) {
         const option = document.createElement("option");
-        option.value = "face:" + Number(candidate.face_id);
+        const faceId = Number(candidate.face_id || 0);
+        const profileId = Number(candidate.profile_id || 0);
+        const vkUserId = Number(candidate.vk_user_id || 0);
+        option.value = faceId > 0
+          ? "face:" + faceId
+          : (vkUserId > 0 ? "vk:" + vkUserId : "profile:" + profileId);
         option.textContent = pinCandidateLabel(candidate);
         select.appendChild(option);
       });
@@ -283,9 +336,18 @@
       const status = document.createElement("div");
       status.className = "group-pin-status" + (assignment ? " active" : "");
       status.textContent = assignment
-        ? "Закреплено · назначение 100%: " + assignment.label
-        : "Профиль не закреплён";
+        ? "Текущее назначение: " + assignment.label +
+          (assignment.similarityKnown === false ? " · визуальное сходство не рассчитывалось" : "") +
+          " · будет применено при пересчёте"
+        : "Текущее назначение: не задано";
 
+      row.classList.toggle("is-pinned", Boolean(assignment));
+      row.addEventListener("mouseenter", function () { setPinnedFaceHover(faceIndex); });
+      row.addEventListener("mouseleave", function () { setPinnedFaceHover(-1); });
+      row.addEventListener("focusin", function () { setPinnedFaceHover(faceIndex); });
+      row.addEventListener("focusout", function (event) {
+        if (!row.contains(event.relatedTarget)) setPinnedFaceHover(-1);
+      });
       row.append(faceLabel, select, input, assignButton, status);
       pinRows.appendChild(row);
       if (running) {
@@ -295,7 +357,7 @@
       }
     }
     pinsWrap.hidden = !faceCount;
-    if (pinsWrap) pinsWrap.open = false;
+    syncPinnedFaceHighlights(-1);
     const busy = Boolean(core.isBusy());
     if (pinsRecalculateButton) {
       pinsRecalculateButton.disabled = running || busy || !faceCount;
@@ -694,11 +756,12 @@
     panel.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  function finish() {
+  function finish(collapsePinControls) {
     running = false;
     button.textContent = "Анализ связей группы";
     sync();
     renderPinnedControls(lastResult);
+    if (collapsePinControls && pinsWrap) pinsWrap.open = false;
   }
 
   async function poll(jobId, sequence, queryId) {
@@ -715,7 +778,7 @@
       if (pinsMessage && data.message) pinsMessage.textContent = data.message;
       if (data.state === "done") {
         renderResult(data.result || {});
-        finish();
+        finish(true);
         return;
       }
       if (data.state === "error") throw new Error(data.error || "Групповой анализ завершился с ошибкой.");
@@ -728,7 +791,7 @@
       message.textContent = error.message || String(error);
       summary.replaceChildren(message);
       updatePinMessage("Ошибка пересчёта: " + (error.message || String(error)));
-      finish();
+      finish(false);
     }
   }
 
@@ -805,7 +868,7 @@
       message.textContent = error.message || String(error);
       summary.replaceChildren(message);
       updatePinMessage("Ошибка запуска: " + (error.message || String(error)));
-      finish();
+      finish(false);
     }
   }
 
