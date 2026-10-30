@@ -36,6 +36,7 @@ from urllib.parse import parse_qs, urlparse
 import face_search_gui as face_search
 from facesearch import group_analysis
 from facesearch.indexing.embeddings import embedding_blob_to_view
+from facesearch.indexing.result_mapping import _row_to_result
 from facesearch.settings import _load_gui_settings
 from facesearch.database_profiles import _load_db_profiles, _default_profile
 from facesearch.card_text_filter import (
@@ -2996,9 +2997,15 @@ def _resolve_group_pin_candidate(
             "Для выбранного профиля не найдено embedding совместимой размерности."
         )
 
-    result = face_search._result_row(conn, best_face_id)
-    if not isinstance(result, dict):
-        raise ValueError("Не удалось прочитать карточку выбранного профиля из БД.")
+    result_row = face_search._result_row(conn, best_face_id)
+    if result_row is None:
+        raise ValueError(
+            "Запись лица #" + str(best_face_id)
+            + " найдена, но связанная карточка не прочитана из БД."
+        )
+    # _result_row возвращает исходную SQL-строку (tuple/Row), а не dict.
+    # Преобразуем её тем же адаптером, который использует обычный поиск.
+    result = _row_to_result(result_row, 1, best_similarity)
 
     raw_value = result.get("raw_json")
     raw_meta = raw_value if isinstance(raw_value, dict) else {}
