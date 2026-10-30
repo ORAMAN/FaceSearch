@@ -109,8 +109,8 @@
 
   function normalisePinIdentifier(raw) {
     const value = String(raw || "").trim();
-    if (/^[1-9]\\d*$/.test(value)) return "face:" + value;
-    if (/^(?:face|profile|vk):[1-9]\\d*$/i.test(value)) return value.toLowerCase();
+    if (/^[1-9]\d*$/.test(value)) return "face:" + value;
+    if (/^(?:face|profile|vk):[1-9]\d*$/i.test(value)) return value.toLowerCase();
     return "";
   }
 
