@@ -1656,7 +1656,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     <div id="group-analysis-summary"></div>
     <details id="group-pins-wrap" class="group-pins" hidden>
       <summary class="group-pins-heading">Закрепление профилей за лицами</summary>
-      <div class="hint">Выберите найденный профиль или укажите ID лица, profile:ID (ID профиля БД) либо vk:ID. Закреплённое назначение считается аксиомой с уверенностью 100%: оно не меняется при подборе вариантов, не ограничивается порогом сходства и не получает автоматические штрафы пола. Фактическое визуальное сходство показывается отдельно.</div>
+      <div class="hint">Выберите найденный профиль или укажите ID лица, profile:ID (ID профиля БД) либо vk:ID. Если VK ID отсутствует в локальной БД, профиль будет запрошен через VK API (users.get) при пересчёте. Для такого профиля визуальное сходство недоступно, пока в БД нет его фотографий и эмбеддинга.</div>
       <div id="group-pin-rows" class="group-pin-rows"></div>
       <div class="group-pin-actions">
         <button type="button" id="group-pins-recalculate">Пересчитать с закреплёнными профилями</button>
@@ -2920,11 +2920,117 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 """
 
 
+def _resolve_vk_pin_candidate_from_api(
+    vk_user_id: int,
+    identifier: str,
+    face_index: int,
+    progress_callback=None,
+) -> dict:
+    """Получает профиль VK напрямую, если у VK ID ещё нет локальных записей."""
+    vk_client, loader_error = group_analysis._get_vk_loader()
+    if vk_client is None:
+        raise ValueError(
+            "VK ID " + str(vk_user_id) + " отсутствует в локальной БД. "
+            + str(loader_error or "VK API-клиент недоступен.")
+        )
+
+    if progress_callback:
+        progress_callback("Профиль VK ID " + str(vk_user_id) + " отсутствует в БД. Получаю данные через users.get…")
+
+    try:
+        with vk_client.requests.Session() as session:
+            users = vk_client.get_user_info([vk_user_id], session)
+    except Exception as exc:
+        message = str(exc).strip()
+        # Не выводим токены и параметры авторизации в сообщение об ошибке.
+        for token in list(getattr(vk_client, "_TOKEN_LIST", []) or []):
+            if token:
+                message = message.replace(str(token), "[токен скрыт]")
+        raise ValueError(
+            "Не удалось получить VK ID " + str(vk_user_id)
+            + " через API: " + (message[:260] or type(exc).__name__)
+        ) from exc
+
+    user = next(
+        (
+            item for item in users
+            if isinstance(item, dict)
+            and int(item.get("id") or 0) == int(vk_user_id)
+        ),
+        None,
+    )
+    if user is None:
+        raise ValueError(
+            "VK API не вернул профиль для ID " + str(vk_user_id)
+            + ". Проверьте ID и доступность профиля."
+        )
+
+    try:
+        profile_doc = vk_client.build_entity_json(user, "")
+    except Exception:
+        profile_doc = {
+            "url_source": "https://vk.com/id" + str(vk_user_id),
+            "name": " ".join(
+                part for part in (
+                    str(user.get("first_name") or "").strip(),
+                    str(user.get("last_name") or "").strip(),
+                ) if part
+            ),
+            "info": {},
+        }
+    info = profile_doc.get("info") if isinstance(profile_doc.get("info"), dict) else {}
+    profile_url = str(
+        profile_doc.get("url_source")
+        or "https://vk.com/id" + str(vk_user_id)
+    ).strip()
+    full_name = str(profile_doc.get("name") or "").strip()
+    if not full_name:
+        full_name = str(user.get("screen_name") or ("VK ID " + str(vk_user_id)))
+
+    profile_gender = group_analysis._normalize_profile_gender_prediction({
+        "profile_sex": user.get("sex")
+    })
+    city_data = user.get("city") if isinstance(user.get("city"), dict) else {}
+    candidate = {
+        "profile_id": None,
+        "face_id": 0,
+        "name": full_name,
+        "profile_url": profile_url,
+        "url_source": profile_url,
+        "source_url": "",
+        "city": str(city_data.get("title") or "").strip(),
+        "path": "",
+        # В локальной БД нет изображения/эмбеддинга этого профиля, поэтому
+        # визуальное сходство не выдумываем: оно явно помечено как неизвестное.
+        "similarity": 0.0,
+        "similarity_unknown": True,
+        "avatar_url": str(user.get("photo_max_orig") or ""),
+        "vk_user_id": int(vk_user_id),
+        "profile_sex": user.get("sex"),
+        "sex": user.get("sex"),
+        "profile_gender": profile_gender["gender"],
+        "profile_gender_confidence": profile_gender["confidence"],
+        "birthdate": str(user.get("bdate") or ""),
+        "metadata": profile_doc,
+        "raw_meta": profile_doc,
+        "info": info,
+        "metadata_info": info,
+        "pinned": True,
+        "pinned_identifier": str(identifier),
+        "face_index": int(face_index),
+    }
+    candidate["profile_key"] = group_analysis._stable_profile_key(candidate)
+    if not group_analysis._has_internet_profile(candidate):
+        raise ValueError("VK API вернул профиль без корректной ссылки на профиль.")
+    return candidate
+
+
 def _resolve_group_pin_candidate(
     conn,
     identifier: str,
     query_embedding,
     face_index: int,
+    progress_callback=None,
 ) -> dict:
     """Разрешает ручное назначение по face.id, profiles.id или VK ID."""
     value = str(identifier or "").strip()
@@ -2957,6 +3063,13 @@ def _resolve_group_pin_candidate(
 
     rows = conn.execute(sql, (numeric_id,)).fetchall()
     if not rows:
+        if identifier_kind == "vk":
+            return _resolve_vk_pin_candidate_from_api(
+                numeric_id,
+                value,
+                face_index,
+                progress_callback=progress_callback,
+            )
         label = {
             "face": "лицо",
             "profile": "профиль БД",
@@ -3565,6 +3678,10 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                             pinned_identifier,
                             embedding,
                             face_index,
+                            progress_callback=lambda message: update_job(
+                                5 + int(25 * (face_index + 0.5) / max(1, len(embeddings))),
+                                message,
+                            ),
                         )
                         pinned_key = str(pinned_candidate.get("profile_key") or "")
                         previous_face = pinned_profile_keys.get(pinned_key)
