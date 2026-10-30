@@ -421,6 +421,98 @@ class GroupAnalysisTests(unittest.TestCase):
         self.assertEqual(visual_by_face[1]["name"], "Дарья")
         self.assertEqual(visual_by_face[1]["similarity"], 88.0)
 
+    def test_user_pinned_profile_is_forced_and_unique_in_every_combination(self):
+        pinned = {
+            "face_id": 1001,
+            "profile_id": 501,
+            "name": "Закреплённый профиль",
+            "profile_url": "https://vk.com/id101",
+            "similarity": 55.0,
+            "pinned": True,
+        }
+        candidates = [
+            [dict(pinned)],
+            [
+                {
+                    "face_id": 2001,
+                    "profile_id": 501,
+                    "name": "Тот же закреплённый профиль",
+                    "profile_url": "https://vk.com/id101",
+                    "similarity": 99.0,
+                },
+                {
+                    "face_id": 2002,
+                    "profile_id": 502,
+                    "name": "Другой профиль",
+                    "profile_url": "https://vk.com/id202",
+                    "similarity": 95.0,
+                },
+            ],
+        ]
+        with tempfile.TemporaryDirectory() as app_dir, patch(
+            "facesearch.group_analysis._load_friend_sets",
+            return_value=({}, {"status": "disabled", "message": "test"}),
+        ):
+            result = analyze_group(
+                candidates,
+                {
+                    "min_similarity": 90.0,
+                    "candidates_per_face": 2,
+                    "check_vk_friends": False,
+                    "check_gender": False,
+                },
+                app_dir,
+            )
+
+        self.assertTrue(result["combinations"])
+        for combination in result["combinations"]:
+            by_face = {
+                item["face_index"]: item for item in combination["profiles"]
+            }
+            self.assertEqual(by_face[0]["name"], "Закреплённый профиль")
+            self.assertTrue(by_face[0]["pinned"])
+            self.assertEqual(by_face[0]["assignment_confidence_percent"], 100)
+            self.assertEqual(by_face[0]["assignment_confidence"], "certain")
+            self.assertEqual(by_face[0]["similarity"], 55.0)
+            self.assertNotEqual(
+                by_face[0]["profile_key"],
+                by_face[1]["profile_key"],
+            )
+            matched_keys = [
+                item["profile_key"]
+                for item in combination["profiles"]
+                if not item["unmatched"]
+            ]
+            self.assertEqual(len(matched_keys), len(set(matched_keys)))
+
+    def test_same_profile_cannot_be_pinned_to_two_faces(self):
+        candidates = [
+            [{
+                "face_id": 1001,
+                "name": "Профиль А",
+                "profile_url": "https://vk.com/id101",
+                "similarity": 94.0,
+                "pinned": True,
+            }],
+            [{
+                "face_id": 2001,
+                "name": "Профиль А",
+                "profile_url": "https://vk.com/id101",
+                "similarity": 92.0,
+                "pinned": True,
+            }],
+        ]
+        with tempfile.TemporaryDirectory() as app_dir, patch(
+            "facesearch.group_analysis._load_friend_sets",
+            return_value=({}, {"status": "disabled", "message": "test"}),
+        ):
+            with self.assertRaisesRegex(ValueError, "нельзя закрепить одновременно"):
+                analyze_group(
+                    candidates,
+                    {"check_vk_friends": False, "check_gender": False},
+                    app_dir,
+                )
+
     def test_strong_visual_match_is_not_discarded_only_for_missing_social_links(self):
         # Отсутствие дружбы VK не должно отменять сильное индивидуальное совпадение.
         candidates = [
