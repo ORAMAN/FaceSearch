@@ -132,7 +132,10 @@
     const similarity = Number(candidate.similarity || 0).toFixed(2);
     const faceId = Number(candidate.face_id || 0);
     const profileId = Number(candidate.profile_id || 0);
+    const discoveredFor = Number(candidate.face_index);
     return name + " · " + similarity + "% · ID лица " + faceId +
+      (Number.isInteger(discoveredFor) && discoveredFor >= 0
+        ? " · найден для лица " + (discoveredFor + 1) : "") +
       (profileId ? " · ID профиля " + profileId : "");
   }
 
