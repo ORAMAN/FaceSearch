@@ -711,9 +711,18 @@
       buttonEl.setAttribute("aria-selected", String(index === selectedIndex));
       buttonEl.setAttribute("tabindex", index === selectedIndex ? "0" : "-1");
 
+      const visualKnownCount = Number.isFinite(Number(combo.visual_known_count))
+        ? Number(combo.visual_known_count)
+        : Number(combo.matched_faces || 0);
+      const visualTotalCount = Number(combo.matched_faces || 0);
+      const visualSummary = visualKnownCount > 0
+        ? "Среднее сходство: " + Number(combo.visual_average || 0).toFixed(2) + "%" +
+          (visualKnownCount < visualTotalCount
+            ? " (по " + visualKnownCount + " из " + visualTotalCount + " лиц)" : "")
+        : "Среднее сходство: нет локальных данных для сравнения";
       const details =
-        "Среднее сходство: " + Number(combo.visual_average || 0).toFixed(2) +
-        "% · оценка связей: " + Number(combo.social_evidence || 0).toFixed(2) +
+        visualSummary +
+        " · оценка связей: " + Number(combo.social_evidence || 0).toFixed(2) +
         " · штраф пола всего: −" + Number(combo.gender_penalty || 0).toFixed(2) +
         " (по профилю −" + Number(combo.profile_gender_penalty || 0).toFixed(2) + ")" +
         " · связанные пары: " + Number(combo.connected_pairs || 0) +
