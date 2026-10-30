@@ -1140,7 +1140,11 @@ def _rank_combinations(
 
     disconnected_penalty = max(4.0, min(20.0, float(options["friend_weight"])))
 
-    def evaluate(assignment: list[dict[str, Any]]) -> dict[str, Any]:
+    def evaluate(
+        assignment: list[dict[str, Any]],
+        *,
+        prioritize_visual: bool = False,
+    ) -> dict[str, Any]:
         matched = [
             (index, item) for index, item in enumerate(assignment)
             if not item.get("unmatched")
@@ -1184,16 +1188,24 @@ def _rank_combinations(
                     })
 
         matched_count = len(matched)
-        # Lexicographic objective is intentional: never discard a usable face
-        # match only because API friendship data is absent. When match counts
-        # tie, prefer confident gender agreement, then known social coherence,
-        # and finally visual similarity.
-        objective = (
-            matched_count,
-            -round(gender_penalty_sum, 6),
-            round(social_score_sum, 6),
-            round(visual_sum, 6),
-        )
+        # В обоих режимах сначала максимизируем число назначенных лиц и
+        # учитываем уверенные противоречия пола. Далее приоритет различается:
+        # основной вариант ищет социально согласованную группу, отдельный
+        # визуальный вариант — максимальное сходство лиц.
+        if prioritize_visual:
+            objective = (
+                matched_count,
+                -round(gender_penalty_sum, 6),
+                round(visual_sum, 6),
+                round(social_score_sum, 6),
+            )
+        else:
+            objective = (
+                matched_count,
+                -round(gender_penalty_sum, 6),
+                round(social_score_sum, 6),
+                round(visual_sum, 6),
+            )
         return {
             "objective": objective,
             "matched_faces": matched_count,
@@ -1208,10 +1220,14 @@ def _rank_combinations(
             "relations": relations,
         }
 
-    def solve(forbidden: set[tuple[int, str]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    def solve(
+        forbidden: set[tuple[int, str]],
+        *,
+        prioritize_visual: bool = False,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         choices = [row_choices(i, forbidden) for i in range(face_count)]
         assignment = initial_assignment(forbidden)
-        best_metrics = evaluate(assignment)
+        best_metrics = evaluate(assignment, prioritize_visual=prioritize_visual)
 
         def is_better(metrics: dict[str, Any], current: dict[str, Any]) -> bool:
             return metrics["objective"] > current["objective"]
@@ -1220,7 +1236,7 @@ def _rank_combinations(
         # allow reassignment when the best profile for one face is currently
         # owned by another face; profile keys remain globally unique.
         for _pass in range(3):
-            current_metrics = evaluate(assignment)
+            current_metrics = evaluate(assignment, prioritize_visual=prioritize_visual)
             best_assignment = assignment
             best_metrics = current_metrics
 
@@ -1272,10 +1288,12 @@ def _rank_combinations(
                 break
             assignment = best_assignment
 
-        return assignment, evaluate(assignment)
+        return assignment, evaluate(assignment, prioritize_visual=prioritize_visual)
 
     best_assignment, _best_metrics = solve(set())
-    solutions: list[tuple[list[dict[str, Any]], dict[str, Any]]] = [(best_assignment, _best_metrics)]
+    solutions: list[tuple[list[dict[str, Any]], dict[str, Any], str]] = [
+        (best_assignment, _best_metrics, "Социальная согласованность")
+    ]
     seen_signatures = {
         tuple(str(item.get("profile_key") or "") for item in best_assignment)
     }
@@ -1292,17 +1310,34 @@ def _rank_combinations(
         if signature in seen_signatures:
             continue
         seen_signatures.add(signature)
-        solutions.append((alternative_assignment, alternative_metrics))
+        solutions.append((alternative_assignment, alternative_metrics, "Альтернативный состав"))
         if len(solutions) >= max(10, min(10, int(limit))):
             break
 
-    # Стабильное ранжирование при равной оценке: сохраняем исходный порядок,
-    # чтобы полностью эквивалентные варианты не переставлялись произвольно по URL/ID.
+    # Стабильное ранжирование социальных вариантов при равной оценке.
+    # Затем отдельно добавляем визуально лучший вариант: повторный запуск
+    # с теми же социальными приоритетами не позволяет показать сильное
+    # индивидуальное совпадение, если оно уступает по социальным связям.
     solutions.sort(key=lambda item: item[1]["objective"], reverse=True)
+
+    visual_assignment, visual_metrics = solve(set(), prioritize_visual=True)
+    visual_signature = tuple(
+        str(item.get("profile_key") or "") for item in visual_assignment
+    )
+    known_signatures = {
+        tuple(str(item.get("profile_key") or "") for item in assignment)
+        for assignment, _metrics, _label in solutions
+    }
+    if visual_signature not in known_signatures:
+        solutions.append((
+            visual_assignment,
+            visual_metrics,
+            "Максимум визуального сходства",
+        ))
 
     combinations: list[dict[str, Any]] = []
     pair_count = max(1, face_count * (face_count - 1) / 2)
-    for assignment, metrics in solutions[:max(1, int(limit))]:
+    for assignment, metrics, strategy_label in solutions[:max(1, int(limit))]:
         matched_count = int(metrics["matched_faces"])
         visual_average = (
             float(metrics["visual_sum"]) / matched_count if matched_count else 0.0
@@ -1428,6 +1463,7 @@ def _rank_combinations(
 
         combinations.append({
             "rank": len(combinations) + 1,
+            "strategy_label": strategy_label,
             "score": round(
                 visual_average + relation_bonus
                 - float(metrics["gender_penalty_sum"]) / max(1, matched_count),
