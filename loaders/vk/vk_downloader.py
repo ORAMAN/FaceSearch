@@ -4714,9 +4714,9 @@ def main():
     def scroll_form_mousewheel(event):
         # Прокручиваем только верхнюю форму под указателем, не перехватывая журнал.
         widget = root.winfo_containing(event.x_root, event.y_root)
-        while widget is not None and widget is not form_canvas:
+        while widget is not None and widget not in (form_canvas, form_scrollbar):
             widget = getattr(widget, "master", None)
-        if widget is not form_canvas:
+        if widget not in (form_canvas, form_scrollbar):
             return None
 
         delta = getattr(event, "delta", 0)
