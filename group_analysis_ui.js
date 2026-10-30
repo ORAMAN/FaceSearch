@@ -187,22 +187,22 @@
     if (!pinsWrap || !pinRows) return;
     const faceCount = Math.max(0, Number(result && result.face_count) || core.getFaceCount());
     const allCandidates = Array.isArray(result && result.candidates) ? result.candidates : [];
-    candidateOptionsByFace = Array.from({ length: faceCount }, function (_value, faceIndex) {
-      const byKey = new Map();
-      allCandidates.forEach(function (candidate) {
-        if (
-          Number(candidate.face_index) !== faceIndex ||
-          Number(candidate.face_id || 0) <= 0
-        ) return;
-        const key = String(candidate.profile_key || candidate.face_id);
-        const previous = byKey.get(key);
-        if (!previous || Number(candidate.similarity || 0) > Number(previous.similarity || 0)) {
-          byKey.set(key, candidate);
-        }
-      });
-      return Array.from(byKey.values()).sort(function (a, b) {
-        return Number(b.similarity || 0) - Number(a.similarity || 0);
-      });
+    // Единый каталог профилей, обнаруженных для любого лица этой группы.
+    // Дубликаты объединяем по profile_key, сохраняя вариант с лучшим сходством.
+    const byKey = new Map();
+    allCandidates.forEach(function (candidate) {
+      if (Number(candidate.face_id || 0) <= 0) return;
+      const key = String(candidate.profile_key || candidate.face_id);
+      const previous = byKey.get(key);
+      if (!previous || Number(candidate.similarity || 0) > Number(previous.similarity || 0)) {
+        byKey.set(key, candidate);
+      }
+    });
+    const sharedCandidates = Array.from(byKey.values()).sort(function (a, b) {
+      return Number(b.similarity || 0) - Number(a.similarity || 0);
+    });
+    candidateOptionsByFace = Array.from({ length: faceCount }, function () {
+      return sharedCandidates.slice();
     });
 
     pinRows.replaceChildren();
