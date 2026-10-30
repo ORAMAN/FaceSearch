@@ -1334,6 +1334,21 @@ def _rank_combinations(
             visual_metrics,
             "Максимум визуального сходства",
         ))
+    else:
+        # Если visual-best уже получен обычным перебором альтернатив, всё равно
+        # явно помечаем его вкладку, но не переименовываем основной вариант.
+        for solution_index in range(1, len(solutions)):
+            assignment, metrics, _label = solutions[solution_index]
+            signature = tuple(
+                str(item.get("profile_key") or "") for item in assignment
+            )
+            if signature == visual_signature:
+                solutions[solution_index] = (
+                    assignment,
+                    metrics,
+                    "Максимум визуального сходства",
+                )
+                break
 
     combinations: list[dict[str, Any]] = []
     pair_count = max(1, face_count * (face_count - 1) / 2)
