@@ -1648,7 +1648,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     <div id="group-analysis-summary"></div>
     <section id="group-pins-wrap" class="group-pins" hidden aria-label="Закреплённые профили">
       <div class="group-pins-heading">Закрепление профилей за лицами</div>
-      <div class="hint">Выберите найденный профиль или укажите ID лица, profile:ID (ID профиля БД) либо vk:ID. Закреплённое назначение считается аксиомой с уверенностью 100% и не может быть переназначено другому лицу.</div>
+      <div class="hint">Выберите найденный профиль или укажите ID лица, profile:ID (ID профиля БД) либо vk:ID. Закреплённое назначение считается аксиомой с уверенностью 100%: оно не меняется при подборе вариантов, не ограничивается порогом сходства и не получает автоматические штрафы пола. Фактическое визуальное сходство показывается отдельно.</div>
       <div id="group-pin-rows" class="group-pin-rows"></div>
       <div class="group-pin-actions">
         <button type="button" id="group-pins-recalculate">Пересчитать с закреплёнными профилями</button>
