@@ -143,11 +143,11 @@
       const details = [];
       const styles = [];
       if (friend) {
-        details.push("Есть связь в друзьях VK");
+        details.push("Прямая связь в друзьях VK");
         styles.push({ color: "#16a34a", dash: "", width: 3 });
       }
       if (common) {
-        details.push("Общие друзья: " + Number(edge.common_friends || 0));
+        details.push("Общие друзья VK: " + Number(edge.common_friends || 0));
         styles.push({ color: "#8b5cf6", dash: "6 5", width: 2 });
       }
       if (sameCity) {
@@ -156,7 +156,7 @@
       }
       if (sameEducation) {
         details.push("Общее учебное заведение: " + (educationMatches.join(", ") || "совпадение в данных профиля"));
-        styles.push({ color: "#7c3aed", dash: "8 4", width: 2 });
+        styles.push({ color: "#2563eb", dash: "8 4", width: 2 });
       }
       if (sameWorkplace) {
         details.push("Общее место работы: " + (workplaceMatches.join(", ") || "совпадение в данных профиля"));
@@ -380,32 +380,53 @@
 
   function renderCombinationButtons(combinations, selectedIndex) {
     combinationsBox.replaceChildren();
+    combinationsBox.setAttribute("role", "tablist");
+    combinationsBox.setAttribute("aria-label", "Варианты оценки комбинации профилей");
     combinations.forEach(function (combo, index) {
       const buttonEl = document.createElement("button");
       buttonEl.type = "button";
       buttonEl.className = "group-combination";
-      buttonEl.setAttribute("aria-pressed", String(index === selectedIndex));
+      buttonEl.setAttribute("role", "tab");
+      buttonEl.setAttribute("aria-selected", String(index === selectedIndex));
+      buttonEl.setAttribute("tabindex", index === selectedIndex ? "0" : "-1");
 
-      const info = document.createElement("span");
-      const title = document.createElement("strong");
-      title.textContent = "Вариант №" + (index + 1) + " · оценка " + Number(combo.score || 0).toFixed(2);
-      const subtitle = document.createElement("small");
-      subtitle.textContent =
-        "Сходство в среднем: " + Number(combo.visual_average || 0).toFixed(2) +
+      const details =
+        "Среднее сходство: " + Number(combo.visual_average || 0).toFixed(2) +
         "% · оценка связей: " + Number(combo.social_evidence || 0).toFixed(2) +
         " · штраф пола всего: −" + Number(combo.gender_penalty || 0).toFixed(2) +
         " (по профилю −" + Number(combo.profile_gender_penalty || 0).toFixed(2) + ")" +
         " · связанные пары: " + Number(combo.connected_pairs || 0) +
         " · пары без подтверждённых связей: " + Number(combo.disconnected_pairs || 0) +
         " · сопоставлено лиц: " + Number(combo.matched_faces || 0) + "/" + (combo.profiles || []).length;
-      info.append(title, subtitle);
-      buttonEl.appendChild(info);
+      const tabLabel = "Вариант №" + (index + 1);
+      const scoreText = "Оценка: " + Number(combo.score || 0).toFixed(2);
+      buttonEl.title = tabLabel + " · " + scoreText + " · " + details;
+      buttonEl.setAttribute("aria-label", buttonEl.title);
 
-      const action = document.createElement("span");
-      action.textContent = index === selectedIndex ? "Выбран" : "Показать";
-      buttonEl.appendChild(action);
+      const label = document.createElement("span");
+      label.className = "group-combination-label";
+      label.textContent = tabLabel;
+      const score = document.createElement("small");
+      score.className = "group-combination-score";
+      score.textContent = scoreText;
+      buttonEl.append(label, score);
+
       buttonEl.addEventListener("click", function () {
         renderCombination(combinations, index);
+      });
+      buttonEl.addEventListener("keydown", function (event) {
+        let nextIndex = index;
+        if (event.key === "ArrowRight") nextIndex = (index + 1) % combinations.length;
+        else if (event.key === "ArrowLeft") nextIndex = (index - 1 + combinations.length) % combinations.length;
+        else if (event.key === "Home") nextIndex = 0;
+        else if (event.key === "End") nextIndex = combinations.length - 1;
+        else return;
+        event.preventDefault();
+        const nextTab = combinationsBox.children[nextIndex];
+        if (nextTab) {
+          nextTab.focus();
+          nextTab.click();
+        }
       });
       combinationsBox.appendChild(buttonEl);
     });
