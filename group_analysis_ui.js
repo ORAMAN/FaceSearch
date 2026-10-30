@@ -40,6 +40,7 @@
   let activeJobId = "";
   let pollSequence = 0;
   let lastResult = null;
+  let activeCombinationIndex = 0;
   let pinnedAssignments = Object.create(null);
   let candidateOptionsByFace = [];
 
@@ -55,6 +56,7 @@
     running = false;
     pollSequence += 1;
     lastResult = null;
+    activeCombinationIndex = 0;
     pinnedAssignments = Object.create(null);
     candidateOptionsByFace = [];
     if (core.setPinnedFaceAssignments) core.setPinnedFaceAssignments({}, -1);
@@ -334,13 +336,28 @@
         savePin(faceIndex, select.value, "list");
       });
 
+      const currentCombination = Array.isArray(lastResult && lastResult.combinations)
+        ? lastResult.combinations[activeCombinationIndex] : null;
+      const currentProfile = Array.isArray(currentCombination && currentCombination.profiles)
+        ? currentCombination.profiles.find(function (profile) {
+            return Number(profile.face_index) === faceIndex;
+          }) : null;
       const status = document.createElement("div");
       status.className = "group-pin-status" + (assignment ? " active" : "");
-      status.textContent = assignment
-        ? "Текущее назначение: " + assignment.label +
+      if (assignment) {
+        status.textContent = "Текущее назначение (ручное): " + assignment.label +
           (assignment.similarityKnown === false ? " · визуальное сходство не рассчитывалось" : "") +
-          " · будет применено при пересчёте"
-        : "Текущее назначение: не задано";
+          " · будет применено при пересчёте";
+      } else if (currentProfile && !currentProfile.unmatched) {
+        status.textContent = "Текущее назначение (вариант №" + (activeCombinationIndex + 1) + "): " +
+          String(currentProfile.name || "Без имени") +
+          (currentProfile.similarity_known === false
+            ? " · данные VK API, визуальное сходство не рассчитано"
+            : " · сходство " + Number(currentProfile.similarity || 0).toFixed(2) + "%") +
+          (currentProfile.pinned ? " · закреплено" : " · автоматический выбор, ещё не закреплён");
+      } else {
+        status.textContent = "Текущее назначение: в выбранном варианте профиль не назначен";
+      }
 
       row.classList.toggle("is-pinned", Boolean(assignment));
       row.addEventListener("mouseenter", function () { setPinnedFaceHover(faceIndex); });
@@ -742,6 +759,8 @@
   function renderCombination(combinations, index) {
     const combo = combinations[index];
     if (!combo) return;
+    activeCombinationIndex = index;
+    renderPinnedControls(lastResult);
     renderGraph(combo);
     renderProfileCards(combo);
     renderCombinationButtons(combinations, index);
@@ -753,6 +772,7 @@
 
   function renderResult(result) {
     lastResult = result;
+    activeCombinationIndex = 0;
     const resultCombinations = Array.isArray(result.combinations) ? result.combinations : [];
     const overview = document.createElement("div");
     overview.className = "group-empty";
