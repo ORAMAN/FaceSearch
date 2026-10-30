@@ -19,6 +19,7 @@ import ipaddress
 import json
 import mimetypes
 import os
+import re
 import secrets
 import socket
 import threading
@@ -2895,7 +2896,7 @@ def _resolve_group_pin_candidate(
 ) -> dict:
     """Разрешает ручное назначение по face.id, profiles.id или VK ID."""
     value = str(identifier or "").strip()
-    match = __import__("re").fullmatch(r"(?:(face|profile|vk):)?([1-9]\\d*)", value, __import__("re").IGNORECASE)
+    match = re.fullmatch(r"(?:(face|profile|vk):)?([1-9]\\d*)", value, re.IGNORECASE)
     if not match:
         raise ValueError(
             "ID должен быть числом (ID лица) либо иметь префикс profile: или vk:."
@@ -3265,6 +3266,30 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
         if len(embeddings) < 2:
             raise ValueError("Для группового анализа нужно обнаружить не менее двух лиц.")
 
+        raw_pins = data.get("pinned_profiles", [])
+        if raw_pins is None:
+            raw_pins = []
+        if not isinstance(raw_pins, list):
+            raise ValueError("Список закреплённых профилей имеет неверный формат.")
+        pinned_by_face = {}
+        for item in raw_pins:
+            if not isinstance(item, dict):
+                raise ValueError("Некорректное закреплённое назначение.")
+            try:
+                face_index = int(item.get("face_index"))
+            except (TypeError, ValueError):
+                raise ValueError("Не указан номер исходного лица для закрепления.")
+            identifier = str(item.get("identifier") or "").strip()
+            if face_index < 0 or face_index >= len(embeddings):
+                raise ValueError("Номер исходного лица для закрепления вне диапазона.")
+            if face_index in pinned_by_face:
+                raise ValueError(f"Для лица {face_index + 1} указано больше одного профиля.")
+            if not re.fullmatch(r"(?:(?:face|profile|vk):)?[1-9]\\d*", identifier, re.IGNORECASE):
+                raise ValueError(
+                    "ID должен быть числом (ID лица) либо иметь префикс profile: или vk:."
+                )
+            pinned_by_face[face_index] = identifier
+
         raw_options = data.get("options")
         if not isinstance(raw_options, dict) or not raw_options:
             raw_options = _saved_group_analysis_options()
@@ -3326,6 +3351,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 initial_search_top_k = min(500, max(candidate_count * 40, candidate_count + 50))
                 max_search_top_k = min(10000, max(initial_search_top_k, candidate_count * 400))
                 candidates_by_face = []
+                pinned_profile_keys = {}
 
                 def online_profile_count(search_results):
                     unique_profiles = set()
@@ -3485,6 +3511,32 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                             "info": raw_info,
                             "metadata_info": metadata_info,
                         })
+
+                    pinned_identifier = pinned_by_face.get(face_index)
+                    if pinned_identifier:
+                        pinned_candidate = _resolve_group_pin_candidate(
+                            connection,
+                            pinned_identifier,
+                            embedding,
+                            face_index,
+                        )
+                        pinned_key = str(pinned_candidate.get("profile_key") or "")
+                        previous_face = pinned_profile_keys.get(pinned_key)
+                        if previous_face is not None and previous_face != face_index:
+                            raise ValueError(
+                                f"Профиль «{pinned_candidate.get('name') or pinned_identifier}» "
+                                f"уже закреплён за лицом {previous_face + 1}. "
+                                "Один профиль можно назначить только одному лицу."
+                            )
+                        pinned_profile_keys[pinned_key] = face_index
+                        # Если выбранный профиль уже попал в обычную выдачу, заменяем
+                        # его вариантом, помеченным как закреплённый. Иначе добавляем
+                        # запись явно, независимо от порога сходства и top-k.
+                        face_candidates = [
+                            item for item in face_candidates
+                            if group_analysis._stable_profile_key(item) != pinned_key
+                        ]
+                        face_candidates.append(pinned_candidate)
                     candidates_by_face.append(face_candidates)
                     update_job(
                         5 + int(25 * (face_index + 1) / max(1, len(embeddings))),
