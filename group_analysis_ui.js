@@ -107,6 +107,195 @@
     };
   }
 
+  function normalisePinIdentifier(raw) {
+    const value = String(raw || "").trim();
+    if (/^[1-9]\\d*$/.test(value)) return "face:" + value;
+    if (/^(?:face|profile|vk):[1-9]\\d*$/i.test(value)) return value.toLowerCase();
+    return "";
+  }
+
+  function findPinCandidate(faceIndex, identifier) {
+    const candidates = candidateOptionsByFace[faceIndex] || [];
+    const parts = String(identifier || "").split(":");
+    const kind = parts.length === 2 ? parts[0].toLowerCase() : "face";
+    const id = Number(parts.length === 2 ? parts[1] : parts[0]);
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+    return candidates.find(function (candidate) {
+      if (kind === "profile") return Number(candidate.profile_id || 0) === id;
+      if (kind === "vk") return Number(candidate.vk_user_id || 0) === id;
+      return Number(candidate.face_id || 0) === id;
+    }) || null;
+  }
+
+  function pinCandidateLabel(candidate) {
+    const name = String(candidate.name || "Без имени");
+    const similarity = Number(candidate.similarity || 0).toFixed(2);
+    const faceId = Number(candidate.face_id || 0);
+    const profileId = Number(candidate.profile_id || 0);
+    return name + " · " + similarity + "% · ID лица " + faceId +
+      (profileId ? " · ID профиля " + profileId : "");
+  }
+
+  function updatePinMessage(message) {
+    if (pinsMessage) pinsMessage.textContent = String(message || "");
+  }
+
+  function savePin(faceIndex, identifier, source) {
+    const normalized = normalisePinIdentifier(identifier);
+    if (!normalized) {
+      updatePinMessage("Введите положительный ID лица или ID с префиксом profile: либо vk:.");
+      return false;
+    }
+    const candidate = findPinCandidate(faceIndex, normalized);
+    const profileKey = candidate ? String(candidate.profile_key || "") : "";
+    for (const [otherIndexText, assignment] of Object.entries(pinnedAssignments)) {
+      const otherIndex = Number(otherIndexText);
+      if (otherIndex === faceIndex) continue;
+      if (
+        (profileKey && assignment.profileKey && profileKey === assignment.profileKey) ||
+        normalized === assignment.identifier
+      ) {
+        updatePinMessage(
+          "Этот профиль уже закреплён за лицом " + (otherIndex + 1) +
+          ". Один профиль может быть назначен только одному лицу."
+        );
+        return false;
+      }
+    }
+    const label = candidate
+      ? pinCandidateLabel(candidate)
+      : (normalized.startsWith("profile:")
+        ? "Профиль БД #" + normalized.slice(8)
+        : normalized.startsWith("vk:")
+          ? "VK ID " + normalized.slice(3)
+          : "ID лица " + normalized.slice(5));
+    pinnedAssignments[faceIndex] = {
+      identifier: normalized,
+      profileKey: profileKey,
+      label: label,
+      source: source || "manual"
+    };
+    renderPinnedControls(lastResult);
+    updatePinMessage(
+      "Для лица " + (faceIndex + 1) + " закреплён профиль: " + label +
+      ". Назначение будет зафиксировано на уровне 100% при пересчёте."
+    );
+    return true;
+  }
+
+  function renderPinnedControls(result) {
+    if (!pinsWrap || !pinRows) return;
+    const faceCount = Math.max(0, Number(result && result.face_count) || core.getFaceCount());
+    const allCandidates = Array.isArray(result && result.candidates) ? result.candidates : [];
+    candidateOptionsByFace = Array.from({ length: faceCount }, function (_value, faceIndex) {
+      const byKey = new Map();
+      allCandidates.forEach(function (candidate) {
+        if (
+          Number(candidate.face_index) !== faceIndex ||
+          Number(candidate.face_id || 0) <= 0
+        ) return;
+        const key = String(candidate.profile_key || candidate.face_id);
+        const previous = byKey.get(key);
+        if (!previous || Number(candidate.similarity || 0) > Number(previous.similarity || 0)) {
+          byKey.set(key, candidate);
+        }
+      });
+      return Array.from(byKey.values()).sort(function (a, b) {
+        return Number(b.similarity || 0) - Number(a.similarity || 0);
+      });
+    });
+
+    pinRows.replaceChildren();
+    for (let faceIndex = 0; faceIndex < faceCount; faceIndex += 1) {
+      const row = document.createElement("div");
+      row.className = "group-pin-row";
+
+      const faceLabel = document.createElement("div");
+      faceLabel.className = "group-pin-face";
+      faceLabel.textContent = "Лицо " + (faceIndex + 1);
+
+      const select = document.createElement("select");
+      select.setAttribute("aria-label", "Выбрать профиль для лица " + (faceIndex + 1));
+      const emptyOption = document.createElement("option");
+      emptyOption.value = "";
+      emptyOption.textContent = "— Не закреплять —";
+      select.appendChild(emptyOption);
+
+      (candidateOptionsByFace[faceIndex] || []).forEach(function (candidate) {
+        const option = document.createElement("option");
+        option.value = "face:" + Number(candidate.face_id);
+        option.textContent = pinCandidateLabel(candidate);
+        select.appendChild(option);
+      });
+
+      const assignment = pinnedAssignments[faceIndex];
+      if (assignment && !Array.from(select.options).some(function (option) {
+        return option.value === assignment.identifier;
+      })) {
+        const option = document.createElement("option");
+        option.value = assignment.identifier;
+        option.textContent = "Закреплено вручную: " + assignment.label;
+        select.appendChild(option);
+      }
+      select.value = assignment ? assignment.identifier : "";
+
+      const input = document.createElement("input");
+      input.type = "text";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.placeholder = "ID лица, profile:ID или vk:ID";
+      input.setAttribute("aria-label", "Ввести ID профиля для лица " + (faceIndex + 1));
+      input.value = assignment && assignment.source === "manual" ? assignment.identifier : "";
+
+      const assignButton = document.createElement("button");
+      assignButton.type = "button";
+      assignButton.className = "secondary";
+      assignButton.textContent = "Закрепить ID";
+      assignButton.addEventListener("click", function () {
+        const raw = input.value.trim();
+        if (!raw) {
+          updatePinMessage("Введите ID для лица " + (faceIndex + 1) + ".");
+          input.focus();
+          return;
+        }
+        savePin(faceIndex, raw, "manual");
+      });
+      input.addEventListener("keydown", function (event) {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          assignButton.click();
+        }
+      });
+
+      select.addEventListener("change", function () {
+        if (!select.value) {
+          delete pinnedAssignments[faceIndex];
+          renderPinnedControls(lastResult);
+          updatePinMessage("Закрепление для лица " + (faceIndex + 1) + " снято.");
+          return;
+        }
+        savePin(faceIndex, select.value, "list");
+      });
+
+      const status = document.createElement("div");
+      status.className = "group-pin-status" + (assignment ? " active" : "");
+      status.textContent = assignment
+        ? "Закреплено · назначение 100%: " + assignment.label
+        : "Профиль не закреплён";
+
+      row.append(faceLabel, select, input, assignButton, status);
+      pinRows.appendChild(row);
+      if (running) {
+        select.disabled = true;
+        input.disabled = true;
+        assignButton.disabled = true;
+      }
+    }
+    pinsWrap.hidden = !faceCount;
+    if (pinsRecalculateButton) pinsRecalculateButton.disabled = running || !faceCount;
+    if (pinsClearButton) pinsClearButton.disabled = running || !Object.keys(pinnedAssignments).length;
+  }
+
   function svgNode(name, attrs, text) {
     const node = document.createElementNS("http://www.w3.org/2000/svg", name);
     Object.keys(attrs || {}).forEach(function (key) {
