@@ -405,6 +405,22 @@ class GroupAnalysisTests(unittest.TestCase):
         self.assertGreaterEqual(best["connected_pairs"], 1)
         self.assertEqual(best["disconnected_pairs"], 0)
 
+        # Более сильный индивидуальный визуальный кандидат должен оставаться
+        # доступным отдельной вкладкой, даже если социально лучший вариант другой.
+        visual_variant = next(
+            (
+                item for item in result["combinations"]
+                if item.get("strategy_label") == "Максимум визуального сходства"
+            ),
+            None,
+        )
+        self.assertIsNotNone(visual_variant)
+        visual_by_face = {
+            item["face_index"]: item for item in visual_variant["profiles"]
+        }
+        self.assertEqual(visual_by_face[1]["name"], "Дарья")
+        self.assertEqual(visual_by_face[1]["similarity"], 88.0)
+
     def test_strong_visual_match_is_not_discarded_only_for_missing_social_links(self):
         # Отсутствие дружбы VK не должно отменять сильное индивидуальное совпадение.
         candidates = [
