@@ -2896,7 +2896,7 @@ def _resolve_group_pin_candidate(
 ) -> dict:
     """Разрешает ручное назначение по face.id, profiles.id или VK ID."""
     value = str(identifier or "").strip()
-    match = re.fullmatch(r"(?:(face|profile|vk):)?([1-9]\\d*)", value, re.IGNORECASE)
+    match = re.fullmatch(r"(?:(face|profile|vk):)?([1-9]\d*)", value, re.IGNORECASE)
     if not match:
         raise ValueError(
             "ID должен быть числом (ID лица) либо иметь префикс profile: или vk:."
@@ -3284,7 +3284,7 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 raise ValueError("Номер исходного лица для закрепления вне диапазона.")
             if face_index in pinned_by_face:
                 raise ValueError(f"Для лица {face_index + 1} указано больше одного профиля.")
-            if not re.fullmatch(r"(?:(?:face|profile|vk):)?[1-9]\\d*", identifier, re.IGNORECASE):
+            if not re.fullmatch(r"(?:(?:face|profile|vk):)?[1-9]\d*", identifier, re.IGNORECASE):
                 raise ValueError(
                     "ID должен быть числом (ID лица) либо иметь префикс profile: или vk:."
                 )
