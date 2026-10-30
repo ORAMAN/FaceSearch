@@ -3561,9 +3561,10 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                 raise ValueError("Номер исходного лица для закрепления вне диапазона.")
             if face_index in pinned_by_face:
                 raise ValueError(f"Для лица {face_index + 1} указано больше одного профиля.")
-            if not re.fullmatch(r"(?:(?:face|profile|vk):)?0*[1-9]\d*", identifier, re.IGNORECASE):
+            if not group_analysis.is_valid_pinned_identifier(identifier):
                 raise ValueError(
-                    "ID должен быть числом (ID лица) либо иметь префикс profile: или vk:."
+                    "ID должен быть числом, profile:число, vk:число или vk:короткое_имя "
+                    "(например, vk:username)."
                 )
             pinned_by_face[face_index] = identifier
 
