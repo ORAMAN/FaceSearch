@@ -5891,7 +5891,7 @@ class FaceSearchGUI:
         }
         fields = [
             ("Минимальное сходство кандидата, %", "group_min_similarity", 0, 100, 1),
-            ("Кандидатов на одно лицо", "group_candidates_per_face", 1, 10, 1),
+            ("Кандидатов на одно лицо", "group_candidates_per_face", 1, 50, 1),
             ("Вес дружбы между профилями", "group_friend_weight", 0, 20, 0.5),
             ("Вес общих друзей", "group_common_friend_weight", 0, 10, 0.5),
             ("Штраф за пол по фото", "group_gender_weight", 0, 10, 0.5),
@@ -5939,7 +5939,7 @@ class FaceSearchGUI:
             try:
                 values = {key: variable.get() for key, variable in variables.items()}
                 values["group_min_similarity"] = max(0.0, min(100.0, float(values["group_min_similarity"])))
-                values["group_candidates_per_face"] = max(1, min(10, int(values["group_candidates_per_face"])))
+                values["group_candidates_per_face"] = max(1, min(50, int(values["group_candidates_per_face"])))
                 values["group_friend_weight"] = max(0.0, min(20.0, float(values["group_friend_weight"])))
                 values["group_common_friend_weight"] = max(0.0, min(10.0, float(values["group_common_friend_weight"])))
                 values["group_city_weight"] = max(0.0, min(10.0, float(values["group_city_weight"])))
