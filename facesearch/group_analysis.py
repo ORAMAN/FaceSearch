@@ -38,6 +38,17 @@ MAX_UNIQUE_FRIEND_LOOKUPS = 80
 FRIEND_CACHE_TTL_SECONDS = 15 * 60
 FRIEND_REQUEST_INTERVAL_SECONDS = 0.30
 
+
+def is_valid_pinned_identifier(value: Any) -> bool:
+    """Проверяет формат ручного ID: числовой локальный ID или ID/имя VK."""
+    identifier = str(value or "").strip()
+    return bool(re.fullmatch(
+        r"(?:0*[1-9]\d*|(?:face|profile):0*[1-9]\d*|"
+        r"vk:(?:0*[1-9]\d*|[A-Za-z][A-Za-z0-9_.]{1,63}))",
+        identifier,
+        re.IGNORECASE,
+    ))
+
 _FRIEND_CACHE: dict[int, tuple[float, set[int], str]] = {}
 _FRIEND_CACHE_LOCK = threading.RLock()
 _VK_REQUEST_LOCK = threading.Lock()
