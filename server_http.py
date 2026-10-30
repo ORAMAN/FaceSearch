@@ -2957,7 +2957,7 @@ def _resolve_group_pin_candidate(
         raise ValueError(f"Не найдено лицо или профиль для {label} {numeric_id}.")
 
     np = face_search.np
-    query = np.asarray(query_embedding, dtype=np.float32).reshape(-1)
+    query = np.asarray(query_embedding, dtype=np.float32).reshape(-1).copy()
     query_norm = float(np.linalg.norm(query))
     if query_norm <= 0:
         raise ValueError("Embedding исходного лица имеет нулевую норму.")
@@ -2993,20 +2993,24 @@ def _resolve_group_pin_candidate(
     if not isinstance(result, dict):
         raise ValueError("Не удалось прочитать карточку выбранного профиля из БД.")
 
-    raw_meta = {}
-    try:
-        parsed = json.loads(str(result.get("raw_json") or ""))
-        if isinstance(parsed, dict):
-            raw_meta = parsed
-    except (TypeError, ValueError):
-        pass
-    metadata_doc = {}
-    try:
-        parsed = json.loads(str(result.get("metadata_json") or ""))
-        if isinstance(parsed, dict):
-            metadata_doc = parsed
-    except (TypeError, ValueError):
-        pass
+    raw_value = result.get("raw_json")
+    raw_meta = raw_value if isinstance(raw_value, dict) else {}
+    if not raw_meta:
+        try:
+            parsed = json.loads(str(raw_value or ""))
+            if isinstance(parsed, dict):
+                raw_meta = parsed
+        except (TypeError, ValueError):
+            pass
+    metadata_value = result.get("metadata_json")
+    metadata_doc = metadata_value if isinstance(metadata_value, dict) else {}
+    if not metadata_doc:
+        try:
+            parsed = json.loads(str(metadata_value or ""))
+            if isinstance(parsed, dict):
+                metadata_doc = parsed
+        except (TypeError, ValueError):
+            pass
 
     raw_info = raw_meta.get("info") if isinstance(raw_meta.get("info"), dict) else {}
     metadata_info = (
@@ -3021,7 +3025,10 @@ def _resolve_group_pin_candidate(
         vk_id = None
 
     profile_url = str(
-        result.get("profile_url") or raw_meta.get("url_source") or ""
+        result.get("profile_url")
+        or raw_meta.get("url_source")
+        or metadata_doc.get("url_source")
+        or ""
     ).strip()
     if not profile_url and vk_id:
         profile_url = "https://vk.com/id" + str(vk_id)
@@ -3036,6 +3043,7 @@ def _resolve_group_pin_candidate(
             result.get("screen_name")
             or result.get("domain")
             or raw_meta.get("name")
+            or metadata_doc.get("name")
             or profile_url
             or ("Профиль #" + str(result.get("profile_id") or numeric_id))
         ).strip()
