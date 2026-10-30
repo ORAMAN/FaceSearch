@@ -8,6 +8,7 @@ from unittest.mock import patch
 from facesearch.group_analysis import (
     analyze_group,
     normalize_options,
+    is_valid_pinned_identifier,
     _load_friend_sets,
     _request_vk_friends,
     _gender_mismatch_penalty,
@@ -21,6 +22,15 @@ from facesearch.group_analysis import (
 
 
 class GroupAnalysisTests(unittest.TestCase):
+
+    def test_pinned_identifier_accepts_vk_screen_names_but_keeps_other_ids_numeric(self):
+        for value in ("123", "face:123", "profile:456", "vk:123456", "vk:valera8djan"):
+            with self.subTest(value=value):
+                self.assertTrue(is_valid_pinned_identifier(value))
+
+        for value in ("profile:valera8djan", "face:username", "vk:", "vk:bad/name", "https://vk.ru/valera8djan"):
+            with self.subTest(value=value):
+                self.assertFalse(is_valid_pinned_identifier(value))
 
 
     def test_cross_source_profiles_with_same_name_and_known_gender_merge(self):
