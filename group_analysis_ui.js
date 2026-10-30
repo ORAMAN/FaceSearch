@@ -536,7 +536,7 @@
         "font-weight": genderMismatch ? 700 : 400
       }, unmatched ? "нет кандидата" : (profile.similarity_known === false
         ? "VK API · сходство неизвестно"
-        : (genderMismatch ? "проверьте пол · " : "") + Number(profile.similarity || 0).toFixed(1) + "%"));
+        : (genderMismatch ? "проверьте пол · " : "") + Number(profile.similarity || 0).toFixed(1) + "%")));
     });
   }
 
