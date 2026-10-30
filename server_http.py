@@ -1309,15 +1309,20 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .group-gender-swatch.mismatch{background:#dbeafe;border:3px solid #dc2626}
 .group-gender-swatch.unmatched{background:#e5e7eb;border:2px dashed #6b7280}
 .group-relation-swatch{display:inline-block;width:22px;height:0;border-top:3px solid;flex:0 0 auto}
-.group-relation-swatch.education{border-color:#7c3aed;border-top-style:dashed}
+.group-relation-swatch.friend{border-color:#16a34a;border-top-style:solid}
+.group-relation-swatch.common-friends{border-color:#8b5cf6;border-top-style:dashed}
+.group-relation-swatch.same-city{border-color:#d97706;border-top-style:dotted}
+.group-relation-swatch.education{border-color:#2563eb;border-top-style:dashed}
 .group-relation-swatch.workplace{border-color:#0891b2;border-top-style:dashed}
+.group-gender-legend-heading{font-weight:700;color:var(--text);margin-right:2px}
 .group-relations-list{display:grid;gap:6px;padding:10px 14px 12px;border-top:1px solid var(--line)}
 .group-relation-item{font-size:12px;line-height:1.45;overflow-wrap:anywhere;padding:8px 10px;border-left:3px solid var(--accent);border-radius:5px;background:var(--panel);color:var(--text)}
 .group-relation-empty{font-size:12px;line-height:1.45;color:var(--muted);padding:8px 0}
-.group-combinations{display:grid;gap:8px;margin-top:14px}
-.group-combination{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;text-align:left;width:100%;min-height:auto;background:var(--secondary);color:var(--button-text);border:1px solid var(--button-line);padding:11px 13px}
-.group-combination[aria-pressed=true]{border-color:var(--accent);box-shadow:inset 3px 0 var(--accent)}
-.group-combination small{display:block;color:var(--muted);font-weight:400;margin-top:3px}
+.group-combinations{display:flex;align-items:stretch;gap:6px;margin:0;padding:10px 12px 0;overflow-x:auto;overscroll-behavior-x:contain;background:var(--drop)}
+.group-combination{display:flex;flex:0 0 auto;flex-direction:column;align-items:center;justify-content:center;gap:3px;width:auto;min-width:112px;max-width:190px;min-height:48px;text-align:center;background:var(--secondary);color:var(--button-text);border:1px solid var(--button-line);border-radius:8px 8px 0 0;padding:8px 12px;white-space:nowrap}
+.group-combination[aria-selected=true]{background:var(--panel);color:var(--text);border-color:var(--accent);box-shadow:inset 0 3px var(--accent)}
+.group-combination-label{font-size:13px;font-weight:650}
+.group-combination-score{display:block;color:var(--muted);font-size:11px;font-weight:400}
 .group-profile-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:12px;margin-top:14px}
 .group-profile-card{border:1px solid var(--line);border-radius:10px;padding:10px;min-width:0;background:var(--panel)}
 .group-profile-card img{display:block;width:100%;height:150px;object-fit:contain;background:var(--image-bg);border-radius:6px;margin-bottom:8px}
@@ -1616,7 +1621,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     <div class="group-panel-header">
       <div>
         <h2>Анализ связей группы</h2>
-        <div class="hint">Поиск согласованного набора профилей с учётом сходства лиц, дружбы, города, общих учебных заведений и мест работы.</div>
+        <div class="hint">Поиск согласованного набора профилей с учётом сходства лиц и связей между профилями: друзей VK, общих друзей, города, учебных заведений и мест работы.</div>
       </div>
       <button type="button" id="group-analysis-hide" class="secondary">Скрыть</button>
     </div>
@@ -1626,20 +1631,25 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
     <div id="group-progress-message" class="group-progress-message">Ожидание запуска анализа.</div>
     <div id="group-analysis-summary"></div>
     <div id="group-graph-wrap" class="group-graph-wrap" hidden>
-      <div class="group-gender-legend" aria-label="Обозначения связей и пола на графе">
+      <div class="group-gender-legend" aria-label="Обозначения типов связей и лиц на графе">
+        <strong class="group-gender-legend-heading">Типы связей:</strong>
+        <span class="group-gender-legend-item"><span class="group-relation-swatch friend" aria-hidden="true"></span>Друзья VK — прямая связь (зелёная сплошная линия)</span>
+        <span class="group-gender-legend-item"><span class="group-relation-swatch common-friends" aria-hidden="true"></span>Общие друзья VK — количество общих друзей (фиолетовая штриховая линия)</span>
+        <span class="group-gender-legend-item"><span class="group-relation-swatch same-city" aria-hidden="true"></span>Совпадает город (оранжевая точечная линия)</span>
+        <span class="group-gender-legend-item"><span class="group-relation-swatch education" aria-hidden="true"></span>Общее учебное заведение (синяя штриховая линия)</span>
+        <span class="group-gender-legend-item"><span class="group-relation-swatch workplace" aria-hidden="true"></span>Общее место работы / организация (голубая штриховая линия)</span>
+        <strong class="group-gender-legend-heading">Обозначения кружков:</strong>
         <span class="group-gender-legend-item"><span class="group-gender-swatch female" aria-hidden="true"></span>Женский класс исходного лица</span>
         <span class="group-gender-legend-item"><span class="group-gender-swatch male" aria-hidden="true"></span>Мужской класс исходного лица</span>
         <span class="group-gender-legend-item"><span class="group-gender-swatch unknown" aria-hidden="true"></span>Пол не определён</span>
-        <span class="group-gender-legend-item"><span class="group-gender-swatch mismatch" aria-hidden="true"></span>Пол кандидата не совпадает</span>
-        <span class="group-gender-legend-item"><span class="group-gender-swatch unmatched" aria-hidden="true"></span>Пунктир — профиль не назначен</span>
-        <span class="group-gender-legend-item"><span class="group-relation-swatch education" aria-hidden="true"></span>Общее учебное заведение</span>
-        <span class="group-gender-legend-item"><span class="group-relation-swatch workplace" aria-hidden="true"></span>Общая организация / место работы</span>
+        <span class="group-gender-legend-item"><span class="group-gender-swatch mismatch" aria-hidden="true"></span>Красная обводка — пол кандидата не совпадает с исходным лицом</span>
+        <span class="group-gender-legend-item"><span class="group-gender-swatch unmatched" aria-hidden="true"></span>Пунктирная обводка — профиль не назначен</span>
       </div>
-      <svg id="group-graph" class="group-graph" viewBox="0 0 600 360" role="img" aria-label="Граф связей выбранной комбинации; линии показывают общие связи, цвет узла — оценку пола исходного лица"></svg>
+      <svg id="group-graph" class="group-graph" viewBox="0 0 600 360" role="img" aria-label="Граф связей выбранной комбинации. Цвет кружка — оценка пола исходного лица, линии — типы связей между профилями."></svg>
+      <div id="group-combinations" class="group-combinations" role="tablist" aria-label="Варианты оценки комбинации профилей"></div>
       <div id="group-relations-list" class="group-relations-list" aria-live="polite"></div>
     </div>
     <div id="group-profile-list" class="group-profile-list"></div>
-    <div id="group-combinations" class="group-combinations"></div>
     <div id="group-analysis-notice" class="group-notice"></div>
   </section>
 
