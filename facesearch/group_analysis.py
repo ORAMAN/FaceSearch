@@ -1603,6 +1603,7 @@ def _rank_combinations(
                 2,
             ),
             "visual_average": round(visual_average, 2),
+            "visual_known_count": visual_known_count,
             "gender_penalty": round(float(metrics["gender_penalty_sum"]), 2),
             "profile_gender_penalty": round(float(metrics["profile_gender_penalty_sum"]), 2),
             "social_bonus": round(relation_bonus, 2),
