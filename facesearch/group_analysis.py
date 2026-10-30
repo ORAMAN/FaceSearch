@@ -1253,7 +1253,8 @@ def _rank_combinations(
             profile_gender_penalty_sum += profile_penalty
             # Ручное закрепление — аксиома назначения (100% уверенности),
             # но фактическое визуальное сходство сохраняем отдельно и не подменяем.
-            visual_sum += float(candidate.get("similarity") or 0.0)
+            if not candidate.get("similarity_unknown"):
+                visual_sum += float(candidate.get("similarity") or 0.0)
 
         social_score_sum = 0.0
         checked_social_pairs = 0
@@ -1529,14 +1530,21 @@ def _rank_combinations(
                 best_alternative_similarity = max(other_scores) if other_scores else None
                 visual_margin = (
                     similarity - best_alternative_similarity
-                    if best_alternative_similarity is not None else None
+                    if not item.get("similarity_unknown")
+                    and best_alternative_similarity is not None else None
                 )
                 strong_gender_conflict = penalty > 0.0
                 if item.get("pinned"):
                     assignment_confidence = "certain"
-                    confidence_reason = (
-                        "Профиль закреплён пользователем. Назначение принято как аксиома (100%)."
-                    )
+                    if item.get("similarity_unknown"):
+                        confidence_reason = (
+                            "Профиль не найден в локальной БД и получен через VK API. "
+                            "Назначение закреплено пользователем; визуальное сходство не рассчитывалось."
+                        )
+                    else:
+                        confidence_reason = (
+                            "Профиль закреплён пользователем. Назначение принято как аксиома (100%)."
+                        )
                 elif strong_gender_conflict:
                     assignment_confidence = "low"
                     confidence_reason = "Есть уверенное противоречие по полу; проверьте результат вручную."
@@ -1558,6 +1566,9 @@ def _rank_combinations(
                 "education": list(item.get("education") or []),
                 "workplaces": list(item.get("workplaces") or []),
                 "similarity": similarity,
+                "similarity_known": not bool(item.get("similarity_unknown")),
+                "avatar_url": str(item.get("avatar_url") or ""),
+                "profile_info": dict(item.get("info") or {}) if isinstance(item.get("info"), dict) else {},
                 "face_id": face_id,
                 "profile_id": int(item.get("profile_id") or 0) or None,
                 "profile_key": profile_key,
@@ -1750,6 +1761,8 @@ def analyze_group(
                 "source_url": item.get("source_url") or "",
                 "city": item.get("city") or "",
                 "similarity": float(item.get("similarity") or 0.0),
+                "similarity_known": not bool(item.get("similarity_unknown")),
+                "avatar_url": str(item.get("avatar_url") or ""),
                 "face_id": int(item.get("face_id") or 0),
                 "profile_id": int(item.get("profile_id") or 0) or None,
                 "vk_user_id": item.get("vk_user_id"),
