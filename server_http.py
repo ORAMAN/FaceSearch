@@ -1332,6 +1332,8 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .group-pin-row{display:grid;grid-template-columns:78px minmax(190px,1fr) minmax(170px,230px) auto;align-items:center;gap:8px}
 .group-pin-face{font-weight:650;font-size:13px}
 .group-pin-row select,.group-pin-row input{width:100%;min-width:0;max-width:100%}
+.group-pin-row button{width:auto;min-height:36px;white-space:nowrap}
+.group-pin-status{grid-column:2/-1}
 .group-pin-status{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
 .group-pin-status.active{color:var(--success,var(--accent));font-weight:600}
 .group-pin-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
@@ -1345,7 +1347,7 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
 .group-profile-card a{color:var(--link);overflow-wrap:anywhere}
 .group-notice{font-size:12px;color:var(--muted);margin-top:12px;line-height:1.45}
 .group-empty{padding:14px;border:1px dashed var(--line);border-radius:8px;color:var(--muted)}
-@media(max-width:700px){.group-panel{padding:12px}.group-graph{min-height:190px}.group-combination{padding:10px}.group-profile-list{grid-template-columns:repeat(2,minmax(0,1fr))}.group-pin-row{grid-template-columns:72px minmax(0,1fr)}.group-pin-row select,.group-pin-row input,.group-pin-row button{grid-column:2}.group-pin-face{grid-row:1/4;align-self:start;padding-top:10px}}
+@media(max-width:700px){.group-panel{padding:12px}.group-graph{min-height:190px}.group-combination{padding:10px}.group-profile-list{grid-template-columns:repeat(2,minmax(0,1fr))}.group-pin-row{grid-template-columns:72px minmax(0,1fr)}.group-pin-row select,.group-pin-row input,.group-pin-row button,.group-pin-status{grid-column:2}.group-pin-face{grid-row:1/5;align-self:start;padding-top:10px}}
 @media(max-width:380px){.group-profile-list{grid-template-columns:minmax(0,1fr)}}
 .index-meta{margin:4px 0 9px;color:var(--muted);font-size:12px;line-height:1.35;overflow-wrap:anywhere}
 .index-status{margin:8px 0 12px;padding:11px 14px;border:1px solid var(--line);border-radius:9px;font-size:14px;line-height:1.45;overflow-wrap:anywhere}
