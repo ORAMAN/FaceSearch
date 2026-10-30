@@ -2928,7 +2928,6 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       if(!Number.isInteger(index)||index<0||index>=faces.length)return false;
       selectedFace=index;
       drawFaces();
-      setBusy(false);
       setStatus("Выбрано лицо "+(index+1)+". Ему соответствует строка «Лицо "+(index+1)+"» в закреплениях.");
       return true;
     },
