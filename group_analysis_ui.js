@@ -503,7 +503,10 @@
         const penalty = Number(profile.gender_penalty || 0);
         const facePenalty = Number(profile.face_gender_penalty || 0);
         const profilePenalty = Number(profile.profile_gender_penalty || 0);
-        const confidenceLabels = { high: "высокая", medium: "средняя", low: "низкая" };
+        const confidenceLabels = {
+          certain: "100% — закреплено вручную",
+          high: "высокая", medium: "средняя", low: "низкая"
+        };
         const confidenceText = confidenceLabels[String(profile.assignment_confidence || "")] || "не рассчитана";
         const margin = profile.visual_margin;
         meta.title = String(profile.confidence_reason || "");
@@ -658,6 +661,7 @@
       ". Кандидатов на лицо: " + (result.candidate_counts || []).join(", ") +
       ". Показано комбинаций: " + resultCombinations.length + ".";
     summary.replaceChildren(overview);
+    renderPinnedControls(result);
     if (resultCombinations.length) {
       renderCombination(resultCombinations, 0);
     } else {
@@ -682,6 +686,7 @@
     running = false;
     button.textContent = "Анализ связей группы";
     sync();
+    renderPinnedControls(lastResult);
   }
 
   async function poll(jobId, sequence, queryId) {
@@ -728,6 +733,7 @@
     running = true;
     activeJobId = "";
     panel.hidden = false;
+    renderPinnedControls(lastResult);
     summary.replaceChildren();
     graph.replaceChildren();
     if (relationsList) relationsList.replaceChildren();
@@ -741,9 +747,16 @@
     const sequence = ++pollSequence;
 
     try {
+      const pinnedProfiles = Object.entries(pinnedAssignments).map(function (entry) {
+        return {
+          face_index: Number(entry[0]),
+          identifier: String(entry[1].identifier || "")
+        };
+      });
       const response = await core.postJson("/api/group-analysis/start", {
         query_id: queryId,
-        options: options
+        options: options,
+        pinned_profiles: pinnedProfiles
       });
       activeJobId = String(response.job_id || "");
       if (!activeJobId) throw new Error("Сервер не вернул идентификатор задачи.");
@@ -760,6 +773,16 @@
   }
 
   button.addEventListener("click", start);
+  if (pinsRecalculateButton) pinsRecalculateButton.addEventListener("click", start);
+  if (pinsClearButton) {
+    pinsClearButton.addEventListener("click", function () {
+      if (running) return;
+      pinnedAssignments = Object.create(null);
+      updatePinMessage("Все закрепления сняты. Выполняется повторный анализ без ручных назначений.");
+      renderPinnedControls(lastResult);
+      start();
+    });
+  }
   hideButton.addEventListener("click", function () { panel.hidden = true; });
   window.FaceSearchGroupUI = {
     sync: sync,
