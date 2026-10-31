@@ -696,6 +696,32 @@ class CalibrationWorker:
         )
         self.anchors: list[ProbeResult] = []
         self.ranges: list[dict[str, Any]] = []
+        self.previous_results = read_json(RESULTS_FILE, {})
+        if not isinstance(self.previous_results, dict):
+            self.previous_results = {}
+        saved_plan = self.previous_results.get("calibration", {})
+        self.saved_calibration = saved_plan if isinstance(saved_plan, dict) else {}
+        self.calibration_state: dict[str, Any] = {}
+        self.saved_anchors: dict[int, ProbeResult] = {}
+        anchor_priority = {"error": 0, "unavailable": 1, "ok": 2}
+        for item in self.previous_results.get("anchors", []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                uid = int(item["id"])
+                status = str(item.get("status", "ok"))
+                raw_timestamp = item.get("timestamp")
+                timestamp = int(raw_timestamp) if raw_timestamp is not None else None
+                if uid < 1 or status not in {"ok", "unavailable", "error"}:
+                    continue
+                if status == "ok" and timestamp is None:
+                    continue
+                candidate = ProbeResult(uid, timestamp, status, str(item.get("detail", "")))
+                current = self.saved_anchors.get(uid)
+                if current is None or anchor_priority.get(status, 0) > anchor_priority.get(current.status, 0):
+                    self.saved_anchors[uid] = candidate
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
 
     def emit(self, kind: str, data: Any = None) -> None:
         self.events.put((kind, data))
@@ -722,30 +748,58 @@ class CalibrationWorker:
                 break
         raise RuntimeError("Не удалось найти доступный ID. Проверьте работу restore.init и адрес API.")
 
-    def build_anchors(self, top: ProbeResult, count: int) -> None:
-        # Линейная сетка равномерно покрывает числовой диапазон ID.
-        ids = {
-            max(1, int(round(1 + (top.uid - 1) * i / max(1, count - 1))))
-            for i in range(count)
-        }
-        ids.add(top.uid)
-        ordered_ids = sorted(ids)
-        self.emit("progress_init", len(ordered_ids))
+    def build_anchors(self, top: ProbeResult, target_ids: list[int]) -> None:
+        """Продолжает сохранённую сетку, запрашивая только ещё не полученные ID."""
+        ordered_ids = sorted({int(uid) for uid in target_ids if int(uid) > 0} | {top.uid})
+        completed: dict[int, ProbeResult] = {}
+        for uid in ordered_ids:
+            if uid == top.uid:
+                completed[uid] = top
+                continue
+            saved = self.saved_anchors.get(uid)
+            # Успешные ответы и подтверждённое отсутствие профиля уже обработаны.
+            # Ошибки остаются в очереди для повторной попытки.
+            if saved is not None and saved.status in {"ok", "unavailable"}:
+                completed[uid] = saved
+
+        self.anchors = sorted(completed.values(), key=lambda item: item.uid)
+        total = len(ordered_ids)
+        self.emit("progress_init", total)
+        ready = len(completed)
+        remaining = total - ready
+        if remaining:
+            self.emit("log", f"Продолжение калибровки: уже получено {ready} из {total} опорных точек; осталось {remaining}.")
+        else:
+            self.emit("log", f"Все {total} опорных точек уже сохранены. Повторные запросы пропущены.")
+
+        # Фиксируем восстановленные точки и верхнюю границу до новых запросов.
+        for item in self.anchors:
+            self.emit("anchor", item)
+        self.save_results()
+        self.emit("progress", (ready, total, f"Восстановлено точек: {ready}/{total}"))
+
+        processed = set(completed)
         for index, uid in enumerate(ordered_ids, 1):
             self.check_stop()
-            if uid == top.uid:
-                result = top
-            else:
-                result = self.client.get_date(uid)
+            if uid in processed:
+                self.emit("progress", (index, total, f"Опорные точки: {index}/{total} (уже сохранено)"))
+                continue
+
+            result = self.client.get_date(uid)
             self.anchors.append(result)
+            self.anchors.sort(key=lambda item: item.uid)
+            processed.add(uid)
             self.emit("anchor", result)
-            self.emit("progress", (index, len(ordered_ids), f"Опорные точки: {index}/{len(ordered_ids)}"))
+
+            # Сохраняем каждую точку сразу: аварийное закрытие не сбросит прогресс.
+            self.save_results()
             if result.status == "error":
                 self.emit("log", f"ID {uid:,}: ошибка запроса — {result.detail}")
             elif result.status != "ok":
                 self.emit("log", f"ID {uid:,}: дата недоступна ({result.detail})")
             else:
                 self.emit("log", f"ID {uid:,} → {result.date_text} (год {result.year})" + (" [кэш]" if result.from_cache else ""))
+            self.emit("progress", (index, total, f"Опорные точки: {index}/{total}"))
 
     @staticmethod
     def anchors_monotonic(anchors: list[ProbeResult]) -> tuple[bool, str]:
@@ -854,14 +908,66 @@ class CalibrationWorker:
         try:
             max_id = int(self.config["max_id"])
             count = int(self.config["points"])
+            api_url = str(self.config.get("api_url") or DEFAULT_API_URL)
             self.emit("status", "Получение сессии VK…")
             self.client.get_session()
             self.emit("log", "Сессия VK получена.")
-            self.emit("status", "Поиск верхнего существующего ID…")
-            top = self.find_top(max_id)
-            self.emit("log", f"Верхняя опорная точка: ID {top.uid:,} → {top.date_text}")
+
+            # Для возобновления используем прежнюю сетку. Иначе новый верхний
+            # ID сместил бы интервалы и заставил повторять уже пройденные точки.
+            plan = self.saved_calibration
+            try:
+                same_plan = (
+                    int(plan.get("max_id")) == max_id
+                    and int(plan.get("points")) == count
+                    and str(plan.get("api_url") or DEFAULT_API_URL) == api_url
+                    and isinstance(plan.get("target_ids"), list)
+                    and bool(plan.get("target_ids"))
+                )
+            except (TypeError, ValueError):
+                same_plan = False
+
+            top: ProbeResult | None = None
+            target_ids: list[int] = []
+            if same_plan:
+                try:
+                    saved_ids = sorted({int(value) for value in plan["target_ids"] if int(value) > 0})
+                    saved_top_id = int(plan.get("top_id") or 0)
+                    candidate = self.saved_anchors.get(saved_top_id)
+                    if candidate is not None and candidate.status == "ok" and candidate.timestamp is not None:
+                        top = candidate
+                    elif saved_top_id > 0:
+                        candidate = self.client.get_date(saved_top_id)
+                        if candidate.status == "ok":
+                            top = candidate
+                    if top is not None and saved_ids:
+                        target_ids = sorted(set(saved_ids) | {top.uid})
+                        self.emit("log", f"Возобновляю прежнюю сетку опорных точек (верхний ID {top.uid:,}; запрошено {len(target_ids)} точек).")
+                except (TypeError, ValueError):
+                    top = None
+                    target_ids = []
+
+            if top is None:
+                self.emit("status", "Поиск верхнего существующего ID…")
+                top = self.find_top(max_id)
+                target_ids = sorted({
+                    max(1, int(round(1 + (top.uid - 1) * i / max(1, count - 1)))
+                    for i in range(count)
+                } | {top.uid})
+                self.emit("log", f"Верхняя опорная точка: ID {top.uid:,} → {top.date_text}")
+                self.emit("log", f"Создана новая сетка из {len(target_ids)} опорных точек.")
+
+            self.calibration_state = {
+                "max_id": max_id,
+                "points": count,
+                "api_url": api_url,
+                "top_id": top.uid,
+                "target_ids": target_ids,
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
             self.emit("top", top)
-            self.build_anchors(top, count)
+            self.save_results()
+            self.build_anchors(top, target_ids)
             if self.config["build_ranges"]:
                 self.build_ranges()
             self.save_results()
@@ -887,6 +993,10 @@ class CalibrationWorker:
         previous = read_json(RESULTS_FILE, {})
         if not isinstance(previous, dict):
             previous = {}
+        if self.calibration_state:
+            data["calibration"] = dict(self.calibration_state)
+        elif isinstance(previous.get("calibration"), dict):
+            data["calibration"] = previous["calibration"]
 
         def merge_rows(old_rows: Any, new_rows: list[dict[str, Any]],
                        key_fields: tuple[str, ...]) -> list[dict[str, Any]]:
