@@ -950,10 +950,12 @@ class CalibrationWorker:
             if top is None:
                 self.emit("status", "Поиск верхнего существующего ID…")
                 top = self.find_top(max_id)
-                target_ids = sorted({
-                    max(1, int(round(1 + (top.uid - 1) * i / max(1, count - 1)))
+                target_ids = {
+                    max(1, int(round(1 + (top.uid - 1) * i / max(1, count - 1))))
                     for i in range(count)
-                } | {top.uid})
+                }
+                target_ids.add(top.uid)
+                target_ids = sorted(target_ids)
                 self.emit("log", f"Верхняя опорная точка: ID {top.uid:,} → {top.date_text}")
                 self.emit("log", f"Создана новая сетка из {len(target_ids)} опорных точек.")
 
