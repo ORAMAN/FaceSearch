@@ -198,7 +198,7 @@ class VKRestoreClient:
             self.log("Все запросы restore.getSettings и restore.init будут выполняться из одного контекста Chrome.")
             try:
                 process = subprocess.Popen(
-                    [sys.executable, str(helper), "--server"],
+                    [sys.executable, str(helper), "--server", self.browser_profile, self.browser_executable],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=self._helper_stderr_file,

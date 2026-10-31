@@ -105,8 +105,10 @@ def _complete_captcha(page, error: dict[str, Any], retry_url: str,
     redirect_uri = str(error.get("redirect_uri") or "")
     challenge_session_token = _captcha_url(redirect_uri)
     captcha_sid = str(error.get("captcha_sid") or "")
-    captcha_ts = error.get("captcha_ts", 0)
-    captcha_attempt = error.get("captcha_attempt", 1)
+    captcha_ts = error.get("captcha_ts")
+    if captcha_ts in (None, ""):
+        captcha_ts = 0
+    captcha_attempt = error.get("captcha_attempt") or 1
 
     state: dict[str, Any] = {
         "success_token": "",
