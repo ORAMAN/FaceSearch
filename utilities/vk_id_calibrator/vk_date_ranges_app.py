@@ -1326,11 +1326,11 @@ class VKCalibratorApp(tk.Tk):
         return "break"
 
     def _select_all_entry_shortcut(self, event: tk.Event | None = None) -> str:
-        self._select_all_entry_text()
+        self._select_all_entry_text(event.widget if event is not None else None)
         return "break"
 
-    def _select_all_entry_text(self) -> None:
-        entry = getattr(self, "_context_entry", None) or self.focus_get()
+    def _select_all_entry_text(self, entry=None) -> None:
+        entry = entry or getattr(self, "_context_entry", None) or self.focus_get()
         if entry is None:
             return
         try:
@@ -1407,13 +1407,13 @@ class VKCalibratorApp(tk.Tk):
             return "break"
         values = tree.item(item, "values")
         ids = [
-            re.sub(r"[\\s,]", "", str(values[index]))
+            re.sub(r"[\s,]", "", str(values[index]))
             for index in id_columns
             if index < len(values) and str(values[index]).strip()
         ]
         if ids:
             self.clipboard_clear()
-            self.clipboard_append("\\t".join(ids))
+            self.clipboard_append("\t".join(ids))
             self.update_idletasks()
             self.status_var.set("ID скопирован в буфер обмена.")
         return "break"
@@ -1431,7 +1431,7 @@ class VKCalibratorApp(tk.Tk):
         values = tree.item(item, "values")
         if values:
             self.clipboard_clear()
-            self.clipboard_append("\\t".join(str(value) for value in values))
+            self.clipboard_append("\t".join(str(value) for value in values))
             self.update_idletasks()
             self.status_var.set("Строка таблицы скопирована в буфер обмена.")
 
