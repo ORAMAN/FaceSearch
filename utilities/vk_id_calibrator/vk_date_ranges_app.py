@@ -310,8 +310,10 @@ class VKRestoreClient:
                     raise RuntimeError(detail or "Ошибка браузерной сессии.")
 
                 self._post_captcha_pause = (
-                    max(self.pause, 5.0) if result.get("captcha_performed") else 0.0
+                    max(self.pause, 8.0) if result.get("captcha_performed") else 0.0
                 )
+                if result.get("captcha_performed"):
+                    self.log("SmartCaptcha пройдена; повтор restore.init выполнен в том же браузерном контексте.")
                 response = result.get("response")
                 if not isinstance(response, dict):
                     raise RuntimeError("VK вернул ответ неожиданного формата.")

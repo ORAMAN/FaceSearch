@@ -99,16 +99,26 @@ def _post_form(page, url: str, params: dict[str, Any]) -> dict[str, Any]:
     return result["data"]
 
 
+def _normalize_challenge_number(value: Any, default: str) -> str:
+    if value in (None, ""):
+        return default
+    try:
+        number = float(value)
+        if number.is_integer():
+            return str(int(number))
+        return format(number, ".15g")
+    except (TypeError, ValueError, OverflowError):
+        return str(value)
+
+
 def _complete_captcha(page, error: dict[str, Any], retry_url: str,
                       retry_params: dict[str, Any]) -> dict[str, Any]:
     """Открывает SmartCaptcha, ждёт ручную проверку и повторяет исходный init."""
     redirect_uri = str(error.get("redirect_uri") or "")
     challenge_session_token = _captcha_url(redirect_uri)
     captcha_sid = str(error.get("captcha_sid") or "")
-    captcha_ts = error.get("captcha_ts")
-    if captcha_ts in (None, ""):
-        captcha_ts = 0
-    captcha_attempt = error.get("captcha_attempt") or 1
+    captcha_ts = _normalize_challenge_number(error.get("captcha_ts"), "0")
+    captcha_attempt = _normalize_challenge_number(error.get("captcha_attempt"), "1")
 
     state: dict[str, Any] = {
         "success_token": "",
