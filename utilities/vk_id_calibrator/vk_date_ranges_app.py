@@ -45,51 +45,21 @@ if str(PROJECT_DIR) not in sys.path:
 
 from facesearch.settings import load_module_settings, save_module_settings
 
-_REQUIRED_CAPTCHA_HELPER_BUILD = "2026-10-31-browser-bound-init-2"
-# Встроенная резервная копия helper-модуля: приложение остаётся работоспособным,
-# даже если пользователь случайно распаковал/скопировал только основной .py файл.
-_Captcha_HELPER_B85 = r"""ABzY8AlT(<0{`7z{ca;ia{pgX(WZf$VN8ysb<S|OM;ktWz>Xd7!n=0<&?&@-8cJhP9GWwfR?!jgdTqyneRgadkl=vx;gURntX=JLKm7{iE96O1Roy+)J<~lLO6%B&aOdUB^k;Q-b#?Wxs-JykbsUdYx5B|{FgRetqhvQ4JiqcRYyM4>b))TYu+w7Wq}O~A->lSXwb@^0Pi7Bik7rNjpU=+V-^cSWXZP8wyQ6479Ph7Q?fXZEqi|<8VY554hx2dP{Nwqp`M+QeNcX|p?ApFRN?!GcNq5)xR#s;JF~2$c5euDvHM=*zH9MPs!tllX=KK@*?>A{3vmfUl!;4R6Q%svy*<iC%`2GWYJW<lh65-#|*$EVN2F*U3J@OcI;RH*9=jjUMIAila%pUMoKx03dO{vLW&p&}Cd~=y$GiDF4v!V%5;2He;U^Z>A_v2vHd}SvXK!2wUOM~w}%s+$w-hqZbg4Ub?C8NDCh_O|e@eDql$nsaPr$n7o`tPIpEnW@u5+3gok*D*o8PJetzK0#gACHs)pu`V=0@!K(>aDA<Hi23vv-`7$axjQ4r$ksF7X$K~2(sRU#}D52aEw=0R(e2N*6H-d$#@iWIxO5DMx%uJgF%$|Nf-^{m6bPNf9LA!?{$9r{#)<7#@eiQY3<Sr&GohB^Xtv6QFMre*^0)4?PfR#ljbETR+RE#91Y~}D3-tCqx5GI><@ckKakJEzMu4>(Y|~hrC*Y8Kj4iW`pIrT+>$N53Xl9lax?@smhWE~9P!uVQ6G|fLw^(p@*}*X=LY^755#Z!r}Gi?cx5~2G2reb=!}AR+)rGrwMCUR*tVbeEw&wYlZ`kTHL$A9I%~ef-i-!9YlXodCdVp)UA+Ch?QrDshq!%xG={2z8)2MuqCI-7Q<mO#gC+YzAh4tg<c#sRI~)bQ@J5>o9r*hJdyYAt(_rzqhwmK^^1&li(}o7QO67H4b}~BR?ZUsqFxiFS@Os<PFc`R4uX705g8>%=ZHEMbQ)hn6dRadF!x8ni$IvDuLWA`%Ta2vZ$K5b&zv1^|(I5PST1Ej3YBzA9i47tP{~Fxr2E&BCPX7R#Wz}F?G2?j94+ndgFDp;vx^nIH(I^_Vpu9LvKaTt`4#e2?!ohYYiT0p>2Y!DXv~ZAsLXaDVF@#CnW@|KNKrr@uW#qyhPsLth>uXu7MgdHa0i~14!Z;kni9dkOQ5_9piF%d?IGODQP%ZG$K2*vmnTJoYTh|E-<v~(R<T~-V+YREFw;u*ZzPL`$Ff4;@wQ?-4f&JiL`p{>5Rc9}?*^7EDN>4C})>6HZ^xr}&dpOO3bP9QS?VM!KvGsbsSCpkCYo#a70DU6~`!FwZB-9%AleI@3V9rCa-wQecGFoRJsPFFtF7RKA{nn3zly4g>f<-VK`27xuk`^BZ&Q`psxRm}GmIjc^Pe20S0{M&58-zNS(Lch&9a_+)Ahtgm2cx4VzNA&|5iXK^C4vUR{0_Pa)DyzOz-ZYyncb!(`X;SrxNu<cQ&<#eA$))zJe2g<6wwQ$SM3<2CH1H7bvh_hI-N<29m9)BO-L{hhDci}D_ymtoUBA4c;cyq9Cclu)r-5k!M+r$+uk5Z`cXH19Fi!l)#U$$q=FIB2$~LG)_CzNl`LxdM%pG`+_Mac4<vcQmqJ>l;l~$1qaTn`Kt`hUeX-WVQuzqTeH#Yq6MYe#!bp6@-hb~MHowV7^9RUxO3DUboF8Fv`JuyKQ;!;hOa-IpcN2Ht2dxOX(EA7ch3m+s&Np159b$hmg|{<`#zS|luE|NAxpAH-;{~}3+>dFz-6&3I8G%W4Tno3ogFSCF#!=wEyU~7aVig?fNK<igoasT1GCf$vxLp2o=2PW5uNS(bPE;UWJl=9gwcR8c#xJ*4S2zCYck%CP&Tn4Yd=6^kgl<S~sc*E_UtC+;6mxsu4+kz09M*zV@T2Gi?Zop(I|p_48+NH6|1XIqpia=i?g7D3DM+(ztZ(v8@@XMv9^@V!bque7j{bg}S0*6U@r2L9QG}X+sKx6ZZo9nr?a<#Dz&M6o$c;jiSP0T>^lDd0yNB6~jXDTMG0@kGhy5^d>l<sE6Xw#F;6~6LC;nDHnAB^H!f@+<z1o#)P@+`OJo&?|PimV*9b@Pp^&=m}2WbrWJ0=>%38)w_b$#dv%yi})Pn?V^IEA<lLj`y{LE<{_+Tp2{v^r_rLMHLO15z{1T!&5%VUZkz&g#~o8FAD<2;8htq0e?Q+L+o?OqJFE9UO&2r9^e;3k9VgOY-}N9hFz07()^Kn?fDnX3*f(1vXz$L0w68DE0xaw4`FW4qv>K{S1n_f|%p4GGU1uoZGV}?3Jr;HTAuR=j3UV_Ujnwvsb4@)P)I1`cs1)pq$FLUTRU3Vqv*uE2XhU99K;)L>POf%^VUZPGL4cQ?wkZ3?(Xq9CiF*D1;}fY~pD&b|$8>Fqc*y>FmK^J4Wr?byoKSn8Vwvz@bS5q7HXfz`j)mD^oO3C!mcf>>5vKojb#&Yx!|15;adw8y&H)R*K1$2kDirJkCVPLsS{@DdDWbB*Btbp@7aP+JgUfxpl!=M3)cV)>-%=-@q@R6uuY6hUxrsVsYIn;1wqvO>r)HDo(9?QUPSB7(z=<Xp4VaH-o^Ao(v!JTabYi6|X1@t8O)O3y9|rVI#Qh_G+`g7%eX-_<0SJ+QJf$iLfVy_TS-pD)it-py)|zsUWrk3g4Vfp(5D%`Lx@SWNhGO@E<!@-ma^a7qlO48%T{(UVJp@c3>8=)an4w*>_zr;z{^FXe@x)=i>%fOI4_nD4&+t5i2cBlVU+~8HQyk&EV+Tnb3#~d9V82Jy2oZjgmKTyTbRr)mq|kW<}Z}sgdcYKyZACOb^4Li#p?&W~M%_0pzMthedSaE$Rd{6paYDZ8FS-_r?P>>xkK)8WhP^$LHmVFqu8%cDd7>5fBY&j4M1IoBcaUFfpNV2L$ucA3;m^I^i}*3n1&r2Z8Es`3cM)&NR@vm5i@&6A3E~wx2{ESv1nm+Sa^7J5r=_MnoZzNHU>Wg!Yem5+G_PhC+aJ_KMU*C`vofkz^cm+Xc5*K%UebA@(|dMS{^T=YDR#$jzi^pCvM?q8=%TTp`E^f`;23b$J7;{`@m(;Pli=zsCZnMdL0SJ-JO4U&0nFo$;q6<ECUC{T%+CHgL$F@NrMA$xy}@!YKL;d-av8*I#|}m6lpDd_l7*lZzziL)U^N2?skd<6ALo_$f31_#Aq!+Dz4j6}x&1q&{u=kh^{qrtdRMtk#HBq8{OzNp+Km1R14mG4B(BX$Ss@(fbFqaFE5D*tsx58AXA6`mhn%3DWT=X482{YM?U7cnFdru<s+(JlN$Bw#xyxp_#I%eg02%0Fh8Q6Hn!8h|&b8%eT__KVhssVMZfHX7Ui!M&tGB>@GZgOyxY(SnIER`z+WFHuoAu;Da_FnJ|Q;CU?ebgfiyephS>M(&r@pP{~OvgMI5^G}`N+05s7=6JJhojE2Bau;@B1MyqZ<dC=X1q`?5b(>%8%;APQ<KZrYNEszUmx-k=oHZB^<5-Ad-EZHd74{yY<_-rfvvA0(wub3M5Tpb?|P!=T5^C|vYM!bCb%Du>E<c1_Ofr^#%f>AK4miPe2GDl!B$V(QW5V5oXb@?bEot|td?&G_clCpV%%7dXLub6r}LOV_;u9#f*kV_M#qd?iRPG*g&oJDC_<vhi)U7V+kWo6?_7?mgKg+X6s$m2;a88qww%^ls{$dYWLEMLf{g2en3L6xV%N>#EfEs<4Ds*fOL(%B9CZO}-Ut8J;wg*j+Y0P_`Osms$vTS#R(a_#t|eS=CUM%<b%+n5DCmUb*0^deV0<aVUS4UHfKlqxcLAO<9PT;rC-V#KvpVXj8JDWqOpiC*6EWN|0anzR*dA1T!jVb{~a?G`u0E!j_{z+7JQu93_e9W<blJ&&I|yRwu9+Y5qWXRGfI_QXWU?cSC1F)ZPDuf>nY;*I9|W@<R2H)v~7>MI(~s`XITq~{a+f%0i15AvWDWcfiGi5M?#!{nu)83;|Z+*0jacIw4eggxf89nq!4%nE2^5}oJ7O{7s(7Tt!b*6YU1qC*>42zG;tSuq@ghz>M}Fb$bcpM<o*Blfb)z(F+VN3bomNR~#4G^xyFQV^u)bkZ!!`ChZ+rLzep10;5fMPz0?VXy8-hiFST)J}&Zh7!oAXUk?LD->iFXeI_(ELriGoVr+UxTSQJ46|lNEM3_=zGZVo59^gm$gNhg44nQ3o4HISXMD9fv<0g$Rq<<+z7|hpG|pD`QyV2JJ<c%{ZRaS&pju*STT#@PRFy|0GNDsHPiuvewP~V<_;vwWNCnMUy!>b_pI{Vxy0)3h%0}iD)~P|1kp0}_`lW?^^=2!3*d@kn(Z)6%FzfLntyx41ZSyZ+F!rxN4vQtlSXI4pXMQravu&zNOJA;V!-mORdX~^uyg|>eB+`sJ`%@8QR_**L2{Ee~BO{@)1?IB32t@9{+@&i;o|_uh28-z?O0{ug<D8PJ%#4xJK<O7wP_;#bTT{B-R=-}TK?bu(+Mts4Eo)$bYw%Oq%GhRA2m4|Y8b5L2RZUD63_nW<>uT1ZU$Dp~Qrou4|3^xnPEy56w!}bKO=nMMp|P3Tp2|XFwalG&q2UGcOy?46G*Mv>k`-ZCx~dnKqn@Qnm0F|~vY=5F+LX~U-zbI3i(91^V{2BWBF&Sb#0tAuxM=K<3h-=r@s-Xp?Oc*`>wo3e;Hpi}23>8v{<gql?P9_UcEf6+uG$ZUP1KI$UKcsDZAiLAUxcmPe|mb|0_%HKdO(vF=o4AfZQ8>H$MorLRQ2<N^KDPLZE+ZMImQ94gsuwXE6=f!bA_Nb6cHH4GWLQaOaya&AMsFV&9V+)(c?nGID~kUk4daP`3ZXGB#s?Bn<j<U5Xvp?#0cR@fot$?%&QQ(MJgWgt-ajwz#k{O9iH{Txgg)@2SCO1?i^iP%oV;WWE4i$M$SkTJMwu!Q!X+(ev#v;f324(kkT6_Ka825j4aex%Cgq&XW8tJd3Op9VtXuoHy+OJ3S0w0QxNAt{)Y3f7<mFB)ZqsK_P8bSDxSeE8Y@;}^2N$Q(_C`A8W#M6im2n3;jl!(EfX%fm}?;jx*Xv5UC{?qLkf`>Ns275RW0_vrT=0M=Ew*Zavz4^Z1z|y+k@GJ0718Iszu;2P07uQy8)91&H69$*14zjHuJPJwDip0+<YU0eq3n)hhA5}FcrjpC-bCRNLq>FWEzg|9AjiC=;s_AtN5@r)Ql<gm>A@{0y0PlLYmeO1iXuIM2I1~DS%A(399=UtJ&K?ZoN~9w5tY5OtEizGZ9-QyX4g>$ogm5RfJ~737RUp(I5$KBu0oH2dClSWym<)``YYuZ6=48YlL(iKo98$P}tXm!Q+@Xc*TKmihnZ#%utekiC*L;PjE%XBF5`qAsYhm_#mymzP%H8i;u-5J=#o}S$%&z=<argDcL$AnVHK-Z^OglPU>?jFy9T9o1|^N0H(sXLDtMZtnzIGQbqn9gux*qL)*vBVYr>_IxV)o{^A-eoVx*Ghg<CL*48HG%s54&angQa4gSnY2)3zH+T=$+|0?q*#DTht_`a4zh`tsaTnELNgDr7T9uk!O2`?0;2SETqK6=JB_@kY;z2P*QG$ES%{*7=y{O4fX*(|oX9Cu*E7?aaryu+jl(zTye;;AwYDS37?4$6#1pk>6&@1w60DIAc3PM)z)RCi&>QE80B!A?I&qCx&6@<aL#l_aMh!G1!#xwx2v)#*>A4g<7mA@Y%&9AO}C<M8D{kO==Z0R6pE;f6qKj%mHmW#%cAgr1eaEvO`AF&heVc8YTNCY%3(fVB5HKodO%;Gw|?7yJWC0unp4vU0Im)*OQrEBB?a$a6zHhHq>VHv^BKcMw%%y;z@aa_`f^vY|L*FxTX}TNlo|wqcXL9l{^rD>-WAx*U_3S#)&es#rN?RZo$XiX<Cyw_YJ|J$#He);4igYVSy6N?#3v!w$ZN>8yJ&1U)9f_fq$jvYZ?~b!=~O8aj?M`wqHxj~1sB;MfydDs?3LV<6F8qS=`masvhsm5MtQRs?t*c&gx9g*a$oo01B`ZQ5UmwccAPv<WsRa){21!9}#7A;kzGhBzX6&=5;#l2l5}Zxv;74)Tr=daCpru37N48L}ex+@lgDeW10pzVP|QX5X3Oz?>DQ=ya7c-E3NH%sm0}mktAID3-@k2@#(5NHWhf>V<cH9~TU1Hl&$`NR*sORyP`}_UuA|ANr$8xW<L(IW;VToDibJ?gn?gYpt#-XB?XrwOZn(#41T%+hp0nm*r+1nrzhDLT3It^J(o14?eF1FO+IN%AsvmBE4PQ9^6(4$9Ci3;VPWj<6PPNHgn{e98|#HD#t&Pi1iX8>cd+CAFB>&)GY;>=Js1I)g*E;g+2<Yx6P$&vKv4Of|iLRHP!=)fYucl${dm<kG7pj1o?oeU;xHlbf#gi_CwrAycrIXm=`|q55gVXwFr!1aX#_$x6J5gI7dKQmmYlAS1jl}oGnP<7IQP26Qkf;;u2ZE{<e&F#I!2opNXYG0>*&g&&$m5K8(VF+jFRillHL&DV#V9YvBu@lBZte0u7{PF*zH^Yk?0cJMt`rnJKLzsn9C!><(M90Gos84hI(C_DdP_c$of`#pe2I)1}Y=kmzPRA1&6(MiUn4oI4olNZ*2De1)v$tM73;cjn$idsWy_i}+u{joMUQ&Wld^j%mKum-!H4@ptCmqONh1r4G@gBs}68DXyzi;ZXHerq!bw&F%Z11yG4*=TSE>KuvN;92^HDM5j<N1zJ&H*DF?QadvDVnj!7LrK7GGflDm+;#h;$VSW~Y$N634lxE)_?2LgMD1=hbZFYB?W53L*o+fJUM_agiQ!_SY$csfK^nwI3#IShD{QS*+w4Hmi4fMq~!%+zRNRF1V<0GiVNYj;aTet#YHV>Jj$uy^>%eY2q9+F>>h2+-qf^O4NdN!@0?CimkTJR(!RavxQpi5!nK!ELd2#X&Ar1=lSqMyRHb#LK@>2RuH^!IJp9DEyQ58_7E14FBPPJ!6GS4B8De{aTv8!_QoL6t$_CSbTyjD`%i*{!}KQ|)8!PK;9V4nKvVZ4glP8YgNi7rud_9&)+Mx4>WUeVwHmaemW8vj&+-FfwDo&hW_KNuBL-XvjS4?EUE=VI>aa<nbbgn!mA@(BVwVf%qK*1YZ<m#o}vCK{G|BiY_`*m)XjpWaTNAgp=7t?L|>`7eU$;X=kmXR5g<XB@3s*0~nsktuM@m=|yWOB!xKr=Y;^R^;mu~nFuk&4L4e>f<+vw#6?)lD11p19g6l+*2wW(E^MOgmT2U{8f2-MM=%_Bs3uNxuDtD(7Ev-iDyz4PsI-^}^)e6(=ma*Y3!?L_*SP$X=0Iua;Z`S%3qV#yki}Z$UuoFP6k6+v#0e(Lq@hGz3i<bLl)RTYEm*~BE`SFtNF->V$q8B!gXuyJ5(?SOpFT>J4|?E|6o1*>nyScDnMJSxcVe^(LOVLoER*x4bL3L4MyqJ8|E#Vg6(pspP&GWlX2lh9S=SI{*ncAT5L*rB^5IYlJBPQ0!ur1)kBcRizEmsC;uuy~_Np&=Y0wU(JsmBqU%IyFRpb*_tIkB#EN%$dDdm&d=pzEqC}DQ7uk}(HECh$XB9U{Ctg8;pHbh-tE}%S#Hizw!*BpweT)!(scPiD{WB?jll$mdhF^(35oXL<JW%YiC=QH|A51OO!baeg&A|XDd!}i;`z)p1Xk%h5W1Ki~QwCLtaK+{GE_K&vLoQBa>;)jD^+ZgbskVoC+L5^PS*tGrQ(E}%~)m7tX9$I#CY}+|bYE@g2M#9Mn`UUybP&?^wdmf9M8ab&D5$(Kfiy~I82UD2CQxUBT^f8@pMU1VhSFT-WMwLn&l|7-ja8GE<E21bpVCA~4laI^9!(?In>02pEM~imF=z0keg)(P-#Ria-6<GdpV^P&~lt{*0rTvPIN|sXfW``##9s(_=#jQR@c09)((Eyq&Z~N?fXxJ%f(R>8RhH!^Q@Gga^G>xD*(Im0*1<>fBge{zcMt+abr!Zm~{qaCIQ}oIy+H>4DuV25~KF&>!NdtEQ{CE2}<^M?*m5X$;_OUL&C-tRhSsB`6N0R=TfPVZinq+kWpvzIaG~P(1Q;tJ<k`9IpHpfgzi(1Y!MQ0os*-<FTpm1k#AL_QGLWO9kCdXXCunhc3pkI{G?mT+lT?t1013@u<Y-y(vh6s130=G=2vop+zsR<I0uQb2Od&q?VPHKLahQxnm8f*hMZ-Qzf^j<c*|L5aB^4uJ!S3n8=C0)TdI1u`IDzIj0Y(L<!EU+KVl6%>rm_^jfcpQ-o1mpZT2NrlX7r@VUK%>E0pntb<URq&tx?ype+XH)5f^`6E>_kcArpNbU7Ysad=!YOS2T9m(<Jmf$_zx1){{jRZNW9<rB?SD{tCXE?#xGcW<>_h*7K{9Po8w3b{c>U&ko!!P%^29+cr^pv=3;{z6A?n#F!m$R9(eF^dWVK^JY%8|_5K$0v_*k;YSod*7Ma82KF+@+X`_W8R#=##SP~}I%!nyVdo@$MQvBQUX+t2RXs;L#;kbgFUP;0qF|f8FsJ4lIcodgLZqB*2<h*4}UM>qfX!0&N`k9sf1RK8u_7VQDtk2|D(^5$zHlosBv8cB>zS;sqUO(p~WGv*sl=A?S|Ju8B>G^z~T-PcD1uJY>QhLy-ihAH)tJQpTF2R8RLVmuFcVuAk^aC4umD)L>qxoYKS~^Y`2FH4X2Y?a<(p?+Ehs&HZ%Pj(94T3|wKI2;8kGi|OR=0lHdiLw`%o`cIZnCJyu55h>N~8w@YJ_Mf(S&-*t_7pLb9R3Q_L;z!K@WE>>{q{H+3Uf$-^VxCpxD6<PhY1mFwE2gDYmFRS~5!~CM6`1OFj}5#V?}+VNO+hPq;y}#T-=Pfu-<7xrK+XBb-%T(6E6lz&A0x3<ur*m=2t~J}8&)W)L-LEiE~}PNU!*JFoIppm`lMAYf?+dfyMb#EPponumvnO*A+*p~ZA>6s#1W2_l_ZoLWgFXk^xxCl;dhgM>^imu=`1b}S7!oNzgF&Se|fQ8#67r=I1<A-5%$C*(5fa(<)8qP>=C+~AjjO^U5Hyy6^?Dm1bqa*ny$R5ddLs->;eXAs8tU~e44i*@)ZVG1qWu=4l@s^Egxn7)Pb=*8!Ys<~-k^cKIy$tNE@A}358?S&_abJ?_*xX+}CqdoTf-?L}5!t*b@qI0Be!Yc!}gCtU7LPNK;NZM%=7H#CYqS2+vrgidVk3NZiC<S}@Wn!#FrJ)BvX<_Iz0A)GG;MTMQRCoFY?@<#o+QfUhj(VP#tqBc7u`RY>U?%1P*K(!at3`=ik}fBr%_%dPeQbk4;HsRJ+_qF{pdPofn#<h|Kyn3z;;WAVZPN;}AYG}&I%k`kLZo4GJ|AHU9b07&aG11cbITH>CTVCKI!Ll;w%LueVj60ZQ*!f=8og)^#uC+Wd=8$3je#7HmW{)3t~rwh)3&w1II2nt_`Q@|$jOE*yOad8@6&6`PMA*6mGYzU%<#s`)vgAhj+d99==Zz;<;61jlUUE5#F%@nT4u3V&`S_6v6ywcA=a#cTwVex_f+`!XXRnJ9=A-I%A|(7U&Ag+(M8ByF0NAYMk12xDn(L7Z=L6uvuaqY44mNzp{5pSNR_QaxTDJL`Er}6`qH~7J+!g{fL0FM(n^h2Wm#+i&g@&=gQ~Dr8vqmORTb0p0%e%#9Je+Vmu1|Omt|;k-*XCg{H4uKPZD<m0a8&1rgZ_oHNB5HgQG!H(eKn?WMF2;xrVBz@UUHe*{Q>h!s^Y2{(^T3Wn=;ua@Re}caW%j|88<pGqRF?&jvqz)`%<tdAajiTQcq3_PE>#AP;{`U0GD2NK{sx;Cu7!AS=eRNrS2C5xIi_C#2Vo;^ipPA}oEd$R2x!R(Np-4ElF{)na6V*BtI<j|^3tW)5D%DZKgdyePGs6%hUC8K;=!xRY3FTr1Qj>7ne@bF|HH05)d|bzE}ASw%`Uv0}FID?&y&%@B8$-{lwXC?uMHN_W6L;{KeTp&!d05*H7LOMKi@E8s8~;f8f#dKr*NkiAtHqtbl(9VjKTr*0`mmjO!k`UgwyoG&Wk>TO=CrQJ{r=}?A>>@XnQD+Ttb!dlwthCC7ClS)kT%Y{jdSJ@XPtclC4z}3{X5pDKv{UUyJ7R7FDrEo*;AaRYdu(-hB5yBeXNx1&EEwg`&l--u;qLkKR6>Dvj6@@EXg_1B?y-`8`{e=sFW3j-s6lza?$x`6woWr^0LF^^xw;E~e0S+MGp60i3`rb_ASpA}>ZFakE3FoVuUNZ=B!8NDpLE<mys?!T-3mI?>1iBn&0Ws0<4tzp5pj-4`P%32TAQ9k*yF{85jogi@c`mYFb?2scq6qSQG!8~bb+e-f5OKqCHgOwj(rhiYR3zkg0$)HnZWX#{m0Zqr;1t#*@5jroKcz?!pCE$iN&eRPlQb9<t)-`QC8B;VoFi)PQf2bKRt_ZXi8o9!2sd*ROP6w~BAm}=oL@=|J5w=POvAdII4<2;g#{U}qgR@qWv<d<rK&1H*|anAVKj8L_>0&^J5|%r_AA!q4^PosMkAVbvff%G;nc)(08HkW{P8^0y;fFv5?8M~iKSjtQlLEcuUx9kKt-?DORYb7u(R!^Mx*P2acTW)ibpcZP~|G^qNPKHA*I3OG7mumdRMxJeDHRDVw>6~r3-Dlf8?QkG<;Nc5hg)w9$7(8rVV_9aARqh7oLjlO6BtYM-iFjPI~31c0cwBLBR?nQHYlB;sR(C9gqKfXr({XCTI%cmn?D0t+c;9L{b_pDvczCIMBx#gp|YAzA1Xi>PDN?Vj_(-8VqRx&9YYDB1ZiA1+QOg)a8;!s1}<Oua=K<2y-*N+ZXxmE(TD@Bla8Wb-aW|RJXHd9D!B9L}#wV=D3FUcnCBe237zUwfo|4afRp+;rAbAVIy)5!Ywxcl%~yN5fkYSVZ{utcDZI`4Kz6>BSfTlEwKz_ixV*&lTQrzMea|n_xx}->~ozq=SP8V8>DHOVCzd<3TT)Vc8vViDDd|zI|nF(#02arJ3=71>%U$*?^dMXR(PIP(JU>P8!D2_Fu9C5e;K>9rL6{X7jKSzV9uj&qHDh!)Og?><^4u;{Zec5C$*<p?MRCl#w0Ftenz=F+ow9t{{-I|aQ@o<!^1eAVnc=j3<`n|H4eMrGb~)>+l>)SL%M+;XP37h!R(I)VHXy$=hzG0T9G4C(P8voMgdYN={H(k=Lko%lsGA$yd`4Agt%VLt(#YCQV~qVs_Y6;vk$Ds2zYFgTcC{tZ`>N4r|vW&-yLyA@v&I9A5**73k3H@rpDFqvQ#VO+C_}4IvC&sBR`1yvqw$TYhnGm<<;uO_)mWlk%+n9$C->=J0(NNSxYZEXF<zUS-v7?o)PHUM^T#Y=hc8OS8VR|YRtwT4E7qrgu)E|Pt-Kz?txd7o!v~ylL^)F>+f7^80zBD+nN-;t&t08)nM0xZu1SSN0BcNcpzV?*`Rlla4R++2VOl&c5z&P;Jy(kTGC^0RCW09;R*IB4P)w8X6m#WP(`H>cRlf{uWvA4`hMOJviR-^E!#ydps-)pY;`(K?c1<mmVvny@b#nweSHxG_ESe;bEJ9>MlHN{1-1{-E38!sTWyE+sCd;u@&S)D*p>~(oy+T@(bO8*gR+V)0@*gew#(D1knVC^lo{^5083RF3jP$};0t-78dSUtF0KrZe^|tX^Yc`D)^fCY0dfBK*RH(liFjH5p%rUx!J8isKn5U6y^~?FpcpR(LI&<ygRP^%Vsbejm`wd!T}`9vbHOM)b#X;VeO%{XuBwLW)k17s8P0=G+tSKTxmBwyda#$qRJ>!jLS;&uPGQ3Sga?PG;EABD!iw*ex@|~kxdK&%Cq%!43{qaU5!@8f6n7R0Au|N_a%mpqlc66{pu>&L^0e6QS4JcM2=q?+*X58)mE;R0CD%83g~jY%FYG75$i0EG{|1uehKHg5ynTPjU%JQS^d;sM|0=|73lh_hNtw)30M7ygoNI$J5QdM-42as-+`3|*9QDyv*Q0vcVew{h$0{%g8uYG8-GQ3NYu4)FH81QPW?7g>Mzo33FeWWYj^PM4MM!LK*N?9p4z7-(VK7RLysqExyV*L|V8#HD#lM#`5WUQc6h%_Pz^Mx`$CTD#S;i&0oT`h+F6Ce)D0MlUx=}H25lY>t5K2sCxR$~R<=vm0M^%vkV+~1M@HV2aRb7r0K(8~-!EBi`l#p6Y(VbXhx#Vzcs)|~QVXF#{y%=asY+3Y^n6pxZtgdXQL4mSvi5TYa!Ld@MKoK?ePcG10mcWF`EQ#RQ-Hm9!kQJ~YGH=R*SCv!C<D#pP@2KDg>xXf&z#^g_rcp@kQ3vx^ye%&C15u;7<AG<r-eTFCqVRJT%P}<yz95#~QT(V4ir#`sA^*zTh*!km3|Sc5&@2IZ;ebLgiw&Qhj>|^fF+!^rWVsNs>FHn`g<UoursvXHiI0dDOf%Yp<i>!z)$;4`Fk6h?vbN(?JqUf-<Hck*;nIrYr~))CUmDTEQWAVyT#5p;v&qMWWh`S}x6c#%fr2`N>PrNP`AZceAGf>fR;u*6q(Hhcln<8hWT+cWs>=ksIZwc@rNzeoi@8+9gci@_E!<bXV4NY9dHA(WI&)2nw%!wSm?6Xzh<nR6TEAXf+nku}*(TGw#@l&AKWx_jjeis>lonb@JJX(jt=u~J^B*jl&mVpk5UMEx%=dKj*%PJ%FC=t<2P-$>eKd12#zjjpHB;S(W-4szI_^MRzm~hTE3HdAVaaYZ%gB+QUsjSw&oaFEjl&gD`F@i5uAOniJ>4=n&Eq`~ku?8|ABt#RI%=#!v;7EYp;m9(7HHI-77rJcNQecN0i{uqr)4*h1~))u#w&5!3=Mf6qK;x!7<+hIV24y3vV%g}wlhw8%@<8ESaWK*C|uQ8<vXeGYs<2xeYVORw6g=*a<<plJ(DdRabafJA-kQt%Pd^Z`DAwv43KNN6)w00F$5vkS5{!qq>v_`%1(!F{OSl~HWv=pj$+t1ynZ80T>R?7;Quds4<2rVvj6}"""
-
+_REQUIRED_CAPTCHA_HELPER_BUILD = "2026-10-31-persistent-browser-session-1"
 
 def ensure_captcha_helper() -> Path:
-    """Найти совместимый helper либо восстановить актуальную встроенную копию."""
-    expected = APP_DIR / "vk_captcha_playwright.py"
-
-    def is_compatible(candidate: Path) -> bool:
-        try:
-            head = candidate.read_text(encoding="utf-8", errors="replace")[:12000]
-            return f'HELPER_BUILD = "{_REQUIRED_CAPTCHA_HELPER_BUILD}"' in head
-        except (OSError, UnicodeError):
-            return False
-
-    if expected.is_file() and is_compatible(expected):
-        return expected
-
-    # Не используем просто любой файл с таким именем: он может быть от старой сборки.
-    candidates = [Path.cwd() / "vk_captcha_playwright.py"]
-    candidates.extend(Path(p) / "vk_captcha_playwright.py" for p in sys.path if p)
-    for candidate in candidates:
-        try:
-            candidate = candidate.resolve()
-            if candidate.is_file() and is_compatible(candidate):
-                return candidate
-        except (OSError, RuntimeError):
-            continue
-
-    raw = gzip.decompress(base64.b85decode("".join(_Captcha_HELPER_B85.split()).encode("ascii")))
+    """Проверяет наличие совместимого постоянного браузерного helper-модуля."""
+    helper = APP_DIR / "vk_captcha_playwright.py"
     try:
-        expected.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = expected.with_suffix(expected.suffix + ".tmp")
-        temp_path.write_bytes(raw)
-        temp_path.replace(expected)
-        return expected
-    except OSError:
-        # Последний резерв: временная папка пользователя, если папка приложения read-only.
-        fallback_dir = Path(tempfile.gettempdir()) / "VK_ID_Calibrator"
-        fallback_dir.mkdir(parents=True, exist_ok=True)
-        fallback = fallback_dir / "vk_captcha_playwright.py"
-        fallback.write_bytes(raw)
-        return fallback
+        head = helper.read_text(encoding="utf-8", errors="replace")[:4000]
+    except OSError as exc:
+        raise RuntimeError(f"Не удалось прочитать модуль браузерной сессии: {exc}") from exc
+    if f'HELPER_BUILD = "{_REQUIRED_CAPTCHA_HELPER_BUILD}"' not in head:
+        raise RuntimeError(
+            "Модуль vk_captcha_playwright.py отсутствует или несовместим. "
+            "Обновите оба файла приложения из одного релиза."
+        )
+    return helper
 
 CACHE_FILE = APP_DIR / "vk_dates_cache.json"
 APP_SETTINGS_FILE = APP_DIR / "vk_id_calibrator_settings.xml"
@@ -162,10 +132,11 @@ class ProbeResult:
 
 
 class VKRestoreClient:
-    """Клиент недокументированного механизма получения даты регистрации."""
+    """Клиент VK через один постоянный браузерный контекст Playwright."""
 
     def __init__(self, api_url: str, pause: float, retries: int,
-                 log: Callable[[str], None], stop_event: threading.Event, browser_profile: str, browser_executable: str):
+                 log: Callable[[str], None], stop_event: threading.Event,
+                 browser_profile: str, browser_executable: str):
         self.api_url = api_url.rstrip("/") + "/"
         self.pause = max(0.2, pause)
         self.retries = max(1, retries)
@@ -173,83 +144,187 @@ class VKRestoreClient:
         self.stop_event = stop_event
         self.browser_profile = browser_profile
         self.browser_executable = browser_executable
-        # Актуальный браузерный контекст действует только в памяти процесса.
-        # Сами cookies не сохраняются в SESSION_FILE или настройках приложения.
-        self.browser_cookie_header = ''
-        self.browser_user_agent = ''
-        self.browser_client_headers: dict[str, str] = {}
-        self._post_captcha_pause = 0.0
+
         self.session = read_json(SESSION_FILE, {})
+        if not isinstance(self.session, dict):
+            self.session = {}
         self.cache = read_json(CACHE_FILE, {})
         if not isinstance(self.cache, dict):
             self.cache = {}
+
         self._cache_lock = threading.Lock()
         self._session_lock = threading.Lock()
+        self._rpc_lock = threading.Lock()
+        self._process_lock = threading.Lock()
+        self._helper_process: subprocess.Popen[str] | None = None
+        self._helper_output: queue.Queue[str | None] = queue.Queue()
+        self._helper_reader: threading.Thread | None = None
+        self._helper_stderr_file = None
+        self._post_captcha_pause = 0.0
+        self._closed = False
 
     def _wait(self, seconds: float) -> None:
         if self.stop_event.wait(seconds):
             raise InterruptedError("Операция остановлена пользователем")
 
     def _wait_after_request(self) -> None:
-        # После ручной CAPTCHA даём сессии дополнительное время стабилизироваться.
         delay = max(self.pause, self._post_captcha_pause)
         self._post_captcha_pause = 0.0
         self._wait(delay)
 
-    def _http_call(self, method: str, params: dict[str, Any], user_agent: str | None = None,
-                   cookies: str | None = None) -> dict[str, Any]:
-        body = urllib.parse.urlencode(params).encode("utf-8")
-        effective_user_agent = user_agent or self.browser_user_agent or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
-        effective_cookies = cookies if cookies is not None else self.browser_cookie_header
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": effective_user_agent,
-        }
-        # После первого браузерного CAPTCHA-цикла последующие restore.init
-        # используют тот же ограниченный cookie/header-контекст VK ID.
-        # Значения cookies остаются только в памяти текущего процесса.
-        if user_agent or effective_cookies or self.browser_user_agent:
-            headers.update({
-                "Origin": self.browser_client_headers.get("origin") or "https://id.vk.com",
-                "Referer": self.browser_client_headers.get("referer") or "https://id.vk.com/",
-                "Accept": "*/*",
-                "Accept-Language": self.browser_client_headers.get("accept-language") or "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Sec-Fetch-Site": self.browser_client_headers.get("sec-fetch-site") or "same-site",
-                "Sec-Fetch-Mode": self.browser_client_headers.get("sec-fetch-mode") or "cors",
-                "Sec-Fetch-Dest": self.browser_client_headers.get("sec-fetch-dest") or "empty",
-                "Priority": self.browser_client_headers.get("priority") or "u=1, i",
-            })
-            for header_name in ("sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"):
-                if self.browser_client_headers.get(header_name):
-                    headers[header_name.title()] = self.browser_client_headers[header_name]
-        if effective_cookies:
-            headers["Cookie"] = effective_cookies
-        request = urllib.request.Request(
-            self.api_url + method,
-            data=body,
-            headers=headers,
-            method="POST",
-        )
+    @staticmethod
+    def _read_helper_stream(stream, output_queue: queue.Queue) -> None:
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                payload = response.read().decode("utf-8", errors="replace")
-            result = json.loads(payload)
-            if not isinstance(result, dict):
-                raise RuntimeError("VK вернул ответ неожиданного формата")
-            return result
-        except urllib.error.HTTPError as exc:
-            body_text = exc.read().decode("utf-8", errors="replace")[:500]
-            raise RuntimeError(f"HTTP {exc.code}: {body_text or exc.reason}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"Ошибка соединения: {exc.reason}") from exc
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("VK вернул некорректный JSON") from exc
+            if stream is not None:
+                for line in stream:
+                    output_queue.put(line)
+        except (OSError, ValueError):
+            pass
+        finally:
+            output_queue.put(None)
+
+    def _ensure_helper(self) -> None:
+        with self._process_lock:
+            if self._closed:
+                raise RuntimeError("Браузерная сессия уже закрыта.")
+            if self._helper_process is not None and self._helper_process.poll() is None:
+                return
+
+            helper = ensure_captcha_helper()
+            self._helper_output = queue.Queue()
+            log_path = APP_DIR / "vk_browser_session.log"
+            self._helper_stderr_file = log_path.open("a", encoding="utf-8", errors="replace")
+            self.log("Запускаю постоянную браузерную сессию Playwright.")
+            self.log("Все запросы restore.getSettings и restore.init будут выполняться из одного контекста Chrome.")
+            try:
+                process = subprocess.Popen(
+                    [sys.executable, str(helper), "--server", self.browser_profile, self.browser_executable],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=self._helper_stderr_file,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    cwd=str(APP_DIR),
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except OSError as exc:
+                try:
+                    self._helper_stderr_file.close()
+                except OSError:
+                    pass
+                self._helper_stderr_file = None
+                raise RuntimeError(
+                    f"Не удалось запустить постоянную браузерную сессию: {type(exc).__name__}: {exc}"
+                ) from exc
+
+            self._helper_process = process
+            output_queue = self._helper_output
+            self._helper_reader = threading.Thread(
+                target=self._read_helper_stream,
+                args=(process.stdout, output_queue),
+                name="VKBrowserSessionReader",
+                daemon=True,
+            )
+            self._helper_reader.start()
+
+    def _terminate_helper(self) -> None:
+        with self._process_lock:
+            process = self._helper_process
+            self._helper_process = None
+            if process is not None:
+                try:
+                    if process.poll() is None:
+                        process.terminate()
+                        process.wait(timeout=3)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        process.kill()
+                        process.wait(timeout=2)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                for stream in (process.stdin, process.stdout):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
+            if self._helper_stderr_file is not None:
+                try:
+                    self._helper_stderr_file.close()
+                except OSError:
+                    pass
+                self._helper_stderr_file = None
+
+    def _browser_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Отправляет RPC постоянному браузеру; сетевой запрос выполняется только через fetch."""
+        with self._rpc_lock:
+            self._ensure_helper()
+            process = self._helper_process
+            output_queue = self._helper_output
+            if process is None or process.stdin is None:
+                raise RuntimeError("Постоянный браузер не запущен.")
+
+            command = {"cmd": "request", "method": method, "url": self.api_url + method, "params": params}
+            try:
+                process.stdin.write(json.dumps(command, ensure_ascii=False) + "\n")
+                process.stdin.flush()
+            except (OSError, BrokenPipeError) as exc:
+                self._terminate_helper()
+                raise RuntimeError("Потеряно соединение с процессом браузерной сессии.") from exc
+
+            deadline = time.monotonic() + 930.0
+            while True:
+                if self.stop_event.wait(0.2):
+                    self._terminate_helper()
+                    raise InterruptedError("Операция остановлена пользователем")
+                if time.monotonic() >= deadline:
+                    self._terminate_helper()
+                    raise RuntimeError("Истекло время ожидания ответа браузерной сессии (15 минут).")
+                try:
+                    line = output_queue.get(timeout=0.2)
+                except queue.Empty:
+                    if process.poll() is not None:
+                        self._terminate_helper()
+                        raise RuntimeError(
+                            f"Процесс браузерной сессии завершился с кодом {process.returncode}. "
+                            f"Диагностика: {APP_DIR / 'vk_browser_session.log'}"
+                        )
+                    continue
+
+                if line is None:
+                    self._terminate_helper()
+                    raise RuntimeError(
+                        "Процесс браузерной сессии закрыл канал связи. "
+                        f"Диагностика: {APP_DIR / 'vk_browser_session.log'}"
+                    )
+                try:
+                    result = json.loads(line)
+                except (TypeError, ValueError) as exc:
+                    self._terminate_helper()
+                    raise RuntimeError("Браузерная сессия вернула некорректный служебный ответ.") from exc
+
+                if not isinstance(result, dict) or not result.get("ok"):
+                    detail = str(result.get("error") if isinstance(result, dict) else "неизвестная ошибка")
+                    raise RuntimeError(detail or "Ошибка браузерной сессии.")
+
+                self._post_captcha_pause = (
+                    max(self.pause, 8.0) if result.get("captcha_performed") else 0.0
+                )
+                if result.get("captcha_performed"):
+                    self.log("SmartCaptcha пройдена; повтор restore.init выполнен в том же браузерном контексте.")
+                response = result.get("response")
+                if not isinstance(response, dict):
+                    raise RuntimeError("VK вернул ответ неожиданного формата.")
+                return response
 
     def get_session(self, force: bool = False) -> dict[str, Any]:
         with self._session_lock:
             if not force and self.session.get("restore_session_id"):
                 return self.session
-            response = self._http_call("restore.getSettings", {
+
+            response = self._browser_request("restore.getSettings", {
                 "type": "restore",
                 "vkui": 1,
                 "platform": "vkcom",
@@ -258,7 +333,11 @@ class VKRestoreClient:
             })
             data = response.get("response") or {}
             if not data.get("restore_session_id"):
-                raise RuntimeError(f"restore.getSettings не вернул restore_session_id: {response}")
+                error = response.get("error") or {}
+                raise RuntimeError(
+                    "restore.getSettings не вернул restore_session_id: "
+                    + str(error.get("error_msg") or response)
+                )
             self.session = {
                 "restore_session_id": data["restore_session_id"],
                 "unauth_id": data.get("unauth_id", ""),
@@ -271,7 +350,6 @@ class VKRestoreClient:
     def _parse_date(response: dict[str, Any]) -> int | None:
         value = response.get("response")
         data: Any = None
-        # Формат, который использовался исходным скриптом: response[1].user.date_created.
         if isinstance(value, list) and len(value) > 1:
             data = value[1]
         elif isinstance(value, dict):
@@ -279,288 +357,12 @@ class VKRestoreClient:
         if not isinstance(data, dict):
             return None
         user = data.get("user")
-        if isinstance(user, dict):
-            raw = user.get("date_created")
-        else:
-            raw = data.get("date_created")
+        raw = user.get("date_created") if isinstance(user, dict) else data.get("date_created")
         try:
             stamp = int(raw)
-            if stamp <= 0:
-                return None
-            return stamp
+            return stamp if stamp > 0 else None
         except (TypeError, ValueError):
             return None
-
-    @staticmethod
-    def _validate_captcha_url(redirect_uri: str) -> str:
-        """Разрешаем открывать только штатную страницу проверки VK ID."""
-        parsed = urlparse(redirect_uri)
-        if (parsed.scheme != "https" or parsed.hostname not in {"id.vk.ru", "id.vk.com"}
-                or parsed.path.rstrip("/") != "/not_robot_captcha"):
-            raise RuntimeError("VK вернул неожиданный адрес CAPTCHA. Открытие заблокировано.")
-        return redirect_uri
-
-    @staticmethod
-    def _captcha_ts_param(value: Any) -> str:
-        """Нормализует captcha_ts так же, как VK web-клиенты (без лишнего .0)."""
-        try:
-            number = float(value) if value not in (None, "") else 0.0
-            if number.is_integer():
-                return str(int(number))
-            return format(number, ".15g")
-        except (TypeError, ValueError, OverflowError):
-            return "0"
-
-    @staticmethod
-    def _captcha_attempt_param(value: Any) -> str:
-        """Нормализует captcha_attempt: числа 1.0 передаются как '1', не '1.0'."""
-        if value in (None, ""):
-            return "1"
-        if isinstance(value, str):
-            return value
-        try:
-            return str(int(value))
-        except (TypeError, ValueError, OverflowError):
-            return "1"
-
-    def _solve_checkbox_captcha(self, redirect_uri: str, retry_params: dict[str, Any]) -> dict[str, Any]:
-        """Проходит SmartCaptcha и повторяет restore.init прямо внутри Chrome."""
-        redirect_uri = self._validate_captcha_url(redirect_uri)
-        try:
-            helper = ensure_captcha_helper()
-            self.log(f"Модуль CAPTCHA: {helper}")
-        except Exception as exc:
-            raise RuntimeError(
-                "Не удалось восстановить вспомогательный модуль CAPTCHA. "
-                f"Основной файл: {Path(__file__).resolve()}; каталог приложения: {APP_DIR}; "
-                f"причина: {type(exc).__name__}: {exc}"
-            ) from exc
-
-        fd, result_path_text = tempfile.mkstemp(prefix="vk_captcha_", suffix=".json")
-        os.close(fd)
-        result_path = Path(result_path_text)
-        process_log_path = result_path.with_suffix(".process.log")
-        process_log_file = None
-        try:
-            self.log("VK запросил интерактивную проверку. Запускаю отдельное окно Chromium; поставьте галочку вручную.")
-            self.log("Перед CAPTCHA повторно создаю restore.init внутри Chrome, чтобы исходный запрос и проверка использовали одну cookie-сессию.")
-            self.log("Адрес проверки и служебные токены не записываются в журнал и не сохраняются в результатах.")
-            self.log(f"Запускаю браузер через Python: {sys.executable}")
-            self.log(f"Основной файл приложения: {Path(__file__).resolve()}")
-            self.log(f"Рабочий каталог приложения: {APP_DIR}")
-            try:
-                process_log_file = process_log_path.open("w", encoding="utf-8", errors="replace")
-                process = subprocess.Popen(
-                    [sys.executable, str(helper), str(result_path)],
-                    stdin=subprocess.PIPE,
-                    stdout=process_log_file,
-                    stderr=subprocess.STDOUT,
-                    cwd=str(APP_DIR),
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-            except OSError as exc:
-                raise RuntimeError(
-                    f"Не удалось запустить модуль Playwright: {type(exc).__name__}: {exc}. "
-                    f"Python: {sys.executable}"
-                ) from exc
-
-            try:
-                assert process.stdin is not None
-                retry_url = self.api_url + "restore.init"
-                process.stdin.write(json.dumps({
-                    "url": redirect_uri,
-                    "profile_dir": self.browser_profile,
-                    "browser_executable": self.browser_executable,
-                    "retry_url": retry_url,
-                    "retry_params": retry_params,
-                }, ensure_ascii=False).encode("utf-8"))
-                process.stdin.close()
-            except (BrokenPipeError, OSError) as exc:
-                try:
-                    process.terminate()
-                except OSError:
-                    pass
-                if process_log_file is not None:
-                    try:
-                        process_log_file.flush()
-                        process_log_file.close()
-                        process_log_file = None
-                    except OSError:
-                        pass
-                child_output = ""
-                try:
-                    child_output = process_log_path.read_text(encoding="utf-8", errors="replace").strip()
-                except OSError:
-                    pass
-                if child_output:
-                    for line in child_output.splitlines()[-15:]:
-                        self.log(f"  вывод Playwright: {line[:500]}")
-                raise RuntimeError(
-                    f"Процесс Playwright завершился до передачи параметров ({type(exc).__name__}: {exc}). "
-                    "См. диагностику выше. Проверьте Python, Playwright и файл vk_captcha_playwright.py."
-                ) from exc
-
-            captcha_started = time.monotonic()
-            token_notice_logged = False
-            while process.poll() is None:
-                if time.monotonic() - captcha_started > 900:
-                    try:
-                        process.terminate()
-                        process.wait(timeout=3)
-                    except (OSError, subprocess.TimeoutExpired):
-                        try:
-                            process.kill()
-                        except OSError:
-                            pass
-                    raise RuntimeError("Время ожидания CAPTCHA истекло (15 минут). Повторите запрос.")
-                if self.stop_event.wait(0.25):
-                    process.terminate()
-                    try:
-                        process.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                    raise InterruptedError("Операция остановлена пользователем во время CAPTCHA")
-                result = read_json(result_path, {})
-                if isinstance(result, dict) and result.get("token_obtained") and not token_notice_logged:
-                    token_notice_logged = True
-                    self.log("VK вернул success_token. Повтор restore.init будет выполнен из того же окна Chrome.")
-
-            # Helper дожидается captchaNotRobot.endSession, закрывает Chromium
-            # и только после этого завершает работу.
-            if process_log_file is not None:
-                process_log_file.flush()
-                process_log_file.close()
-                process_log_file = None
-            result = read_json(result_path, {})
-            if isinstance(result, dict) and result.get("retry_response") is not None:
-                response_data = result.get("retry_response")
-                if not isinstance(response_data, dict):
-                    raise RuntimeError("Браузер выполнил CAPTCHA, но ответ restore.init имеет неверный формат.")
-                browser_context = result.get("browser_context")
-                if isinstance(browser_context, dict):
-                    cookie_header = str(browser_context.get("cookie_header") or "").strip()
-                    user_agent_value = str(browser_context.get("user_agent") or "").strip()
-                    client_headers = browser_context.get("headers")
-                    if cookie_header:
-                        self.browser_cookie_header = cookie_header
-                    if user_agent_value:
-                        self.browser_user_agent = user_agent_value
-                    if isinstance(client_headers, dict):
-                        self.browser_client_headers = {
-                            str(k): str(v) for k, v in client_headers.items()
-                            if k in {"origin", "referer", "accept-language", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "priority"} and v
-                        }
-                    if cookie_header or user_agent_value:
-                        names = browser_context.get("cookie_names")
-                        names_text = ", ".join(str(x) for x in names) if isinstance(names, list) else "обновлены"
-                        self.log("Браузерный контекст сохранён в памяти для следующих запросов: " + (names_text or "cookie не обнаружены") + ".")
-                self._post_captcha_pause = max(self.pause, 4.0) if result.get("captcha_performed") is not False else self.pause
-                session_update = result.get("session_update")
-                if isinstance(session_update, dict) and session_update.get("restore_session_id"):
-                    self.session = {
-                        "restore_session_id": session_update["restore_session_id"],
-                        "unauth_id": session_update.get("unauth_id", ""),
-                        "saved_at": int(time.time()),
-                    }
-                    write_json(SESSION_FILE, self.session)
-                    self.log("Параметры restore-сессии обновлены из браузерного контекста.")
-                if result.get("captcha_performed") is False:
-                    self.log("Первоначальный restore.init из Chrome выполнен без CAPTCHA.")
-                else:
-                    self.log("CAPTCHA пройдена; повтор restore.init выполнен в той же cookie-сессии Chrome.")
-                if result.get("captcha_performed") is not False and result.get("end_session_ok"):
-                    self.log(f"Завершение CAPTCHA-сессии: captchaNotRobot.endSession — OK (HTTP {result.get('end_session_http_status', '?')}).")
-                elif result.get("captcha_performed") is not False:
-                    self.log("ПРЕДУПРЕЖДЕНИЕ: captchaNotRobot.endSession не подтверждён; запрос restore.init всё равно отправлен из Chrome.")
-                self.log(f"restore.init через Chrome: HTTP {result.get('retry_http_status', '?')}.")
-                diag = result.get("retry_diagnostics")
-                if isinstance(diag, dict):
-                    self.log(
-                        "Первичный restore.init в Chrome: "
-                        f"запрос замечен={'да' if diag.get('browser_initial_init_seen') else 'нет'}, "
-                        f"remixstlid={'есть' if diag.get('browser_initial_remixstlid_present') else 'нет'}, "
-                        f"Origin={diag.get('browser_initial_origin') or 'не определён'}; "
-                        f"этот remixstlid совпал с CAPTCHA check={'да' if diag.get('browser_initial_vs_check_remixstlid_matches') else 'нет/не подтверждено'}, "
-                        f"User-Agent совпал={'да' if diag.get('browser_initial_vs_check_user_agent_matches') else 'нет/не подтверждено'}."
-                    )
-                    self.log(
-                        "Привязка CAPTCHA: "
-                        f"check session_token совпадает с redirect_uri={'да' if diag.get('check_session_matches_challenge') else 'нет/не подтверждено'}, "
-                        f"check status={diag.get('check_vk_status') or 'неизвестен'}, "
-                        f"endSession относится к тому же challenge={'да' if diag.get('end_session_session_matches_challenge') else 'нет/не подтверждено'}."
-                    )
-                    self.log(
-                        "Cookies CAPTCHA/retry: "
-                        f"remixstlid check/retry={'есть' if diag.get('check_remixstlid_present') and diag.get('retry_remixstlid_present') else 'отсутствует'}, "
-                        f"совпадает={'да' if diag.get('retry_session_cookie_matches_check') else 'нет/не подтверждено'}; "
-                        f"remixstid check/retry={'есть' if diag.get('check_remixstid_present') and diag.get('retry_remixstid_present') else 'отсутствует'}, "
-                        f"совпадает={'да' if diag.get('retry_remixstid_matches_check') else 'нет/не подтверждено'}; "
-                        f"domain_sid check/retry={'есть' if diag.get('check_domain_sid_present') and diag.get('retry_domain_sid_present') else 'отсутствует'}, "
-                        f"совпадает={'да' if diag.get('retry_domain_sid_matches_check') else 'нет/не подтверждено'}."
-                    )
-                    self.log(
-                        "Отпечаток браузера: User-Agent check/retry совпадает="
-                        f"{'да' if diag.get('retry_user_agent_matches_check') else 'нет/не подтверждено'}; "
-                        f"Origin повтора={diag.get('retry_origin') or 'не определён'}; "
-                        f"Referer повтора={diag.get('retry_referer') or 'не определён'}."
-                    )
-                    fields = diag.get('retry_field_matches')
-                    if isinstance(fields, dict) and fields:
-                        self.log("Совпадение полей формы с подготовленными значениями: " + ", ".join(
-                            f"{key}={'да' if value else 'НЕТ'}" for key, value in fields.items()
-                        ))
-                    echo = diag.get('server_echo_matches')
-                    if isinstance(echo, dict) and echo:
-                        self.log("Сверка значений request_params, отражённых VK: " + ", ".join(
-                            f"{key}={'совпадает' if value else 'РАСХОЖДЕНИЕ'}" for key, value in echo.items()
-                        ))
-                    elif isinstance(fields, dict) and fields:
-                        self.log("VK не вернул значения request_params для дополнительной сверки.")
-                return response_data
-            if isinstance(result, dict) and result.get("retry_error"):
-                raise RuntimeError("Не удалось выполнить повтор restore.init из Chrome: " + str(result.get("retry_error")))
-            detail = result.get("error") if isinstance(result, dict) else None
-            if detail:
-                self.log(f"Ошибка запуска/работы Chromium: {detail}")
-                diagnostics = result.get("diagnostics") if isinstance(result, dict) else None
-                if diagnostics:
-                    for line in str(diagnostics).splitlines():
-                        self.log(f"  диагностика: {line}")
-                safe_diag = result.get("retry_diagnostics") if isinstance(result, dict) else None
-                if isinstance(safe_diag, dict):
-                    self.log(
-                        "Диагностика challenge: "
-                        f"check session_token совпадает={'да' if safe_diag.get('check_session_matches_challenge') else 'нет/не подтверждено'}, "
-                        f"remixstlid на check={'есть' if safe_diag.get('check_remixstlid_present') else 'нет'}; "
-                        f"endSession session_token совпадает={'да' if safe_diag.get('end_session_session_matches_challenge') else 'нет/не подтверждено'}."
-                    )
-                raise RuntimeError(f"Не удалось открыть CAPTCHA в Chromium: {detail}")
-            return_code = process.poll()
-            process_output = ""
-            try:
-                process_output = process_log_path.read_text(encoding="utf-8", errors="replace").strip()
-            except OSError:
-                pass
-            if process_output:
-                for line in process_output.splitlines()[-15:]:
-                    self.log(f"  вывод Playwright: {line[:500]}")
-            if return_code not in (None, 0):
-                raise RuntimeError(
-                    f"Процесс браузера завершился с кодом {return_code} без результата. "
-                    "См. строки вывода Playwright выше."
-                )
-            raise RuntimeError("Окно CAPTCHA закрыто до завершения проверки. Калибровка остановлена на текущем ID.")
-        finally:
-            if process_log_file is not None:
-                try:
-                    process_log_file.close()
-                except OSError:
-                    pass
-            for temporary_path in (result_path, process_log_path):
-                try:
-                    temporary_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
 
     def get_date(self, uid: int, use_cache: bool = True) -> ProbeResult:
         key = str(uid)
@@ -586,73 +388,26 @@ class VKRestoreClient:
                     "unauth_id": session.get("unauth_id", ""),
                     "v": "5.223",
                 }
-                response = self._http_call("restore.init", request_params)
+                # При необходимости helper сам откроет CAPTCHA, дождётся ручной
+                # проверки и повторит этот же запрос в том же браузерном контексте.
+                response = self._browser_request("restore.init", request_params)
                 error = response.get("error")
                 if error:
                     code = error.get("error_code")
                     msg = str(error.get("error_msg", "ошибка API"))
-                    if code == 14:
-                        redirect_uri = error.get("redirect_uri")
-                        if redirect_uri:
-                            # Новая интерактивная CAPTCHA VK ID: пользователь сам
-                            # проходит checkbox в отдельном Chromium; токен применяется
-                            # только к повтору того же исходного запроса.
-                            # Для SmartCaptcha нужен не только success_token, но и тройка
-                            # challenge, к которому он привязан: captcha_sid/captcha_ts/
-                            # captcha_attempt. Повтор отправляется из самой страницы Chrome,
-                            # чтобы TLS, Client-Hints, cookies и заголовки совпадали с check.
-                            retry_params = dict(request_params)
-                            retry_params.update({
-                                "captcha_key": "",
-                                "captcha_sid": str(error.get("captcha_sid") or ""),
-                                "is_sound_captcha": "0",
-                                "captcha_ts": self._captcha_ts_param(error.get("captcha_ts")),
-                                "captcha_attempt": self._captcha_attempt_param(error.get("captcha_attempt")),
-                            })
-                            self.log(
-                                "Параметры challenge: "
-                                f"captcha_sid={'получен' if retry_params['captcha_sid'] else 'отсутствует'}, "
-                                f"captcha_ts={'получен' if error.get('captcha_ts') not in (None, '') else 'значение 0'}, "
-                                f"captcha_attempt={'получен' if error.get('captcha_attempt') not in (None, '') else 'значение 1'}."
-                            )
-                            response = self._solve_checkbox_captcha(str(redirect_uri), retry_params)
-                            retry_error = response.get("error")
-                            if retry_error:
-                                retry_code = retry_error.get("error_code")
-                                retry_msg = str(retry_error.get("error_msg", "ошибка API"))
-                                echoed = retry_error.get("request_params")
-                                echoed_keys = []
-                                if isinstance(echoed, list):
-                                    echoed_keys = [str(item.get("key")) for item in echoed
-                                                   if isinstance(item, dict) and item.get("key")]
-                                elif isinstance(echoed, dict):
-                                    echoed_keys = [str(k) for k in echoed.keys()]
-                                if echoed_keys:
-                                    # Логируем только имена параметров, никогда не значения.
-                                    self.log("VK отразил параметры повтора (только имена): " + ", ".join(echoed_keys))
-                                self.log("VK вернул отказ на повтор restore.init, отправленный из Chrome.")
-                                raise RuntimeError(
-                                    f"VK не принял подтверждение CAPTCHA (код {retry_code}): {retry_msg}. "
-                                    "CAPTCHA подтверждена браузером, но VK не принял повтор. Проверьте параметры challenge."
-                                )
-                        else:
-                            # Старый тип капчи (captcha_sid/captcha_img) отличается
-                            # от checkbox-проверки и не должен обрабатываться как новая.
-                            captcha_img = str(error.get("captcha_img", ""))
-                            captcha_hint = " VK приложил изображение CAPTCHA." if captcha_img else ""
-                            raise RuntimeError(
-                                "VK вернул классическую CAPTCHA без redirect_uri; "
-                                "этот ответ не является checkbox-проверкой." + captcha_hint
-                            )
-                    elif code in (15, 100) or "not found" in msg.lower() or "не найден" in msg.lower():
+                    if code in (15, 100) or "not found" in msg.lower() or "не найден" in msg.lower():
                         self._wait_after_request()
                         return ProbeResult(uid, None, "unavailable", f"API {code}: {msg}")
-                    else:
-                        last_error = f"API {code}: {msg}"
-                        if attempt == 0:
-                            self.get_session(force=True)
-                        self._wait(min(3, attempt + 1))
-                        continue
+                    if code == 14:
+                        raise RuntimeError(
+                            "VK повторно запросил CAPTCHA после проверки. "
+                            "Калибровка приостановлена для этого ID; проверьте журнал браузерной сессии."
+                        )
+                    last_error = f"API {code}: {msg}"
+                    if attempt == 0:
+                        self.get_session(force=True)
+                    self._wait(min(3, attempt + 1))
+                    continue
 
                 stamp = self._parse_date(response)
                 if stamp is None:
@@ -669,8 +424,6 @@ class VKRestoreClient:
                 raise
             except Exception as exc:
                 last_error = str(exc)
-                # Ошибки интерактивной проверки не повторяем автоматически:
-                # пользователь должен иметь возможность исправить причину.
                 if "CAPTCHA" in last_error or "captcha" in last_error.lower():
                     return ProbeResult(uid, None, "error", last_error)
                 if attempt + 1 < self.retries:
@@ -678,6 +431,33 @@ class VKRestoreClient:
                     self._wait(min(4, attempt + 1))
 
         return ProbeResult(uid, None, "error", last_error or "Не удалось получить дату")
+
+    def close(self) -> None:
+        """Корректно закрывает постоянный браузер при выходе из приложения."""
+        self._closed = True
+        if not self._rpc_lock.acquire(timeout=3):
+            self._terminate_helper()
+            return
+        try:
+            process = self._helper_process
+            if process is None:
+                return
+            try:
+                if process.poll() is None and process.stdin is not None:
+                    process.stdin.write(json.dumps({"cmd": "shutdown"}) + "\n")
+                    process.stdin.flush()
+                    try:
+                        self._helper_output.get(timeout=8)
+                    except queue.Empty:
+                        pass
+                    process.wait(timeout=8)
+            except (OSError, subprocess.TimeoutExpired):
+                self._terminate_helper()
+            finally:
+                if self._helper_process is not None:
+                    self._terminate_helper()
+        finally:
+            self._rpc_lock.release()
 
 
 # ---------------------------------------------------------------------------
@@ -1593,6 +1373,8 @@ class VKCalibratorApp(tk.Tk):
         """Повторно использует cookie-контекст после CAPTCHA между разными задачами."""
         signature = (config["api_url"], config["browser_profile"], config["browser_executable"])
         if self.shared_client is None or self.shared_client_signature != signature:
+            if self.shared_client is not None:
+                self.shared_client.close()
             self.shared_client = VKRestoreClient(
                 config["api_url"], config["pause"], config["retries"],
                 lambda message: self.events.put(("log", message)),
@@ -1953,6 +1735,8 @@ class VKCalibratorApp(tk.Tk):
                 self.after_cancel(self._settings_after_id)
                 self._settings_after_id = None
             self._save_settings()
+            if self.shared_client is not None:
+                self.shared_client.close()
         finally:
             self.destroy()
 

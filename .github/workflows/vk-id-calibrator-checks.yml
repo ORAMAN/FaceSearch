@@ -1,0 +1,25 @@
+name: VK ID Calibrator checks
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "utilities/vk_id_calibrator/*.py"
+      - ".github/workflows/vk-id-calibrator-checks.yml"
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Compile VK ID Calibrator modules
+        run: >-
+          python -m py_compile
+          utilities/vk_id_calibrator/vk_date_ranges_app.py
+          utilities/vk_id_calibrator/vk_captcha_playwright.py
