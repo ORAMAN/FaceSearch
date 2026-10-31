@@ -99,7 +99,7 @@ RESULTS_FILE = APP_DIR / "vk_calibration_results.json"
 SINGLE_RESULTS_FILE = APP_DIR / "vk_single_id_history.json"
 DEFAULT_API_URL = "https://api.vk.com/method/"
 DEFAULT_BROWSER_PROFILE = str((APP_DIR / "browser_profile").resolve())
-DEFAULT_BROWSER_EXECUTABLE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+DEFAULT_BROWSER_EXECUTABLE = r"C:/Program Files/Google/Chrome/Application/chrome.exe"
 MSK = timezone(timedelta(hours=3))
 
 
