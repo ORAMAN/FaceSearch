@@ -1255,7 +1255,8 @@ class VKCalibratorApp(tk.Tk):
 
         note = ttk.Label(root, text=(
             "При checkbox-CAPTCHA откроется отдельное окно Chrome без DevTools: отметьте «Я не робот» вручную. "
-            "Для окна проверки требуется Playwright/Chromium. В журнале: Ctrl+C — выделенное, "
+            "Для окна проверки требуется Playwright/Chromium. В полях ID работают Ctrl+C/Ctrl+V и меню по правой кнопке; "
+            "в таблицах Ctrl+C копирует ID выбранной строки. В журнале: Ctrl+C — выделенное, "
             "Ctrl+Shift+C — всё, Ctrl+A — выделить всё; правый клик открывает меню. "
             "restore.getSettings / restore.init — недокументированные методы VK; диапазоны являются оценкой."
         ), foreground="#8a5a00", wraplength=1100)
