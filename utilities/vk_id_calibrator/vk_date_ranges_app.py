@@ -21,6 +21,7 @@ import base64
 import gzip
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,12 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 APP_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = APP_DIR.parent.parent
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
+
+from facesearch.settings import load_module_settings, save_module_settings
+
 _REQUIRED_CAPTCHA_HELPER_BUILD = "2026-10-31-browser-bound-init-2"
 # Встроенная резервная копия helper-модуля: приложение остаётся работоспособным,
 # даже если пользователь случайно распаковал/скопировал только основной .py файл.
@@ -85,12 +92,33 @@ def ensure_captcha_helper() -> Path:
         return fallback
 
 CACHE_FILE = APP_DIR / "vk_dates_cache.json"
-APP_SETTINGS_FILE = APP_DIR / "vk_calibrator_settings.json"
+APP_SETTINGS_FILE = APP_DIR / "vk_id_calibrator_settings.xml"
+LEGACY_APP_SETTINGS_FILE = APP_DIR / "vk_calibrator_settings.json"
 SESSION_FILE = APP_DIR / "vk_restore_session.json"
 RESULTS_FILE = APP_DIR / "vk_calibration_results.json"
 SINGLE_RESULTS_FILE = APP_DIR / "vk_single_id_history.json"
 DEFAULT_API_URL = "https://api.vk.com/method/"
+DEFAULT_BROWSER_PROFILE = str((APP_DIR / "browser_profile").resolve())
+DEFAULT_BROWSER_EXECUTABLE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 MSK = timezone(timedelta(hours=3))
+
+
+def default_app_settings() -> dict[str, Any]:
+    """Значения формы по умолчанию для общего механизма настроек FaceSearch."""
+    return {
+        "max_id": "950000000",
+        "points": "140",
+        "pause": "2.0",
+        "retries": "4",
+        "api_url": DEFAULT_API_URL,
+        "build_ranges": True,
+        "browser_profile": DEFAULT_BROWSER_PROFILE,
+        "browser_executable": DEFAULT_BROWSER_EXECUTABLE,
+        "single_id": "",
+        "single_use_cache": True,
+        "geometry": "1160x820",
+        "maximized": False,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -856,6 +884,41 @@ class CalibrationWorker:
             ],
             "ranges": self.ranges,
         }
+        previous = read_json(RESULTS_FILE, {})
+        if not isinstance(previous, dict):
+            previous = {}
+
+        def merge_rows(old_rows: Any, new_rows: list[dict[str, Any]],
+                       key_fields: tuple[str, ...]) -> list[dict[str, Any]]:
+            merged: list[dict[str, Any]] = []
+            seen: set[tuple[str, ...]] = set()
+            old = old_rows if isinstance(old_rows, list) else []
+            for item in [*old, *new_rows]:
+                if not isinstance(item, dict):
+                    continue
+                key = tuple(
+                    json.dumps(item.get(field), ensure_ascii=False, sort_keys=True)
+                    for field in key_fields
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(item)
+            return merged
+
+        # Не заменяем предыдущую калибровку: сохраняем все разные варианты
+        # опорных точек и диапазонов, добавляя только действительно новые записи.
+        data["anchors"] = merge_rows(
+            previous.get("anchors", []), data["anchors"],
+            ("id", "timestamp", "status", "detail"),
+        )
+        data["ranges"] = merge_rows(
+            previous.get("ranges", []), data["ranges"],
+            ("year", "id_from", "id_to", "status"),
+        )
+        for key, value in previous.items():
+            if key not in data:
+                data[key] = value
         write_json(RESULTS_FILE, data)
 
 
@@ -894,8 +957,24 @@ class VKCalibratorApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("VK ID Calibrator — опорные ID и годы регистрации")
-        self.geometry("1160x820")
         self.minsize(930, 650)
+        self._settings_after_id = None
+        self._settings_defaults = default_app_settings()
+        self._saved_settings = load_module_settings(
+            APP_SETTINGS_FILE,
+            "vk_id_calibrator",
+            self._settings_defaults,
+            window_keys={"geometry", "maximized"},
+            legacy_json_paths=(LEGACY_APP_SETTINGS_FILE,),
+        )
+        saved_geometry = str(self._saved_settings.get("geometry") or "1160x820")
+        if re.fullmatch(r"\d+x\d+(?:[+-]\d+[+-]\d+)?", saved_geometry):
+            self.geometry(saved_geometry)
+            self._last_normal_geometry = saved_geometry
+        else:
+            self.geometry("1160x820")
+            self._last_normal_geometry = self.geometry()
+        self._restore_maximized = bool(self._saved_settings.get("maximized", False))
 
         self.events: queue.Queue = queue.Queue()
         self.stop_event = threading.Event()
@@ -906,27 +985,34 @@ class VKCalibratorApp(tk.Tk):
         self.shared_client_signature: tuple[str, str, str] | None = None
         self.anchor_count = 0
         self.range_count = 0
+        self._anchor_rows_seen: set[tuple[Any, ...]] = set()
+        self._range_rows_seen: set[tuple[Any, ...]] = set()
         self.single_history: list[dict[str, Any]] = []
 
-        self.max_id_var = tk.StringVar(value="950000000")
-        self.points_var = tk.StringVar(value="140")
-        self.pause_var = tk.StringVar(value="2.0")
-        self.retries_var = tk.StringVar(value="4")
-        self.api_var = tk.StringVar(value=DEFAULT_API_URL)
-        saved_settings = read_json(APP_SETTINGS_FILE, {})
-        default_profile = str((APP_DIR / "browser_profile").resolve())
-        self.browser_profile_var = tk.StringVar(value=str(saved_settings.get("browser_profile") or default_profile))
-        default_chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-        self.browser_executable_var = tk.StringVar(value=str(saved_settings.get("browser_executable") or default_chrome))
-        self.ranges_var = tk.BooleanVar(value=True)
-        self.single_id_var = tk.StringVar(value="")
-        self.single_use_cache_var = tk.BooleanVar(value=True)
+        self.max_id_var = tk.StringVar(value=str(self._saved_settings["max_id"]))
+        self.points_var = tk.StringVar(value=str(self._saved_settings["points"]))
+        self.pause_var = tk.StringVar(value=str(self._saved_settings["pause"]))
+        self.retries_var = tk.StringVar(value=str(self._saved_settings["retries"]))
+        self.api_var = tk.StringVar(value=str(self._saved_settings["api_url"]))
+        self.browser_profile_var = tk.StringVar(value=str(self._saved_settings["browser_profile"]))
+        self.browser_executable_var = tk.StringVar(value=str(self._saved_settings["browser_executable"]))
+        self.ranges_var = tk.BooleanVar(value=bool(self._saved_settings["build_ranges"]))
+        self.single_id_var = tk.StringVar(value=str(self._saved_settings["single_id"]))
+        self.single_use_cache_var = tk.BooleanVar(value=bool(self._saved_settings["single_use_cache"]))
         self.status_var = tk.StringVar(value="Готово к работе")
         self.progress_var = tk.DoubleVar(value=0)
 
         self._build_ui()
         self._load_previous_results()
         self._load_single_history()
+        for variable in (
+            self.max_id_var, self.points_var, self.pause_var, self.retries_var,
+            self.api_var, self.browser_profile_var, self.browser_executable_var,
+            self.ranges_var, self.single_id_var, self.single_use_cache_var,
+        ):
+            variable.trace_add("write", self.schedule_settings_save)
+        self.bind("<Configure>", self._on_configure, add="+")
+        self.after(180, self._restore_window_state)
         self.after(100, self._poll_events)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -1260,11 +1346,8 @@ class VKCalibratorApp(tk.Tk):
         config = self._validate_config()
         if config is None:
             return
-        write_json(APP_SETTINGS_FILE, {"browser_profile": config["browser_profile"], "browser_executable": config["browser_executable"]})
-        self.anchor_tree.delete(*self.anchor_tree.get_children())
-        self.range_tree.delete(*self.range_tree.get_children())
-        self.anchor_count = 0
-        self.range_count = 0
+        self._save_settings()
+        # Существующие строки таблиц не очищаем: новые результаты дополняют историю.
         self.progress_var.set(0)
         self.stop_event.clear()
         self.start_button.configure(state="disabled")
@@ -1297,10 +1380,7 @@ class VKCalibratorApp(tk.Tk):
         config = self._validate_runtime_config()
         if config is None:
             return
-        write_json(APP_SETTINGS_FILE, {
-            "browser_profile": config["browser_profile"],
-            "browser_executable": config["browser_executable"],
-        })
+        self._save_settings()
         self.stop_event.clear()
         self.start_button.configure(state="disabled")
         self.single_lookup_button.configure(state="disabled")
@@ -1391,6 +1471,10 @@ class VKCalibratorApp(tk.Tk):
         tree.yview_moveto(1.0)
 
     def _insert_anchor(self, item: ProbeResult) -> None:
+        row_key = (item.uid, item.timestamp, item.status, item.detail)
+        if row_key in self._anchor_rows_seen:
+            return
+        self._anchor_rows_seen.add(row_key)
         result_label = "Получена" if item.status == "ok" else ("Недоступна" if item.status == "unavailable" else "Ошибка")
         iid = self.anchor_tree.insert("", "end", values=(
             f"{item.uid:,}", item.date_text,
@@ -1401,6 +1485,10 @@ class VKCalibratorApp(tk.Tk):
         self.anchor_count += 1
 
     def _insert_range(self, item: dict[str, Any]) -> None:
+        row_key = (item.get("year"), item.get("id_from"), item.get("id_to"), item.get("status", ""))
+        if row_key in self._range_rows_seen:
+            return
+        self._range_rows_seen.add(row_key)
         iid = self.range_tree.insert("", "end", values=(
             item["year"], f"{item['id_from']:,}", f"{item['id_to']:,}", item["status"]
         ))
@@ -1535,12 +1623,74 @@ class VKCalibratorApp(tk.Tk):
         except Exception as exc:
             messagebox.showerror("Не удалось открыть папку", str(exc), parent=self)
 
+    def _restore_window_state(self) -> None:
+        if self._restore_maximized:
+            try:
+                self.state("zoomed")
+            except tk.TclError:
+                pass
+        self.schedule_settings_save()
+
+    def _on_configure(self, event=None) -> None:
+        if event is not None and event.widget is not self:
+            return
+        try:
+            if self.state() == "normal":
+                self._last_normal_geometry = self.geometry()
+        except tk.TclError:
+            pass
+        self.schedule_settings_save()
+
+    def schedule_settings_save(self, *_args) -> None:
+        try:
+            if self._settings_after_id is not None:
+                self.after_cancel(self._settings_after_id)
+            self._settings_after_id = self.after(400, self._save_settings)
+        except tk.TclError:
+            self._settings_after_id = None
+
+    def _save_settings(self) -> None:
+        self._settings_after_id = None
+        try:
+            state = self.state()
+            maximized = state in {"zoomed", "maximized"}
+            geometry = self.geometry() if state == "normal" else self._last_normal_geometry
+            settings = {
+                "max_id": self.max_id_var.get(),
+                "points": self.points_var.get(),
+                "pause": self.pause_var.get(),
+                "retries": self.retries_var.get(),
+                "api_url": self.api_var.get(),
+                "build_ranges": bool(self.ranges_var.get()),
+                "browser_profile": self.browser_profile_var.get(),
+                "browser_executable": self.browser_executable_var.get(),
+                "single_id": self.single_id_var.get(),
+                "single_use_cache": bool(self.single_use_cache_var.get()),
+                "geometry": str(geometry or "1160x820"),
+                "maximized": maximized,
+            }
+            save_module_settings(
+                APP_SETTINGS_FILE,
+                "vk_id_calibrator",
+                settings,
+                window_keys={"geometry", "maximized"},
+            )
+            self._saved_settings = settings
+        except (OSError, tk.TclError, AttributeError, TypeError):
+            pass
+
     def _on_close(self) -> None:
         if self.worker_thread and self.worker_thread.is_alive():
             if not messagebox.askyesno("Выход", "Калибровка ещё выполняется. Остановить её и закрыть приложение?", parent=self):
                 return
             self.stop_event.set()
-        self.destroy()
+        try:
+            if self._settings_after_id is not None:
+                self.after_cancel(self._settings_after_id)
+                self._settings_after_id = None
+            self._save_settings()
+        finally:
+            self.destroy()
 
 
 def main() -> None:
