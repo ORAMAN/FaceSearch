@@ -1150,7 +1150,9 @@ class VKCalibratorApp(tk.Tk):
         settings.columnconfigure(9, weight=1)
 
         ttk.Label(settings, text="Максимальный ID для поиска:").grid(row=0, column=0, sticky="w", padx=(0, 5), pady=3)
-        ttk.Entry(settings, textvariable=self.max_id_var, width=13).grid(row=0, column=1, sticky="w", padx=(0, 14))
+        self.max_id_entry = ttk.Entry(settings, textvariable=self.max_id_var, width=13)
+        self.max_id_entry.grid(row=0, column=1, sticky="w", padx=(0, 14))
+        self._attach_entry_clipboard(self.max_id_entry)
         ttk.Label(settings, text="Опорных точек:").grid(row=0, column=2, sticky="w", padx=(0, 5))
         ttk.Entry(settings, textvariable=self.points_var, width=7).grid(row=0, column=3, sticky="w", padx=(0, 14))
         ttk.Label(settings, text="Пауза между запросами, сек:").grid(row=0, column=4, sticky="w", padx=(0, 5))
@@ -1176,6 +1178,7 @@ class VKCalibratorApp(tk.Tk):
         ttk.Label(single_frame, text="VK ID:").pack(side="left")
         self.single_id_entry = ttk.Entry(single_frame, textvariable=self.single_id_var, width=18)
         self.single_id_entry.pack(side="left", padx=(6, 8))
+        self._attach_entry_clipboard(self.single_id_entry)
         self.single_lookup_button = ttk.Button(single_frame, text="Получить дату", command=self.start_single_lookup)
         self.single_lookup_button.pack(side="left")
         ttk.Checkbutton(single_frame, text="Использовать кэш (если есть)",
@@ -1212,12 +1215,14 @@ class VKCalibratorApp(tk.Tk):
             ("status", "Результат", 135, "center"),
             ("detail", "Комментарий", 430, "w"),
         ))
+        self._attach_tree_copy_menu(self.anchor_tree, (0,))
         self.range_tree = self._make_tree(ranges_tab, (
             ("year", "Год", 85, "center"),
             ("from", "ID от", 170, "e"),
             ("to", "ID до", 170, "e"),
             ("status", "Способ / статус определения", 500, "w"),
         ))
+        self._attach_tree_copy_menu(self.range_tree, (1, 2))
 
         single_tab = ttk.Frame(self.notebook, padding=5)
         self.notebook.add(single_tab, text="Одиночные ID")
@@ -1230,6 +1235,7 @@ class VKCalibratorApp(tk.Tk):
             ("checked", "Проверено", 145, "center"),
             ("detail", "Комментарий", 330, "w"),
         ))
+        self._attach_tree_copy_menu(self.single_tree, (0,))
         self.single_tab = single_tab
         self.notebook.add(log_tab, text="Журнал")
 
@@ -1283,6 +1289,151 @@ class VKCalibratorApp(tk.Tk):
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
+
+    def _attach_entry_clipboard(self, entry: ttk.Entry) -> None:
+        """Добавляет явные сочетания клавиш и контекстное меню буфера обмена."""
+        if not hasattr(self, "entry_context_menu"):
+            self.entry_context_menu = tk.Menu(self, tearoff=False)
+            self.entry_context_menu.add_command(
+                label="Вырезать", command=lambda: self._entry_menu_action("<<Cut>>"))
+            self.entry_context_menu.add_command(
+                label="Копировать", command=lambda: self._entry_menu_action("<<Copy>>"))
+            self.entry_context_menu.add_command(
+                label="Вставить", command=lambda: self._entry_menu_action("<<Paste>>"))
+            self.entry_context_menu.add_separator()
+            self.entry_context_menu.add_command(
+                label="Выделить всё", command=self._select_all_entry_text)
+
+        entry.bind("<Button-3>", self._show_entry_context_menu, add="+")
+        entry.bind("<Control-c>", lambda event: self._entry_virtual_event(event, "<<Copy>>"), add="+")
+        entry.bind("<Control-C>", lambda event: self._entry_virtual_event(event, "<<Copy>>"), add="+")
+        entry.bind("<Control-v>", lambda event: self._entry_virtual_event(event, "<<Paste>>"), add="+")
+        entry.bind("<Control-V>", lambda event: self._entry_virtual_event(event, "<<Paste>>"), add="+")
+        entry.bind("<Control-x>", lambda event: self._entry_virtual_event(event, "<<Cut>>"), add="+")
+        entry.bind("<Control-X>", lambda event: self._entry_virtual_event(event, "<<Cut>>"), add="+")
+        entry.bind("<Control-a>", self._select_all_entry_shortcut, add="+")
+        entry.bind("<Control-A>", self._select_all_entry_shortcut, add="+")
+        entry.bind("<Control-Insert>", lambda event: self._entry_virtual_event(event, "<<Copy>>"), add="+")
+        entry.bind("<Shift-Insert>", lambda event: self._entry_virtual_event(event, "<<Paste>>"), add="+")
+        entry.bind("<Shift-Delete>", lambda event: self._entry_virtual_event(event, "<<Cut>>"), add="+")
+
+    @staticmethod
+    def _entry_virtual_event(event: tk.Event, virtual_event: str) -> str:
+        try:
+            event.widget.event_generate(virtual_event)
+        except tk.TclError:
+            pass
+        return "break"
+
+    def _select_all_entry_shortcut(self, event: tk.Event | None = None) -> str:
+        self._select_all_entry_text()
+        return "break"
+
+    def _select_all_entry_text(self) -> None:
+        entry = getattr(self, "_context_entry", None) or self.focus_get()
+        if entry is None:
+            return
+        try:
+            entry.selection_range(0, "end")
+            entry.icursor("end")
+            entry.focus_set()
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _entry_menu_action(self, virtual_event: str) -> None:
+        entry = getattr(self, "_context_entry", None) or self.focus_get()
+        if entry is None:
+            return
+        try:
+            entry.focus_set()
+            entry.event_generate(virtual_event)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _show_entry_context_menu(self, event: tk.Event) -> str:
+        self._context_entry = event.widget
+        try:
+            self.entry_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.entry_context_menu.grab_release()
+        return "break"
+
+    def _attach_tree_copy_menu(self, tree: ttk.Treeview, id_columns: tuple[int, ...]) -> None:
+        """Включает копирование ID из строки таблицы по Ctrl+C и правому клику."""
+        if not hasattr(self, "tree_context_menu"):
+            self.tree_context_menu = tk.Menu(self, tearoff=False)
+            self.tree_context_menu.add_command(
+                label="Копировать ID", command=self._copy_context_tree_ids)
+            self.tree_context_menu.add_command(
+                label="Копировать всю строку", command=self._copy_context_tree_row)
+
+        tree.bind(
+            "<Control-c>",
+            lambda event, target=tree, columns=id_columns: self._copy_tree_ids(target, columns),
+            add="+",
+        )
+        tree.bind(
+            "<Control-C>",
+            lambda event, target=tree, columns=id_columns: self._copy_tree_ids(target, columns),
+            add="+",
+        )
+        tree.bind(
+            "<Button-3>",
+            lambda event, target=tree, columns=id_columns: self._show_tree_context_menu(
+                event, target, columns),
+            add="+",
+        )
+
+    def _show_tree_context_menu(
+        self, event: tk.Event, tree: ttk.Treeview, id_columns: tuple[int, ...]
+    ) -> str:
+        item = tree.identify_row(event.y)
+        if item:
+            tree.selection_set(item)
+            tree.focus(item)
+        self._context_tree = tree
+        self._context_tree_item = item or (tree.selection()[0] if tree.selection() else "")
+        self._context_tree_id_columns = id_columns
+        try:
+            self.tree_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.tree_context_menu.grab_release()
+        return "break"
+
+    def _copy_tree_ids(self, tree: ttk.Treeview, id_columns: tuple[int, ...]) -> str:
+        selection = tree.selection()
+        item = selection[0] if selection else tree.focus()
+        if not item:
+            return "break"
+        values = tree.item(item, "values")
+        ids = [
+            re.sub(r"[\\s,]", "", str(values[index]))
+            for index in id_columns
+            if index < len(values) and str(values[index]).strip()
+        ]
+        if ids:
+            self.clipboard_clear()
+            self.clipboard_append("\\t".join(ids))
+            self.update_idletasks()
+            self.status_var.set("ID скопирован в буфер обмена.")
+        return "break"
+
+    def _copy_context_tree_ids(self) -> None:
+        tree = getattr(self, "_context_tree", None)
+        if tree is not None:
+            self._copy_tree_ids(tree, self._context_tree_id_columns)
+
+    def _copy_context_tree_row(self) -> None:
+        tree = getattr(self, "_context_tree", None)
+        item = getattr(self, "_context_tree_item", "")
+        if tree is None or not item:
+            return
+        values = tree.item(item, "values")
+        if values:
+            self.clipboard_clear()
+            self.clipboard_append("\\t".join(str(value) for value in values))
+            self.update_idletasks()
+            self.status_var.set("Строка таблицы скопирована в буфер обмена.")
 
     def _build_log_context_menu(self) -> None:
         self.log_context_menu = tk.Menu(self, tearoff=False)
