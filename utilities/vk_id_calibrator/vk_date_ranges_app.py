@@ -161,6 +161,7 @@ class VKRestoreClient:
         self._helper_reader: threading.Thread | None = None
         self._helper_stderr_file = None
         self._post_captcha_pause = 0.0
+        self._consecutive_captcha_requests = 0
         self._closed = False
 
     def _wait(self, seconds: float) -> None:
@@ -257,8 +258,17 @@ class VKRestoreClient:
                     pass
                 self._helper_stderr_file = None
 
+    def reset_captcha_streak(self) -> None:
+        """Сбрасывает защиту между отдельными заданиями приложения."""
+        self._consecutive_captcha_requests = 0
+
     def _browser_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Отправляет RPC постоянному браузеру; сетевой запрос выполняется только через fetch."""
+        if method == "restore.init" and self._consecutive_captcha_requests >= 2:
+            raise RuntimeError(
+                "VK запросил CAPTCHA на двух последовательных ID. "
+                "Калибровка остановлена до следующего обращения к VK."
+            )
         with self._rpc_lock:
             self._ensure_helper()
             process = self._helper_process
@@ -309,11 +319,19 @@ class VKRestoreClient:
                     detail = str(result.get("error") if isinstance(result, dict) else "неизвестная ошибка")
                     raise RuntimeError(detail or "Ошибка браузерной сессии.")
 
+                if method == "restore.init":
+                    if result.get("captcha_performed"):
+                        self._consecutive_captcha_requests += 1
+                    else:
+                        self._consecutive_captcha_requests = 0
                 self._post_captcha_pause = (
                     max(self.pause, 8.0) if result.get("captcha_performed") else 0.0
                 )
                 if result.get("captcha_performed"):
-                    self.log("SmartCaptcha пройдена; повтор restore.init выполнен в том же браузерном контексте.")
+                    self.log(
+                        "SmartCaptcha пройдена в том же браузерном контексте "
+                        f"(подряд: {self._consecutive_captcha_requests})."
+                    )
                 response = result.get("response")
                 if not isinstance(response, dict):
                     raise RuntimeError("VK вернул ответ неожиданного формата.")
@@ -575,6 +593,11 @@ class CalibrationWorker:
             self.save_results()
             if result.status == "error":
                 self.emit("log", f"ID {uid:,}: ошибка запроса — {result.detail}")
+                if "captcha" in result.detail.lower():
+                    raise RuntimeError(
+                        "Калибровка остановлена из-за повторной CAPTCHA или отказа VK "
+                        "подтвердить проверку. Остальные ID не запрашивались."
+                    )
             elif result.status != "ok":
                 self.emit("log", f"ID {uid:,}: дата недоступна ({result.detail})")
             else:
@@ -686,6 +709,7 @@ class CalibrationWorker:
 
     def run(self) -> None:
         try:
+            self.client.reset_captcha_streak()
             max_id = int(self.config["max_id"])
             count = int(self.config["points"])
             api_url = str(self.config.get("api_url") or DEFAULT_API_URL)
@@ -830,6 +854,7 @@ class SingleProbeWorker:
 
     def run(self) -> None:
         try:
+            self.client.reset_captcha_streak()
             self.emit("status", f"Получение даты регистрации для ID {self.uid:,}…")
             result = self.client.get_date(self.uid, use_cache=self.use_cache)
             self.emit("single_result", result)
