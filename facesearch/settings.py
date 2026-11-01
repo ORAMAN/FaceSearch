@@ -424,7 +424,7 @@ def _load_gui_settings() -> dict[str, Any]:
             settings["group_min_similarity"] = max(0.0, min(100.0, _xml_float(
                 node.findtext("min_similarity"), settings["group_min_similarity"]
             )))
-            settings["group_candidates_per_face"] = max(1, min(10, _xml_int(
+            settings["group_candidates_per_face"] = max(1, min(50, _xml_int(
                 node.findtext("candidates_per_face"), settings["group_candidates_per_face"]
             )))
             settings["group_friend_weight"] = max(0.0, min(20.0, _xml_float(
@@ -553,7 +553,7 @@ def _save_gui_settings_data(settings: dict[str, Any]) -> None:
         0.0, min(100.0, _xml_float(settings.get("group_min_similarity"), 43.0))
     ))
     ET.SubElement(node, "candidates_per_face").text = str(max(
-        1, min(10, _xml_int(settings.get("group_candidates_per_face"), 5))
+        1, min(50, _xml_int(settings.get("group_candidates_per_face"), 5))
     ))
     ET.SubElement(node, "friend_weight").text = str(max(
         0.0, min(20.0, _xml_float(settings.get("group_friend_weight"), 8.0))
