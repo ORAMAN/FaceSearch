@@ -4930,6 +4930,8 @@ class FaceSearchGUI:
                 "group_friend_weight": float(self.gui_settings.get("group_friend_weight", 8.0)),
                 "group_common_friend_weight": float(self.gui_settings.get("group_common_friend_weight", 2.0)),
                 "group_city_weight": float(self.gui_settings.get("group_city_weight", 1.5)),
+                "group_education_weight": float(self.gui_settings.get("group_education_weight", 2.0)),
+                "group_workplace_weight": float(self.gui_settings.get("group_workplace_weight", 2.0)),
                 "group_check_vk_friends": bool(self.gui_settings.get("group_check_vk_friends", True)),
                 "group_gender_weight": float(self.gui_settings.get("group_gender_weight", 4.0)),
                 "group_profile_gender_weight": float(self.gui_settings.get("group_profile_gender_weight", 16.0)),
