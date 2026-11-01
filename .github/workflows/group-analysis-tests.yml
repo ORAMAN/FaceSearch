@@ -16,6 +16,7 @@ on:
       - "loaders/vk/vk_downloader.py"
       - "group_analysis_ui.js"
       - "tests/test_group_analysis.py"
+      - "tests/test_group_settings_persistence.py"
       - ".github/workflows/group-analysis-tests.yml"
 
 jobs:
@@ -39,4 +40,4 @@ jobs:
       - name: Check browser JavaScript syntax
         run: node --check group_analysis_ui.js
       - name: Run group analysis tests
-        run: python -m unittest discover -s tests -p "test_group_analysis.py" -v
+        run: python -m unittest discover -s tests -p "test_*.py" -v
