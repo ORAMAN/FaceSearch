@@ -1414,6 +1414,63 @@ def _import_profile_metadata_key(metadata: dict[str, Any]) -> str:
     )
 
 
+# Поля VK, описывающие конкретный файл/фотографию, а не профиль пользователя.
+_VK_IMAGE_INFO_FIELDS = frozenset({
+    "Альбом",
+    "ID альбома",
+    "ID фотографии",
+    "Дата фотографии",
+    "Размер фотографии",
+    "Описание фотографии",
+    "Лайки",
+    "Комментарии",
+    "Репосты",
+    "Просмотры",
+    "ID владельца фотографии",
+    "Ссылка на фотографию VK",
+    "Количество отметок",
+    "Тип источника",
+})
+
+
+def _prepare_import_metadata(
+    metadata: dict[str, Any],
+    source_key: str | None,
+) -> tuple[dict[str, Any], str | None, bool]:
+    """Разделяет метаданные профиля и конкретного импортируемого изображения."""
+    source_prefix = str(source_key or "").partition(":")[0].lower()
+    if source_prefix not in {"instagram", "vk"}:
+        return metadata, None, False
+
+    per_image_json = json.dumps(
+        metadata,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    if source_prefix == "instagram":
+        # Подписи, даты и счётчики относятся к публикации, не к профилю.
+        profile_metadata = {
+            "url_source": str(metadata.get("url_source") or ""),
+            "name": str(metadata.get("name") or ""),
+            "url_image": "",
+            "info": {},
+        }
+    else:
+        # В VK JSON оставляем общую информацию о пользователе, а ссылку
+        # вида https://vk.com/photo{owner_id}_{photo_id}, ID фото и прочие
+        # атрибуты снимка сохраняем отдельно в images.metadata_json.
+        profile_metadata = dict(metadata)
+        profile_metadata["url_image"] = ""
+        raw_info = metadata.get("info")
+        profile_info = dict(raw_info) if isinstance(raw_info, dict) else {}
+        for field in _VK_IMAGE_INFO_FIELDS:
+            profile_info.pop(field, None)
+        profile_metadata["info"] = profile_info
+
+    return profile_metadata, per_image_json, True
+
+
 def _saved_import_profile_metadata_key(raw_json: Any) -> str | None:
     try:
         value = json.loads(str(raw_json or ""))
@@ -2073,24 +2130,12 @@ def import_image_bundle(
     source_url = str(metadata.get("url_source") or "").strip() or None
     metadata_image_url = str(metadata.get("url_image") or "").strip() or None
     source_key = str(source_key or "").strip() or None
-    # Instagram images share a source profile but have different captions, dates,
-    # and counters. Preserve their canonical JSON per images row instead of relying
-    # only on profiles.raw_json, which is shared by every image of that profile.
-    store_per_image_metadata = bool(source_key and source_key.startswith("instagram:"))
-    per_image_metadata_json = (
-        json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
-        if store_per_image_metadata else None
+    # Every VK album photo has its own photo ID/permalink and photo-specific
+    # information. Keep that JSON on images.metadata_json, not in the shared
+    # profiles.raw_json record that is common to every image of the user.
+    profile_metadata, per_image_metadata_json, store_per_image_metadata = (
+        _prepare_import_metadata(metadata, source_key)
     )
-    # Keep the shared profile record stable across individual Instagram posts.
-    # Captions, timestamps, and counters belong to each image row, not the profile.
-    profile_metadata = metadata
-    if store_per_image_metadata:
-        profile_metadata = {
-            "url_source": source_url or "",
-            "name": str(metadata.get("name") or ""),
-            "url_image": "",
-            "info": {},
-        }
     fallback_image_url = ""
     try:
         fallback_image_url = image_path.resolve().as_uri()
