@@ -1458,6 +1458,74 @@ def _remove_dir_if_empty(path: str | Path) -> bool:
         return False
 
 
+def _vk_photo_url_identity(value: str) -> tuple[str, str] | None:
+    """Сопоставляет ссылки на один VK-файл без временных query-параметров CDN."""
+    try:
+        parts = urlsplit(str(value or "").strip())
+        host = (parts.hostname or "").lower()
+        path = unquote(parts.path or "").rstrip("/")
+    except (TypeError, ValueError):
+        return None
+    if not host or not path:
+        return None
+    return host, path
+
+
+def get_avatar_photo_record(
+    owner_id: int,
+    avatar_url: str,
+) -> dict | None:
+    """Находит объект photos.get, соответствующий текущей аватарке профиля.
+
+    users.get/groups.getById возвращают прямую CDN-ссылку, но не photo_id.
+    Ищем ту же ссылку в системном альбоме profile, чтобы построить настоящий
+    permalink вида https://vk.com/photo{owner_id}_{photo_id}.
+    """
+    avatar_identity = _vk_photo_url_identity(avatar_url)
+    if avatar_identity is None:
+        return None
+
+    with requests.Session() as session:
+        response_data = _vk_get_page(
+            "photos.get",
+            {
+                "owner_id": int(owner_id),
+                "album_id": "profile",
+                "count": 100,
+                "offset": 0,
+                "rev": 0,
+                "extended": 1,
+                "photo_sizes": 1,
+            },
+            session,
+            timeout=25,
+        )
+
+    items, _total = _response_items(response_data)
+    for photo in items:
+        if not isinstance(photo, dict):
+            continue
+        candidates = []
+        original = photo.get("orig_photo")
+        if isinstance(original, dict):
+            candidates.extend((original.get("url"), original.get("src")))
+        for size in photo.get("sizes") or []:
+            if isinstance(size, dict):
+                candidates.extend((size.get("url"), size.get("src")))
+        for field in (
+            "photo_2560", "photo_1280", "photo_807", "photo_604",
+            "photo_400_orig", "photo_200_orig", "photo_200",
+            "photo_130", "photo_100", "photo_75",
+        ):
+            candidates.append(photo.get(field))
+
+        for candidate in candidates:
+            if _vk_photo_url_identity(candidate) == avatar_identity:
+                return photo
+
+    return None
+
+
 def save_avatar_to_root(
     entity: dict, base_dir: str, is_group: bool = False
 ) -> tuple[bool, str | None, str]:
@@ -1521,12 +1589,35 @@ def save_avatar_to_root(
         os.replace(str(temp_path), str(avatar_path))
         image_created = True
 
+        # Для обычных профилей VK получаем ID именно той фотографии,
+        # чей CDN URL был возвращён как текущая аватарка. Внешний каталог
+        # вконтакте24.рф не имеет гарантированного соответствия VK photo_id.
+        avatar_photo = None
+        if not entity.get("_facesearch_catalog_url"):
+            try:
+                avatar_owner_id = -abs(int(entity.get("id"))) if is_group else abs(int(entity.get("id")))
+                avatar_photo = get_avatar_photo_record(avatar_owner_id, avatar_url)
+                if avatar_photo is None:
+                    print(
+                        f"[AVATAR-LINK-WARN] ID {entity.get('id')}: "
+                        "не удалось сопоставить URL аватарки с фотографией альбома profile; "
+                        "ссылка на снимок не добавлена."
+                    )
+            except Exception as link_exc:
+                # Отсутствие доступа к альбому не должно ломать саму загрузку аватара.
+                print(
+                    f"[AVATAR-LINK-WARN] ID {entity.get('id')}: "
+                    f"не удалось получить ID фотографии аватара: {type(link_exc).__name__}: {link_exc}"
+                )
+
         avatar_json = build_entity_json(
             entity,
             avatar_url,
             album_title="Аватар",
             album_id=-6,
             is_group=is_group,
+            photo=avatar_photo,
+            source_kind="avatar",
         )
         write_json(str(json_path), avatar_json)
         return True, None, "ok"
