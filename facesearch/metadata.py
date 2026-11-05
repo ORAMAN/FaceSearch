@@ -217,7 +217,7 @@ def metadata_json(path: str | Path) -> str:
 def vk_photo_permalink_from_source_key(source_key: Any) -> str | None:
     """Builds a VK photo permalink from the stable VK loader source key."""
     value = str(source_key or "").strip()
-    match = re.fullmatch(r"vk:(?:user|group):\\d+:photo:(-?\\d+)_(\\d+)", value, flags=re.IGNORECASE)
+    match = re.fullmatch(r"vk:(?:user|group):\d+:photo:(-?\d+)_(\d+)", value, flags=re.IGNORECASE)
     if not match:
         return None
     try:
