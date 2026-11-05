@@ -38,6 +38,7 @@ from facesearch import group_analysis
 from facesearch.indexing.embeddings import embedding_blob_to_view
 from facesearch.indexing.result_mapping import _row_to_result
 from facesearch.settings import _load_gui_settings
+from facesearch.metadata import vk_photo_permalink_from_source_key
 from facesearch.database_profiles import _load_db_profiles, _default_profile
 from facesearch.card_text_filter import (
     MAX_CARD_TEXT_FILTER_LENGTH,
@@ -4066,6 +4067,18 @@ class FaceSearchRequestHandler(BaseHTTPRequestHandler):
                     display_name = "Без имени"
             else:
                 display_name = ""
+
+            # Старые VK-записи могли быть импортированы до появления
+            # per-image metadata_json. Их source_key уже содержит owner_id/photo_id,
+            # поэтому ссылку можно восстановить без повторной загрузки альбома.
+            if source_type == "import" and isinstance(profile_info, dict):
+                if not str(profile_info.get("Ссылка на фотографию VK") or "").strip():
+                    vk_photo_url = vk_photo_permalink_from_source_key(
+                        result.get("source_key")
+                    )
+                    if vk_photo_url:
+                        profile_info = dict(profile_info)
+                        profile_info["Ссылка на фотографию VK"] = vk_photo_url
 
             profile_first_name = str(result.get("first_name") or "").strip()
             profile_last_name = str(result.get("last_name") or "").strip()
