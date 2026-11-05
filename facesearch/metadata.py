@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -211,3 +212,19 @@ def metadata_json(path: str | Path) -> str:
         ensure_ascii=False,
         separators=(",", ":"),
     )
+
+
+def vk_photo_permalink_from_source_key(source_key: Any) -> str | None:
+    """Builds a VK photo permalink from the stable VK loader source key."""
+    value = str(source_key or "").strip()
+    match = re.fullmatch(r"vk:(?:user|group):\\d+:photo:(-?\\d+)_(\\d+)", value, flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        owner_id = int(match.group(1))
+        photo_id = int(match.group(2))
+    except (TypeError, ValueError):
+        return None
+    if owner_id == 0 or photo_id <= 0:
+        return None
+    return f"https://vk.com/photo{owner_id}_{photo_id}"
