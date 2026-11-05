@@ -2766,7 +2766,22 @@ input[type=checkbox]{width:18px;height:18px;margin:0;accent-color:var(--accent);
       }else if(isLocal&&(key==="image_width"||key==="image_height")){
         rendered+=" px";
       }
-      text.textContent=rendered;row.append(label,text);
+      if(key==="Ссылка на фотографию VK"){
+        const photoUrl=safeLink(rendered);
+        if(photoUrl){
+          const link=document.createElement("a");
+          link.href=photoUrl;
+          link.target="_blank";
+          link.rel="noopener noreferrer";
+          link.textContent=rendered;
+          link.title="Открыть фотографию VK в новой вкладке";
+          row.append(label,link);
+        }else{
+          text.textContent=rendered;row.append(label,text);
+        }
+      }else{
+        text.textContent=rendered;row.append(label,text);
+      }
       box.appendChild(row);
     });
     body.appendChild(box);
